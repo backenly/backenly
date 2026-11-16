@@ -56,12 +56,14 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { CheckCircle2, Info, Layers, Lock, Loader2, Undo2, XCircle } from 'lucide-react'
+import { CheckCircle2, Info, Lock, Loader2, Undo2, XCircle } from 'lucide-react'
+import { formatTime } from '@/components/console/format'
 import { KitButton, Tag } from '@/components/inspector/kit'
 import { CodeBlock, Disclosure, Fact, Facts, Row, RowNote, ROW_TEXT, ROW_TITLE } from '@/components/autonomy/rows'
 import type { EvolutionRequestDetails } from '@/lib/evolution-engine/request'
 import type { RiskLevel } from '@/lib/evolution-engine/policy'
 import { ADMIN_ONLY, announceArchitectureChange } from './architecture-decisions'
+import { ARCHITECTURE_ICON } from './row-icons'
 
 /** The part of a queue row this component reads. PendingApproval satisfies it. */
 export interface EvolutionQueueItem {
@@ -104,13 +106,9 @@ const VERDICT_LABEL: Record<string, string> = {
 /** How long a settled row stays on screen before the queue re-reads. */
 const SETTLE_MS = 2400
 
+/** "2 min ago", the console's relative time, as plain text: the row puts nothing behind a hover. */
 function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 5) return 'just now'
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
+  return formatTime(iso, 'ago')
 }
 
 /** `details.evolution`, when it is a shape this page can read. */
@@ -225,7 +223,9 @@ export function EvolutionRequestRow({
   if (!ev) {
     return (
       <Row
-        icon={Layers}
+        lead="well"
+        icon={ARCHITECTURE_ICON}
+        id={`approval-${request.id}`}
         title={<p className={ROW_TITLE}>{request.reason || 'An architecture change is waiting'}</p>}
         actions={
           <KitButton variant="secondary" onClick={dismiss} disabled={state.phase === 'busy'}>
@@ -247,7 +247,7 @@ export function EvolutionRequestRow({
 
   if (state.phase === 'done') {
     return (
-      <Row icon={CheckCircle2} tone="done" title={<p className={ROW_TITLE}>{s.headline}</p>} className="animate-fade-in">
+      <Row lead="well" icon={ARCHITECTURE_ICON} tone="done" id={`approval-${request.id}`} title={<p className={ROW_TITLE}>{s.headline}</p>}>
         <p role="status" aria-live="polite" className={ROW_TEXT}>{state.message}</p>
       </Row>
     )
@@ -261,10 +261,11 @@ export function EvolutionRequestRow({
 
   return (
     <Row
-      icon={Layers}
-      tone={asksApproval ? 'accent' : 'attention'}
+      lead="well"
+      icon={ARCHITECTURE_ICON}
+      id={`approval-${request.id}`}
       busy={busy}
-      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+
       title={<p className={ROW_TITLE}>{s.headline}</p>}
       actions={
         <div ref={actions} className="flex flex-wrap items-center justify-end gap-2">

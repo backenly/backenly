@@ -164,8 +164,8 @@ describe('an architecture change waiting for approval', () => {
     // finding types, a name match presented as behaviour, internal state names.
     const text = container.textContent ?? ''
     expect(text).not.toContain('CREATE TABLE')
-    // No number at all, the row's own "2m ago" aside.
-    expect(text.replace(/\b\d+[smhd] ago/, '')).not.toMatch(/\d/)
+    // No number at all, the row's own "2 min ago" aside.
+    expect(text.replace(/\b\d+ (?:s|min|h|d) ago/, '')).not.toMatch(/\d/)
     for (const technical of ['overlap', 'sampled', 'exclusive lock', 'request(s)', 'time(s)', 'missing_index', 'named for', 'one refund per order']) {
       expect(text).not.toContain(technical)
     }
@@ -498,9 +498,13 @@ describe('in the "Waiting on you" queue', () => {
     const header = screen.getByText('Waiting on you').parentElement!
     expect(header.textContent).toContain('3')
     expect(header.textContent).not.toMatch(/in \d+ issue/)
-    // The ordinary finding still renders as its own row, with its severity and
-    // its own fix. Its type is not on the row: the title says it in words.
-    const ordinary = screen.getByText('Warning').closest('li')!
+    // The ordinary finding still renders as its own row, with its own fix. Its
+    // type is not on the row: the title says it in words. A warning carries no
+    // severity word (only Critical is written out, 2026-11-16).
+    const ordinary = document.getElementById(
+      screen.getAllByRole('listitem').find((li) => li.id.startsWith('finding-'))!.id,
+    )!
+    expect(within(ordinary).queryByText('Warning')).toBeNull()
     expect(within(ordinary).queryByText('missing_index')).toBeNull()
     expect(within(ordinary).getByRole('button', { name: /Approve & fix/ })).toBeTruthy()
   })

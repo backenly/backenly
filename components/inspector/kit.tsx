@@ -26,6 +26,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   forwardRef,
@@ -34,7 +35,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import Link from 'next/link'
-import { Check, ChevronRight, Copy, Info, MoreHorizontal, X, type LucideIcon } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Copy, Eye, EyeOff, Info, MoreHorizontal, X, type LucideIcon } from 'lucide-react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   CANVAS,
@@ -59,6 +61,7 @@ import {
   T_SECTION,
   WELL,
 } from '@/components/console/tokens'
+import { undoSentence, type Undoable } from '@/components/console/undo'
 
 type IconLike = LucideIcon | ComponentType<{ className?: string; strokeWidth?: number }>
 
@@ -147,7 +150,7 @@ export function KitCardHeader({
   className?: string
 }) {
   return (
-    <div className={`flex items-center justify-between gap-3 border-b ${RULE} px-4 py-3 ${className}`}>
+    <div className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b ${RULE} px-4 py-3 ${className}`}>
       <div className="min-w-0">
         <h3 className="text-[13px] font-medium leading-[20px] tracking-[-0.006em] text-zinc-100">{title}</h3>
         {description && <p className="mt-0.5 text-[12px] leading-[17px] text-faint">{description}</p>}
@@ -199,29 +202,31 @@ export function SectionTitle({
 
 export type StatusTone = 'operational' | 'managed' | 'paused' | 'attention' | 'failed' | 'beta' | 'neutral'
 
+// Status is monochrome: brightness carries it, never hue. White asks for the
+// person (waiting, failed), mid grey is normal (live), dim is quiet.
 const DOT: Record<StatusTone, string> = {
-  operational: 'bg-emerald-400',
+  operational: 'bg-zinc-300',
   managed:     'bg-zinc-500',
   paused:      'bg-zinc-600',
-  attention:   'bg-amber-400',
-  failed:      'bg-rose-400',
+  attention:   'bg-zinc-50',
+  failed:      'bg-zinc-50',
   beta:        'bg-violet-300',
   neutral:     'bg-zinc-600',
 }
 
-// Neutral text for calm states; a tinted label only where the state asks for
-// action, so the eye lands on what needs it.
+// Grey text for calm states; a white, medium label only where the state asks
+// for action, so the eye lands on what needs it.
 const DOT_TEXT: Record<StatusTone, string> = {
   operational: 'text-zinc-300',
   managed:     'text-zinc-400',
   paused:      'text-faint',
-  attention:   'text-amber-200',
-  failed:      'text-rose-300',
+  attention:   'font-medium text-zinc-50',
+  failed:      'font-medium text-zinc-50',
   beta:        'text-violet-200',
   neutral:     'text-zinc-400',
 }
 
-/** A status: coloured dot, plain label. `pulse` only for a genuinely live stream. */
+/** A status: a dot and a plain label. `pulse` only for a genuinely live stream. */
 export function StatusDot({
   tone = 'neutral',
   label,
@@ -281,24 +286,28 @@ interface StatTileProps {
   value: ReactNode
   /** Optional small delta line (e.g. "+12% · 24h") */
   delta?: { value: number; suffix?: string }
-  /** Semantic tone for the numeral; defaults to neutral white */
+  /**
+   * Semantic tone for the numeral; defaults to neutral white. The hue names
+   * are older call sites' words: status is monochrome, so `emerald` (good)
+   * is mid grey and `amber` (attention) is white.
+   */
   tone?: 'violet' | 'emerald' | 'sky' | 'amber' | 'neutral'
   loading?: boolean
 }
 
 const TONE_TEXT = {
   violet:  'text-violet-200',
-  emerald: 'text-emerald-300',
+  emerald: 'text-zinc-300',
   sky:     'text-zinc-100',
-  amber:   'text-amber-200',
+  amber:   'text-zinc-50',
   neutral: 'text-zinc-50',
 } as const
 
 const TONE_ICON = {
   violet:  'text-violet-300/80',
-  emerald: 'text-emerald-300/80',
+  emerald: 'text-zinc-300',
   sky:     'text-zinc-400',
-  amber:   'text-amber-300/80',
+  amber:   'text-zinc-50',
   neutral: 'text-zinc-500',
 } as const
 
@@ -323,8 +332,9 @@ export function StatTile({ label, value, delta, tone = 'neutral', loading }: Sta
 function Delta({ value, suffix }: { value: number; suffix?: string }) {
   if (!value) return <span className="text-[12px] tabular-nums text-faint">±0%</span>
   const up = value > 0
+  // The sign carries the direction; a fall is the one in white.
   return (
-    <span className={`text-[12px] font-medium tabular-nums ${up ? 'text-emerald-300' : 'text-rose-300'}`}>
+    <span className={`text-[12px] font-medium tabular-nums ${up ? 'text-zinc-300' : 'text-zinc-50'}`}>
       {up ? '+' : ''}
       {value}%{suffix ? ` ${suffix}` : ''}
     </span>
@@ -364,8 +374,8 @@ export function Stat({
   tone?: 'neutral' | 'good' | 'warn' | 'bad'
   loading?: boolean
 }) {
-  const valueTone =
-    tone === 'good' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-200' : tone === 'bad' ? 'text-rose-300' : 'text-zinc-50'
+  // Monochrome: a good value is mid grey, the rest stay white; the hint says why.
+  const valueTone = tone === 'good' ? 'text-zinc-300' : 'text-zinc-50'
   return (
     <div className={`${PLATE} min-w-0 px-4 py-3.5`}>
       <p className="truncate text-[12px] leading-[16px] text-faint">{label}</p>
@@ -619,12 +629,13 @@ export function Tag({
   mono?: boolean
   className?: string
 }) {
+  // Status tags are neutral boxes; the text's brightness carries the state.
   const tones = {
     neutral: 'border-white/[0.09] bg-white/[0.03] text-zinc-400',
     violet:  'border-violet-300/20 bg-violet-400/[0.08] text-violet-200',
-    good:    'border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200',
-    warn:    'border-amber-400/20 bg-amber-400/[0.07] text-amber-200',
-    bad:     'border-rose-400/25 bg-rose-400/[0.07] text-rose-200',
+    good:    'border-white/[0.08] bg-white/[0.03] text-zinc-300',
+    warn:    'border-white/[0.08] bg-white/[0.03] text-zinc-50',
+    bad:     'border-white/[0.08] bg-white/[0.03] text-zinc-50',
   }
   return (
     <span
@@ -690,7 +701,7 @@ interface KitButtonProps {
   children: ReactNode
   onClick?: () => void
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger'
-  size?: 'sm' | 'md'
+  size?: 'sm' | 'md' | 'lg'
   icon?: IconLike
   iconRight?: IconLike
   disabled?: boolean
@@ -707,6 +718,8 @@ export const BUTTON_BASE = `inline-flex items-center justify-center gap-1.5 whit
 export const BUTTON_SIZES = {
   sm: 'h-[28px] px-2.5 text-[12px]',
   md: 'h-[32px] px-3 text-[13px]',
+  /** A page's one primary action (New project, New case): the site's button, scaled for a tool. */
+  lg: 'h-[36px] px-[14px] text-[13.5px]',
 } as const
 
 /**
@@ -717,7 +730,7 @@ export const BUTTON_SIZES = {
  */
 export const BUTTON_VARIANTS = {
   // White on dark: the landing page's primary recipe, scaled for a tool.
-  primary:   'bg-white font-semibold text-zinc-950 shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_1px_2px_rgba(0,0,0,0.4)] hover:bg-zinc-200 disabled:bg-white/[0.06] disabled:text-zinc-500 disabled:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]',
+  primary:   'bg-white text-zinc-950 hover:bg-zinc-200 disabled:bg-white/[0.06] disabled:text-zinc-500 disabled:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]',
   secondary: 'border border-white/[0.10] bg-white/[0.04] text-zinc-100 hover:border-white/[0.16] hover:bg-white/[0.07] disabled:border-white/[0.07] disabled:bg-transparent disabled:text-zinc-500',
   ghost:     'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100 disabled:text-zinc-600',
   danger:    'border border-rose-400/25 bg-rose-500/[0.08] text-rose-200 hover:border-rose-400/40 hover:bg-rose-500/[0.14] disabled:border-rose-400/15 disabled:bg-transparent disabled:text-rose-200/40',
@@ -942,6 +955,7 @@ export function Segmented<T extends string>({
 
 interface ListRowProps {
   icon?: IconLike
+  /** As StatTile's tone: status is monochrome, so `emerald` is mid grey and `amber` white. */
   iconTone?: 'violet' | 'emerald' | 'sky' | 'amber' | 'neutral'
   title: ReactNode
   subtitle?: ReactNode
@@ -992,6 +1006,7 @@ export function PageHeader({
   meta,
   tabs,
   breadcrumb,
+  flush = false,
   className = '',
 }: {
   title: ReactNode
@@ -1001,12 +1016,19 @@ export function PageHeader({
   tabs?: ReactNode
   /** A <Breadcrumbs> trail above the title, for a page one level down. */
   breadcrumb?: ReactNode
+  /**
+   * The header sits inside a page that already sets the width and gutter
+   * (the account pages wrap everything in PAGE_WIDTH + PAGE_GUTTER), so it
+   * adds neither. Replaces the `!px-0` override those pages used to pass.
+   */
+  flush?: boolean
   className?: string
 }) {
+  // Spacing in px: the root font is 13px, so rem steps (pt-7, pt-9) rendered at 81%.
   return (
-    <header className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-7 sm:pt-9 ${className}`}>
+    <header className={`${flush ? '' : `${PAGE_WIDTH} ${PAGE_GUTTER}`} pt-[28px] sm:pt-[36px] ${className}`}>
       {breadcrumb && <div className="mb-3">{breadcrumb}</div>}
-      <div className={`flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between ${tabs ? 'pb-5' : 'pb-6'}`}>
+      <div className={`flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between ${tabs ? 'pb-[20px]' : 'pb-[24px]'}`}>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className={`${T_PAGE} [text-wrap:balance]`}>{title}</h1>
@@ -1132,7 +1154,8 @@ export function KitColumns({ main, side, sideWidth = 'lg:w-80' }: { main: ReactN
 /**
  * One setting, or one small group of them: title, a sentence, the control,
  * and a footer that carries the hint on the left and the action on the right.
- * `danger` tints the edge for irreversible actions.
+ * `danger` sets the footer of an irreversible action in a neutral box; the
+ * destructive button in it is what carries rose, not the card.
  *
  * Pass `onSubmit` and the card becomes a form, so Enter in any field submits.
  */
@@ -1165,11 +1188,10 @@ export function SettingsCard({
   layout?: 'stacked' | 'split'
   className?: string
 }) {
-  const edge = danger ? 'border-rose-400/25' : EDGE
   const split = layout === 'split'
   const heading = (
     <>
-      <h3 className={`text-[15px] font-semibold leading-[22px] tracking-[-0.012em] ${danger && split ? 'text-rose-100' : 'text-zinc-50'}`}>
+      <h3 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-50">
         {title}
       </h3>
       {description && (
@@ -1188,7 +1210,7 @@ export function SettingsCard({
       {(footer || actions) && (
         <div
           className={`flex flex-col gap-3 border-t px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 ${
-            danger ? 'border-rose-400/20 bg-rose-500/[0.04]' : `${RULE} bg-white/[0.015]`
+            danger ? 'border-white/[0.08] bg-white/[0.03]' : `${RULE} bg-white/[0.015]`
           }`}
         >
           <div className="min-w-0 text-[12.5px] leading-[18px] text-faint">{footer}</div>
@@ -1197,7 +1219,7 @@ export function SettingsCard({
       )}
     </>
   )
-  const cls = `overflow-hidden ${PLATE} border ${edge} ${R_PANEL} ${split ? '' : className}`
+  const cls = `overflow-hidden ${PLATE} border ${EDGE} ${R_PANEL} ${split ? '' : className}`
   const card = onSubmit ? (
     <form
       className={cls}
@@ -1290,11 +1312,13 @@ interface KitNoteProps {
 }
 
 export function KitNote({ icon: Icon = Check, tone = 'info', title, children, actions }: KitNoteProps) {
+  // Neutral boxes for every tone; the icon's brightness carries it: grey for
+  // info and success, white for a warning or an error.
   const tones = {
-    info:    { box: 'border-white/[0.08] bg-white/[0.025]', icon: 'text-zinc-400' },
-    warn:    { box: 'border-amber-400/20 bg-amber-400/[0.05]', icon: 'text-amber-300' },
-    success: { box: 'border-emerald-400/20 bg-emerald-400/[0.05]', icon: 'text-emerald-300' },
-    danger:  { box: 'border-rose-400/25 bg-rose-500/[0.06]', icon: 'text-rose-300' },
+    info:    { box: 'border-white/[0.08] bg-white/[0.025]', icon: 'text-zinc-300' },
+    warn:    { box: 'border-white/[0.08] bg-white/[0.03]', icon: 'text-zinc-50' },
+    success: { box: 'border-white/[0.08] bg-white/[0.03]', icon: 'text-zinc-300' },
+    danger:  { box: 'border-white/[0.08] bg-white/[0.03]', icon: 'text-zinc-50' },
   }
   const t = tones[tone]
   return (
@@ -1328,8 +1352,9 @@ export function NoticeStrip({
   children: ReactNode
   action?: ReactNode
 }) {
-  const iconTone = { neutral: 'text-zinc-500', attention: 'text-amber-300', danger: 'text-rose-300' }[tone]
-  const wash = { neutral: '', attention: 'bg-amber-400/[0.03]', danger: 'bg-rose-500/[0.04]' }[tone]
+  // Monochrome: a white icon over a neutral wash asks for the person.
+  const iconTone = { neutral: 'text-zinc-500', attention: 'text-zinc-50', danger: 'text-zinc-50' }[tone]
+  const wash = { neutral: '', attention: 'bg-white/[0.03]', danger: 'bg-white/[0.03]' }[tone]
   return (
     <div
       role={tone === 'neutral' ? undefined : 'alert'}
@@ -1351,7 +1376,7 @@ export function KitChecklist({ items }: { items: string[] }) {
     <ul className="space-y-2.5">
       {items.map((line) => (
         <li key={line} className="flex items-start gap-2.5">
-          <Check className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-emerald-400/80" strokeWidth={2} />
+          <Check className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-zinc-300" strokeWidth={2} />
           <p className="text-[13px] leading-[20px] text-zinc-400">{line}</p>
         </li>
       ))}
@@ -1413,7 +1438,7 @@ export function KitField({
   )
 }
 
-export const INPUT_BASE = `w-full ${WELL} border ${EDGE} ${R_CONTROL} text-[16px] text-zinc-100 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow] duration-150 hover:border-white/[0.12] focus:border-violet-300/50 focus:outline-none focus:ring-[3px] focus:ring-violet-400/15 disabled:opacity-50 sm:text-[13px]`
+export const INPUT_BASE = `w-full ${WELL} border ${EDGE} ${R_CONTROL} text-[16px] text-zinc-100 placeholder:text-faint shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow] duration-150 hover:border-white/[0.12] focus:border-white/30 focus:outline-none focus:ring-[3px] focus:ring-white/[0.08] disabled:opacity-50 sm:text-[13px]`
 
 export const KitInput = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(function KitInput(
   props,
@@ -1426,6 +1451,109 @@ export const KitInput = forwardRef<HTMLInputElement, React.InputHTMLAttributes<H
 export function KitTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   const { className = '', ...rest } = props
   return <textarea {...rest} className={`${INPUT_BASE} resize-none px-3 py-2 leading-[20px] ${className}`} />
+}
+
+/**
+ * A native select dressed like the console's inputs: its own chevron instead
+ * of the operating system's, and dark option rows (Windows paints them white
+ * otherwise). Native underneath, so the keyboard, screen readers and a phone's
+ * own picker all still work.
+ *
+ * `variant="quiet"` is the in-row version (a role or access choice inside a
+ * table row): no outline until hovered or focused, so a row of them reads as
+ * values rather than a form. Phones keep 16px text so iOS does not zoom.
+ */
+export const KitSelect = forwardRef<
+  HTMLSelectElement,
+  React.SelectHTMLAttributes<HTMLSelectElement> & { variant?: 'field' | 'quiet'; wrapperClassName?: string }
+>(function KitSelect(props, ref) {
+  const { className = '', variant = 'field', wrapperClassName = '', children, ...rest } = props
+  const look =
+    variant === 'quiet'
+      ? `h-[30px] ${R_CONTROL} border border-transparent bg-transparent pl-2.5 pr-7 text-[16px] font-normal text-zinc-200 transition-[background-color,border-color] duration-150 hover:border-white/[0.10] hover:bg-white/[0.03] focus:border-white/30 focus:outline-none focus:ring-[3px] focus:ring-white/[0.08] sm:text-[13px]`
+      : `${INPUT_BASE} h-[36px] pl-3 pr-8 sm:h-[32px]`
+  return (
+    <div className={`relative ${variant === 'quiet' ? 'inline-flex' : 'w-full'} ${wrapperClassName}`}>
+      <select
+        ref={ref}
+        {...rest}
+        className={`${look} w-full cursor-pointer appearance-none disabled:cursor-not-allowed disabled:opacity-60 [&>option]:bg-[#16171b] [&>option]:text-zinc-100 ${className}`}
+      >
+        {children}
+      </select>
+      <ChevronDown
+        aria-hidden
+        className={`pointer-events-none absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 ${variant === 'quiet' ? 'right-2' : 'right-2.5'}`}
+        strokeWidth={2}
+      />
+    </div>
+  )
+})
+
+/** The states a glyph can mark. `idle` is a project that is not published yet. */
+export type GlyphState = 'live' | 'idle' | 'busy' | 'paused' | 'failed' | 'waiting' | 'done'
+
+// Monochrome: white asks for the person (waiting, failed, deploying), mid grey
+// is normal (live), dim is quiet (not published, done a while ago).
+const GLYPH_TONE: Record<GlyphState, string> = {
+  live: 'text-zinc-300',
+  idle: 'text-zinc-500',
+  busy: 'text-zinc-50',
+  paused: 'text-zinc-400',
+  failed: 'text-zinc-50',
+  waiting: 'text-zinc-50',
+  done: 'text-zinc-500',
+}
+
+/**
+ * A state as a shape, the way a CI log marks its lines: live ●, not published
+ * ○, deploying ◐, paused ‖, failed ✕, waiting on you ◆, done ✓. The shape
+ * carries the state, never hue; brightness only confirms it. The word is
+ * always there for screen readers, and shown (`showLabel`) only where the
+ * state asks the person to act, so a list does not repeat "Live" on every row.
+ */
+export function StatusGlyph({
+  state,
+  label,
+  showLabel = false,
+  className = '',
+}: {
+  state: GlyphState
+  label: string
+  showLabel?: boolean
+  className?: string
+}) {
+  const tone = GLYPH_TONE[state]
+  return (
+    <span className={`inline-flex flex-shrink-0 items-center gap-1.5 ${className}`}>
+      <svg aria-hidden viewBox="0 0 12 12" className={`h-[12px] w-[12px] flex-shrink-0 ${tone}`} fill="none">
+        {state === 'live' && <circle cx="6" cy="6" r="4" fill="currentColor" />}
+        {state === 'idle' && <circle cx="6" cy="6" r="3.6" stroke="currentColor" strokeWidth="1.5" />}
+        {state === 'busy' && (
+          <>
+            <circle cx="6" cy="6" r="3.6" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M6 2.4a3.6 3.6 0 0 1 0 7.2Z" fill="currentColor" />
+          </>
+        )}
+        {state === 'paused' && (
+          <>
+            <rect x="3" y="2.5" width="2" height="7" rx="0.6" fill="currentColor" />
+            <rect x="7" y="2.5" width="2" height="7" rx="0.6" fill="currentColor" />
+          </>
+        )}
+        {state === 'failed' && <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />}
+        {state === 'waiting' && <path d="M6 1.8 10.2 6 6 10.2 1.8 6Z" fill="currentColor" />}
+        {state === 'done' && <path d="M2.6 6.2 5 8.5l4.4-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />}
+      </svg>
+      {showLabel ? (
+        <span className={`text-[12.5px] font-medium leading-[16px] ${state === 'failed' || state === 'waiting' || state === 'busy' ? 'text-zinc-50' : 'text-zinc-300'}`}>
+          {label}
+        </span>
+      ) : (
+        <span className="sr-only">{label}</span>
+      )}
+    </span>
+  )
 }
 
 // ─── "More" trailing link (used in card headers) ─────────────────────────────
@@ -1495,7 +1623,7 @@ export function CopyButton({
       className={`inline-flex h-[26px] flex-shrink-0 items-center justify-center gap-1.5 ${R_CONTROL} ${
         showLabel ? 'px-2' : 'w-[26px]'
       } text-[12px] font-medium transition-colors duration-150 ${FOCUS} ${
-        copied ? 'text-emerald-300' : `${showLabel ? 'text-faint' : 'text-zinc-500'} hover:bg-white/[0.06] hover:text-zinc-100`
+        copied ? 'text-zinc-300' : `${showLabel ? 'text-faint' : 'text-zinc-500'} hover:bg-white/[0.06] hover:text-zinc-100`
       } ${className}`}
     >
       {copied ? <Check className="h-3.5 w-3.5" strokeWidth={2.25} /> : <Copy className="h-3.5 w-3.5" strokeWidth={1.75} />}
@@ -1504,12 +1632,93 @@ export function CopyButton({
   )
 }
 
-/** A read-only machine value (an id, a URL, a key prefix) with a copy button. */
-export function CopyField({ value, display, className = '' }: { value: string; display?: ReactNode; className?: string }) {
+/**
+ * A read-only value with a copy button. Copy always copies the whole value,
+ * whatever is shown.
+ *
+ *   <CopyField value={url} />                          the field: a sunken mono box, cut with … when long
+ *   <CopyField value={url} prefix="GET" wrap />        a method before it; long values wrap instead
+ *   <CopyField value={password} masked />              •••• until Show; Copy still copies the password
+ *   <CopyField value={id} variant="inline" />          no box: the value and a small copy button, in a row of facts
+ *   <CopyField value={region} mono={false} />          words, not machine text
+ */
+export function CopyField({
+  value,
+  display,
+  className = '',
+  variant = 'field',
+  mono = true,
+  masked = false,
+  prefix,
+  wrap = false,
+  label = 'Copy',
+}: {
+  value: string
+  /** What to show instead of the value (a shortened URL). Copy still copies `value`. */
+  display?: ReactNode
+  className?: string
+  variant?: 'field' | 'inline'
+  /** Machine text (the default): ids, keys, URLs. False for words. */
+  mono?: boolean
+  /** Hidden behind dots until the person asks to see it. */
+  masked?: boolean
+  /** A short word before the value, such as an HTTP method. */
+  prefix?: string
+  /** Long values wrap instead of being cut. */
+  wrap?: boolean
+  /** The copy button's accessible name: "Copy endpoint URL". */
+  label?: string
+}) {
+  const [shown, setShown] = useState(false)
+  const hidden = masked && !shown
+  // A fixed run of dots, so the mask does not say how long the secret is.
+  const text = hidden ? '••••••••••••••••' : display ?? value
+  const textCls = `min-w-0 flex-1 ${mono ? 'font-mono text-[12px]' : 'text-[13px]'} ${hidden ? 'tracking-[0.12em] text-faint' : 'text-zinc-300'} ${
+    wrap ? 'whitespace-pre-wrap break-all' : 'truncate'
+  }`
+  const reveal = masked && (
+    <button
+      type="button"
+      onClick={() => setShown((s) => !s)}
+      aria-pressed={shown}
+      aria-label={shown ? 'Hide value' : 'Show value'}
+      title={shown ? 'Hide' : 'Show'}
+      className={`inline-flex h-[26px] w-[26px] flex-shrink-0 items-center justify-center ${R_CONTROL} text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 ${FOCUS}`}
+    >
+      {shown ? <EyeOff className="h-3.5 w-3.5" strokeWidth={1.75} /> : <Eye className="h-3.5 w-3.5" strokeWidth={1.75} />}
+    </button>
+  )
+  const tag = prefix && (
+    <span className="inline-flex h-[18px] flex-shrink-0 items-center rounded-[4px] border border-white/[0.10] bg-white/[0.04] px-[5px] font-mono text-[10.5px] font-medium leading-none text-zinc-300">
+      {prefix}
+    </span>
+  )
+  if (variant === 'inline') {
+    return (
+      <span className={`inline-flex min-w-0 max-w-full items-center gap-1.5 ${className}`}>
+        {tag}
+        {mono ? <code className={textCls}>{text}</code> : <span className={textCls}>{text}</span>}
+        {reveal}
+        <CopyButton value={value} label={label} className="!h-[22px] !w-[22px]" />
+      </span>
+    )
+  }
   return (
-    <div className={`flex h-[34px] min-w-0 items-center gap-2 ${WELL} border ${EDGE} ${R_CONTROL} pl-3 pr-1 ${className}`}>
-      <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-300">{display ?? value}</code>
-      <CopyButton value={value} />
+    <div
+      className={`flex min-w-0 gap-2 ${WELL} border ${EDGE} ${R_CONTROL} pl-3 pr-1 ${
+        wrap ? 'min-h-[34px] items-start py-[4px]' : 'h-[34px] items-center'
+      } ${className}`}
+    >
+      {tag && <span className={wrap ? 'pt-[4px]' : ''}>{tag}</span>}
+      {mono ? (
+        <code className={`${textCls} ${wrap ? 'py-[4px] leading-[18px]' : ''}`}>{text}</code>
+      ) : (
+        <span className={`${textCls} ${wrap ? 'py-[3px] leading-[20px]' : ''}`}>{text}</span>
+      )}
+      <span className="flex flex-shrink-0 items-center">
+        {reveal}
+        <CopyButton value={value} label={label} />
+      </span>
     </div>
   )
 }
@@ -1552,12 +1761,14 @@ export function AgentPrompt({
 // ─── Menus ───────────────────────────────────────────────────────────────────
 
 /** Closes a menu on an outside click or Escape. Attach the ref to the wrapper. */
-export function useDismiss(open: boolean, close: () => void) {
+export function useDismiss(open: boolean, close: () => void, also?: React.RefObject<HTMLElement | null>) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) close()
+      const target = e.target as Node
+      if (ref.current?.contains(target) || also?.current?.contains(target)) return
+      close()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close()
@@ -1568,7 +1779,7 @@ export function useDismiss(open: boolean, close: () => void) {
       document.removeEventListener('mousedown', onDown)
       window.removeEventListener('keydown', onKey)
     }
-  }, [open, close])
+  }, [open, close, also])
   return ref
 }
 
@@ -1576,19 +1787,31 @@ export function MenuPanel({
   children,
   align = 'left',
   width = 'w-[260px]',
+  placement,
 }: {
   children: ReactNode
   align?: 'left' | 'right'
   width?: string
+  /**
+   * Set when the panel is placed by its caller (OverflowMenu renders it in a
+   * portal with fixed coordinates): it then carries no position of its own
+   * and only says which way it opened, for the animation's origin.
+   */
+  placement?: 'below' | 'above'
 }) {
+  const up = placement === 'above'
+  const origin = `${up ? 'origin-bottom' : 'origin-top'}-${align === 'right' ? 'right' : 'left'}`
+  const position = placement
+    ? ''
+    : `absolute top-full z-40 mt-1.5 ${align === 'right' ? 'right-0' : 'left-0'}`
   return (
     <motion.div
       role="menu"
-      initial={{ opacity: 0, y: -4, scale: 0.98 }}
+      initial={{ opacity: 0, y: up ? 4 : -4, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -4, scale: 0.98 }}
+      exit={{ opacity: 0, y: up ? 4 : -4, scale: 0.98 }}
       transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-      className={`absolute top-full z-40 mt-1.5 ${align === 'right' ? 'right-0 origin-top-right' : 'left-0 origin-top-left'} ${width} overflow-hidden rounded-[10px] ${RAISE} ${FLOAT} p-1`}
+      className={`${position} ${origin} ${width} overflow-hidden rounded-[10px] ${RAISE} ${FLOAT} p-1`}
     >
       {children}
     </motion.div>
@@ -1661,13 +1884,72 @@ export function OverflowMenu({
 }) {
   const [open, setOpen] = useState(false)
   const close = useCallback(() => setOpen(false), [])
-  const ref = useDismiss(open, close)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const ref = useDismiss(open, close, panelRef)
+  // The menu is drawn in a portal at fixed coordinates, so a panel with
+  // overflow-hidden (every list panel) can no longer clip it, and it opens
+  // upward when the row sits near the bottom of the screen.
+  const [place, setPlace] = useState<{ top?: number; bottom?: number; right: number } | null>(null)
+  const measure = useCallback(() => {
+    const trigger = ref.current
+    if (!trigger) return
+    const r = trigger.getBoundingClientRect()
+    const estimate = items.length * 34 + 16
+    const below = window.innerHeight - r.bottom
+    const up = below < estimate && r.top > below
+    const right = Math.max(8, window.innerWidth - r.right)
+    setPlace(up ? { bottom: window.innerHeight - r.top + 6, right } : { top: r.bottom + 6, right })
+  }, [ref, items.length])
+  useLayoutEffect(() => {
+    if (open) measure()
+  }, [open, measure])
+  useEffect(() => {
+    if (!open) return
+    // A fixed menu would drift from its row on scroll; close it instead, as native menus do.
+    const onScroll = (e: Event) => {
+      if (panelRef.current && e.target instanceof Node && panelRef.current.contains(e.target)) return
+      setOpen(false)
+    }
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', close)
+    // Keyboard: focus moves into the menu (it no longer follows its button in the page order).
+    const first = panelRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
+    first?.focus()
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', close)
+    }
+  }, [open, close, place])
+  const onMenuKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(panelRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [])
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const next = e.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length
+      items[next]?.focus()
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault()
+      items[e.key === 'Home' ? 0 : items.length - 1]?.focus()
+    } else if (e.key === 'Tab' || e.key === 'Escape') {
+      e.preventDefault()
+      setOpen(false)
+      ref.current?.querySelector<HTMLElement>('button')?.focus()
+    }
+  }
+  const up = place?.bottom !== undefined
   return (
     <div className="relative" ref={ref}>
       <IconButton icon={MoreHorizontal} label={label} onClick={() => setOpen((o) => !o)} disabled={disabled} active={open} />
-      <AnimatePresence>
-        {open && (
-          <MenuPanel align="right" width={width}>
+      {typeof document !== 'undefined' &&
+        createPortal(
+          <AnimatePresence>
+            {open && place && (
+              <div
+                ref={panelRef}
+                onKeyDown={onMenuKey}
+                style={{ position: 'fixed', top: place.top, bottom: place.bottom, right: place.right, zIndex: 60 }}
+              >
+          <MenuPanel align="right" width={width} placement={up ? 'above' : 'below'}>
             {items.map((item, i) =>
               'separator' in item ? (
                 <MenuSeparator key={`sep-${i}`} />
@@ -1687,8 +1969,11 @@ export function OverflowMenu({
               ),
             )}
           </MenuPanel>
+              </div>
+            )}
+          </AnimatePresence>,
+          document.body,
         )}
-      </AnimatePresence>
     </div>
   )
 }
@@ -1835,6 +2120,21 @@ interface KitConfirmDialogProps {
   danger?: boolean
   busy?: boolean
   children?: ReactNode
+  /**
+   * Whether History can bring it back, said in decision 8's words after the
+   * description (components/console/undo.ts): `true` "You can undo this in
+   * History.", `{ detail: 'code and all' }`, `{ days: 7, detail: 'rows
+   * included' }` "You can undo it from History for 7 days, rows included.",
+   * `false` "You can't undo this." Unset for a confirm that destroys nothing.
+   */
+  undoable?: Undoable
+  /** With `undoable={false}`: what is lost, after "You can't undo this." */
+  lost?: ReactNode
+  /**
+   * Typed confirmation: the confirm button stays off until this exact text is
+   * typed (a project's or a table's name).
+   */
+  requireText?: string
 }
 
 export function KitConfirmDialog({
@@ -1848,25 +2148,81 @@ export function KitConfirmDialog({
   danger = false,
   busy = false,
   children,
+  undoable,
+  lost,
+  requireText,
 }: KitConfirmDialogProps) {
+  const [typed, setTyped] = useState('')
+  const [wasOpen, setWasOpen] = useState(open)
+  const typedId = useId()
+  // Each opening starts from an empty field (reset while rendering, not in an effect).
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (!open) setTyped('')
+  }
+  const ready = !requireText || typed === requireText
+  const confirm = () => {
+    if (ready && !busy) onConfirm()
+  }
+  const undo = undoable === undefined ? null : undoSentence(undoable)
   return (
     <KitModal
       open={open}
       onClose={onCancel}
       title={title}
-      description={description}
+      description={
+        description || undo ? (
+          <>
+            {description}
+            {description && undo ? ' ' : null}
+            {undo}
+            {undo && undoable === false && lost ? <> {lost}</> : null}
+          </>
+        ) : undefined
+      }
       footer={
         <>
           <KitButton variant="ghost" onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </KitButton>
-          <KitButton variant={danger ? 'danger' : 'primary'} onClick={onConfirm} loading={busy}>
+          <KitButton variant={danger ? 'danger' : 'primary'} onClick={confirm} loading={busy} disabled={!ready}>
             {busy ? 'Working…' : confirmLabel}
           </KitButton>
         </>
       }
     >
-      {children}
+      {children || requireText ? (
+        <>
+          {children}
+          {requireText && (
+            <div className={children ? 'mt-4' : ''}>
+              <label htmlFor={typedId} className="mb-1.5 block text-[12.5px] leading-[18px] text-zinc-300">
+                Type <span className="font-medium text-zinc-50 [overflow-wrap:anywhere]">{requireText}</span> to confirm
+              </label>
+              <KitInput
+                id={typedId}
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    confirm()
+                  }
+                }}
+                autoComplete="off"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </div>
+          )}
+        </>
+      ) : null}
     </KitModal>
   )
 }
+
+// ─── Choices ─────────────────────────────────────────────────────────────────
+// White checkbox and radio with 28px hit targets (components/console/controls.tsx).
+
+export { KitCheckbox, KitRadio, type KitCheckboxProps, type KitRadioProps } from '@/components/console/controls'

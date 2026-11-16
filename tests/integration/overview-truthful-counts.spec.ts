@@ -94,14 +94,22 @@ describe('OV-3: the card count survives the 12-row card slice', () => {
     'utf8',
   )
   const card = fs.readFileSync(path.join(process.cwd(), 'components', 'workspace', 'WorkspaceHome.tsx'), 'utf8')
+  const strip = fs.readFileSync(path.join(process.cwd(), 'components', 'workspace', 'BackendStrip.tsx'), 'utf8')
 
   it('the route reports the pre-slice total alongside the sliced list', () => {
     expect(route).toMatch(/const tableCount = \(tableStats \?\? \[\]\)\.length/)
     expect(route).toContain('data: { tables, tableCount, buckets, summary }')
   })
 
-  it('the card prefers the real total over the sliced length', () => {
-    expect(card).toMatch(/stats\?\.tableCount \?\?/)
+  // The resource cards left on 2026-11-16 (decision 10) and came back the same
+  // day as Overview's "Your backend" strip (components/workspace/BackendStrip),
+  // on the founder's call. What stays true: the count is the route's total,
+  // never the length of the 12-row slice.
+  it('the Overview counts tables from the route total, never the sliced list', () => {
+    expect(card).not.toMatch(/stats\??\.tables\??\.length/)
+    expect(card).not.toContain('dashboard-stats')
+    expect(strip).toContain("stats?.tableCount")
+    expect(strip).not.toMatch(/tables\??\.length/)
   })
 })
 

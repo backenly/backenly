@@ -14,7 +14,7 @@
  *
  * Every line must stay true of the importer as built. Lines marked BUILD
  * describe behaviour the design assumes and the importer does not have yet:
- * lib/import/supabase-importer.ts covers Supabase tables, rows and auth users
+ * lib/import/drivers/supabase.ts covers Supabase tables, rows and auth users
  * today (non-UUID keys kept in legacy_id with references remapped, public.users
  * renamed to profiles, lossy types listed as warnings, foreign keys left to the
  * reconciler) and is switched off.
@@ -41,7 +41,7 @@ export const TOC = [
 export const STEPS = [
   {
     title: 'Connect',
-    body: 'Sign in to Supabase, upload a Firebase service account key, or paste a Postgres connection string. Backenly asks for read access only.',
+    body: 'Paste a Supabase or Postgres connection string, or upload a Firebase service account key. Backenly only reads with it and never stores it.',
   },
   {
     title: 'Review',
@@ -91,8 +91,8 @@ export const ACROSS: Record<SourceId, Across[]> = {
 }
 
 export const SUPABASE_NEEDS = [
-  'A Supabase account that can see the project. When you sign in, Supabase shows what Backenly asks for before you approve it.',
-  'Or, instead of signing in, the project’s connection string: in Supabase, open Project Settings, then Database, and copy the direct connection on port 5432, not the pooler.',
+  'The project’s connection string: in Supabase, press Connect and copy the Session pooler string (port 5432).',
+  'To move Storage files too, the Project URL and the service_role key from Project Settings, then API. Backenly only reads with them and never stores them.',
 ]
 
 export const SUPABASE_NOTES = [

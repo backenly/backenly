@@ -27,6 +27,30 @@ export interface Project {
   /** The Backenly Cloud region holding the project's data (lib/regions.ts). Null is the home region. */
   region?: string | null
   /**
+   * When the project was last really used: runtime traffic, an MCP call, a
+   * dashboard write, opening its console (lib/projects/activity.ts). Stamped at
+   * most once an hour, so it is "within the last hour" at its finest. Null
+   * until it has been used.
+   */
+  lastActivityAt?: Date | string | null
+  /**
+   * The team that owns the project (Backenly Cloud), on the list and on the
+   * single read. Null on a self-hosted deployment and for a project made before
+   * teams existed.
+   */
+  organizationId?: string | null
+  /**
+   * The caller's authority here, on GET /api/projects/[id] only (the list does
+   * not carry it): the role the server's own permission checks resolve, and
+   * the two floors they hold work to (lib/edition/guard.ts). Read it through
+   * useProjectRole (lib/hooks/useProjectRole.ts).
+   */
+  role?: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER'
+  /** DEVELOPER and above: ordinary changes. */
+  canWrite?: boolean
+  /** ADMIN and above: keys, deletes, approvals, anything that cannot be undone. */
+  canAdminister?: boolean
+  /**
    * Set when the project was moved in from another platform (components/migrate):
    * where it came from, when, what matched, and how many access rules still
    * wait for a person's approval.
@@ -84,6 +108,26 @@ const PROJECTS_CACHE_TTL = 30000 // 30 seconds
 
 const projectCache = new Map<string, { data: Project; time: number }>()
 const PROJECT_CACHE_TTL = 30000 // 30 seconds
+// The shell (useProjectRole) and the page under it ask for the same project as
+// the page mounts: the second ask joins the first request instead of sending
+// its own.
+const projectInFlight = new Map<string, Promise<Project>>()
+
+/**
+ * Forget kept answers, so the next read asks the server: one project's, or
+ * with no id every one (the lists too). After a change these reads would
+ * otherwise serve stale for 30 s, and tests share this module across cases.
+ */
+export function forgetProjectReads(id?: string): void {
+  if (id) {
+    projectCache.delete(id)
+    projectInFlight.delete(id)
+    return
+  }
+  listCache.clear()
+  projectCache.clear()
+  projectInFlight.clear()
+}
 
 export async function getProjects(userId?: string, options: { orgId?: string | null } = {}): Promise<Project[]> {
   const now = Date.now()
@@ -111,13 +155,22 @@ export async function getProject(id: string): Promise<Project> {
   if (cached && (now - cached.time < PROJECT_CACHE_TTL)) {
     return cached.data
   }
+  const pending = projectInFlight.get(id)
+  if (pending) return pending
 
-  const response = await fetch(`/api/projects/${id}`, { credentials: 'include' })
-  const data = await response.json()
-  if (!data.success) throw new Error(data.error || 'Failed to fetch project')
-  
-  projectCache.set(id, { data: data.data, time: now })
-  return data.data
+  const request = (async () => {
+    const response = await fetch(`/api/projects/${id}`, { credentials: 'include' })
+    const data = await response.json()
+    if (!data.success) throw new Error(data.error || 'Failed to fetch project')
+    projectCache.set(id, { data: data.data, time: Date.now() })
+    return data.data as Project
+  })()
+  projectInFlight.set(id, request)
+  try {
+    return await request
+  } finally {
+    if (projectInFlight.get(id) === request) projectInFlight.delete(id)
+  }
 }
 
 export async function createProject(projectData: CreateProjectData): Promise<Project> {

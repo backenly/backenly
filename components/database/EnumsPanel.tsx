@@ -3,33 +3,29 @@
 /**
  * ENUM TYPES AND DOMAINS
  *
- * The last REAL_GAP in Postgres admin. A project could have a status enum
- * created out of band and the dashboard could neither see it nor make one.
+ * Every type lists the columns using it. That turns "drop this type" from a
+ * button into a decision, and it is why dropping is refused while anything
+ * uses it rather than offered with CASCADE: CASCADE would drop those columns,
+ * which is data.
  *
- * ── Dependents are shown BEFORE they matter ─────────────────────────────────
+ * PostgreSQL has no `ALTER TYPE … DROP VALUE` at any version, so removing an
+ * enum value is not offered; the Add value dialog says so where it matters.
  *
- * Every type lists the columns using it. That is what turns "drop this type"
- * from a button into a decision, and it is why dropping is refused while
- * anything uses it rather than offered with CASCADE — CASCADE would drop those
- * columns, which is data.
- *
- * ── Removing an enum value is not offered, and the page says why ────────────
- *
- * PostgreSQL has no `ALTER TYPE ... DROP VALUE` at any version. Emulating it
- * means creating a replacement type, converting every dependent column and
- * dropping the old one — a data-rewriting migration, not a settings change.
- * Saying so is better than an absent control an operator has to guess about,
- * and much better than a button that quietly rewrites their data.
+ * Sections above one panel each, rows inside (the console's document rule).
+ * A failed read is an error row, never "no enums yet".
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Plus, Trash2 } from 'lucide-react'
-import {
-  KitButton, KitNote, KitModal, KitField, KitInput, KitConfirmDialog, Skeleton, Tag,
-} from '@/components/inspector/kit'
-import { EDGE, RULE, R_PANEL } from '@/components/console/tokens'
+import { Plus, Trash2 } from 'lucide-react'
+import { KitButton, KitCheckbox, KitConfirmDialog, KitField, KitInput, KitModal, KitSelect, KitTextarea, OverflowMenu } from '@/components/inspector/kit'
+import { EmptyLine, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
 
-interface EnumType { name: string; values: string[]; usedBy: string[] }
+interface EnumType {
+  name: string
+  values: string[]
+  usedBy: string[]
+}
 interface DomainType {
   name: string
   baseType: string
@@ -39,384 +35,322 @@ interface DomainType {
   usedBy: string[]
 }
 
-export function EnumsPanel({ projectId }: { projectId: string }) {
+export function EnumsPanel({ projectId, canWrite = false, canAdminister = false }: { projectId: string; canWrite?: boolean; canAdminister?: boolean }) {
   const [enums, setEnums] = useState<EnumType[]>([])
   const [domains, setDomains] = useState<DomainType[]>([])
   const [baseTypes, setBaseTypes] = useState<string[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [message, setMessage] = useState<{ tone: 'danger' | 'success' | 'warn'; text: string } | null>(null)
+  const [state, setState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const [notice, setNotice] = useState<{ tone: 'done' | 'refused'; text: string } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-
   const [creatingEnum, setCreatingEnum] = useState(false)
   const [creatingDomain, setCreatingDomain] = useState(false)
   const [addingTo, setAddingTo] = useState<EnumType | null>(null)
-  const [confirmDrop, setConfirmDrop] = useState<{ name: string; usedBy: string[] } | null>(null)
+  const [toDrop, setToDrop] = useState<{ name: string; usedBy: string[] } | null>(null)
 
   const load = useCallback(async () => {
-    setLoadError(null)
     try {
-      const res = await fetch(`/api/projects/${projectId}/database/types`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Types could not be loaded.')
+      const res = await fetch(`/api/projects/${projectId}/database/types`, { credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error)
       setEnums(data.enums ?? [])
       setDomains(data.domains ?? [])
       setBaseTypes(data.baseTypes ?? [])
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'Types could not be loaded.')
-    } finally {
-      setLoading(false)
+      setState('ready')
+    } catch {
+      setState('failed')
     }
   }, [projectId])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    void load()
+  }, [load])
 
-  async function act(body: Record<string, unknown>, success: string): Promise<boolean> {
-    setMessage(null)
+  /** Runs one change; the server's words when it refuses. True when it applied. */
+  async function act(body: Record<string, unknown>, done: string): Promise<boolean> {
+    setNotice(null)
     const res = await fetch(`/api/projects/${projectId}/database/types`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify(body),
     })
-    const data = await res.json()
-    if (!res.ok) {
-      // PostgreSQL's own message where it refused, rather than a paraphrase.
-      setMessage({ tone: 'danger', text: data.error ?? 'That did not work.' })
-      return false
-    }
-    setEnums(data.enums ?? [])
-    setDomains(data.domains ?? [])
-    setMessage({ tone: 'success', text: success })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error ?? 'That change was refused.')
+    setEnums(data.enums ?? enums)
+    setDomains(data.domains ?? domains)
+    setNotice({ tone: 'done', text: done })
     return true
   }
 
   async function drop(name: string) {
     setBusy(name)
+    setNotice(null)
     try {
-      const res = await fetch(
-        `/api/projects/${projectId}/database/types?name=${encodeURIComponent(name)}`,
-        { method: 'DELETE' },
-      )
-      const data = await res.json()
-      if (!res.ok) {
-        setMessage({ tone: 'danger', text: data.error ?? 'The type could not be dropped.' })
-        return
-      }
+      const res = await fetch(`/api/projects/${projectId}/database/types?name=${encodeURIComponent(name)}`, { method: 'DELETE', credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? 'The type was not dropped.')
       setEnums(data.enums ?? [])
       setDomains(data.domains ?? [])
-      setMessage({ tone: 'success', text: `${name} dropped.` })
+      setNotice({ tone: 'done', text: `${name} dropped.` })
+    } catch (err) {
+      setNotice({ tone: 'refused', text: err instanceof Error ? err.message : 'The type was not dropped.' })
     } finally {
       setBusy(null)
-      setConfirmDrop(null)
+      setToDrop(null)
     }
   }
 
+  const usedBy = (list: string[]) =>
+    list.length === 0 ? (
+      <Fact>Not used</Fact>
+    ) : (
+      <Fact>
+        Used by <code className="font-mono text-[11.5px] text-zinc-400">{list.join(', ')}</code>
+      </Fact>
+    )
+  const dropItem = (name: string, users: string[]) =>
+    canAdminister ? <OverflowMenu label={`Actions for ${name}`} items={[{ label: 'Drop…', icon: Trash2, danger: true, onClick: () => setToDrop({ name, usedBy: users }) }]} /> : null
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className={`flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b ${RULE} pl-4 pr-2 sm:pl-5`}>
-        <div className="flex min-w-0 items-baseline gap-2.5">
-          <h2 className="text-[13px] font-medium text-zinc-100">Types</h2>
-          {!loading && (
-            <span className="text-[12px] tabular-nums text-faint">
-              {enums.length} {enums.length === 1 ? 'enum' : 'enums'} · {domains.length}{' '}
-              {domains.length === 1 ? 'domain' : 'domains'}
-            </span>
-          )}
-        </div>
-        <div className="flex flex-shrink-0 items-center gap-1.5">
-          <KitButton size="sm" icon={Plus} onClick={() => setCreatingEnum(true)} disabled={loading}>
-            New enum
-          </KitButton>
-          <KitButton size="sm" icon={Plus} onClick={() => setCreatingDomain(true)} disabled={loading}>
-            New domain
-          </KitButton>
-        </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="w-full max-w-[860px] space-y-6 px-4 py-5 sm:px-5">
-          <p className="max-w-[72ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">
-            Enums and domains in this project&rsquo;s own schema. Each one lists the columns using it, because that
-            decides whether it can be changed.
-          </p>
-
-          {loadError && (
-            <KitNote icon={AlertTriangle} tone="danger">
-              {loadError}
-            </KitNote>
-          )}
-          {message && (
-            <KitNote icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle} tone={message.tone}>
-              {message.text}
-            </KitNote>
-          )}
-
-          {loading ? (
-            <div className={`overflow-hidden border ${EDGE} ${R_PANEL}`} aria-hidden>
-              {[0, 1].map((i) => (
-                <div key={i} className={`space-y-2 px-4 py-3.5 ${i > 0 ? `border-t ${RULE}` : ''}`}>
-                  <Skeleton className="h-[12px] w-32" />
-                  <Skeleton className="h-[18px] w-1/2" />
-                </div>
-              ))}
-            </div>
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="w-full max-w-[880px] space-y-[32px] px-[16px] py-[24px] sm:px-[24px]">
+        {notice &&
+          (notice.tone === 'refused' ? (
+            <RefusedLine>{notice.text}</RefusedLine>
           ) : (
-            <>
-              {/* ── Enums ─────────────────────────────────────────────── */}
-              <section aria-labelledby="types-enums">
-                <h3 id="types-enums" className="mb-2.5 text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">
-                  Enums
-                </h3>
-                {enums.length === 0 ? (
-                  <p className={`border border-dashed ${EDGE} ${R_PANEL} px-4 py-4 text-[13px] text-faint`}>
-                    No enum types in this project yet. An enum fixes a column to a set of values, like an order
-                    status.
-                  </p>
-                ) : (
-                  <ul className={`overflow-hidden border ${EDGE} ${R_PANEL}`}>
-                    {enums.map((t, i) => (
-                      <li key={t.name} className={`flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-start ${i > 0 ? `border-t ${RULE}` : ''}`}>
-                        <div className="min-w-0 flex-1">
-                          <p className="font-mono text-[12.5px] font-medium text-zinc-100">{t.name}</p>
-                          <p className="mt-1.5 flex flex-wrap gap-1">
-                            {t.values.map((v) => (
-                              <Tag key={v} mono>
-                                {v}
-                              </Tag>
-                            ))}
-                          </p>
-                          <UsedBy usedBy={t.usedBy} />
-                        </div>
-                        <div className="flex flex-shrink-0 items-center gap-1">
-                          <KitButton variant="ghost" size="sm" icon={Plus} disabled={busy !== null} onClick={() => setAddingTo(t)}>
-                            Add value
-                          </KitButton>
-                          <KitButton
-                            variant="ghost"
-                            size="sm"
-                            icon={Trash2}
-                            loading={busy === t.name}
-                            disabled={busy !== null && busy !== t.name}
-                            onClick={() => setConfirmDrop({ name: t.name, usedBy: t.usedBy })}
-                          >
-                            Drop
-                          </KitButton>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
+            <p role="status" className="text-[12.5px] leading-[18px] text-zinc-300">
+              {notice.text}
+            </p>
+          ))}
 
-              {/* ── Domains ───────────────────────────────────────────── */}
-              <section aria-labelledby="types-domains">
-                <h3 id="types-domains" className="mb-2.5 text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">
-                  Domains
-                </h3>
-                {domains.length === 0 ? (
-                  <p className={`border border-dashed ${EDGE} ${R_PANEL} px-4 py-4 text-[13px] text-faint`}>
-                    No domains in this project yet. A domain is a base type with rules attached, like an email
-                    address that must contain an @.
-                  </p>
+        {state === 'failed' ? (
+          <Section id="types-error" title="Types">
+            <Panel>
+              <ErrorRow things="types" onRetry={() => void load()} />
+            </Panel>
+          </Section>
+        ) : (
+          <>
+            <Section
+              id="types-enums"
+              title="Enums"
+              count={enums.length}
+              aside={canWrite ? <KitButton size="sm" icon={Plus} onClick={() => setCreatingEnum(true)} disabled={state !== 'ready'}>New enum</KitButton> : undefined}
+            >
+              <Panel>
+                {state === 'loading' ? (
+                  <RowSkeleton rows={2} lead="none" />
+                ) : enums.length === 0 ? (
+                  <EmptyLine>No enums yet. An enum fixes a column to a set of values, like an order status.</EmptyLine>
                 ) : (
-                  <ul className={`overflow-hidden border ${EDGE} ${R_PANEL}`}>
-                    {domains.map((d, i) => (
-                      <li key={d.name} className={`flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-start ${i > 0 ? `border-t ${RULE}` : ''}`}>
-                        <div className="min-w-0 flex-1">
-                          <p className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-[12.5px] font-medium text-zinc-100">{d.name}</span>
-                            <span className="font-mono text-[12px] text-faint">{d.baseType}</span>
-                            {d.notNull && <Tag mono>not null</Tag>}
-                          </p>
-                          {d.constraints.length > 0 && (
-                            <p className="mt-1 font-mono text-[12px] leading-[18px] text-zinc-400">{d.constraints.join(' ')}</p>
-                          )}
-                          <UsedBy usedBy={d.usedBy} />
-                        </div>
-                        <KitButton
-                          variant="ghost"
-                          size="sm"
-                          icon={Trash2}
-                          loading={busy === d.name}
-                          disabled={busy !== null && busy !== d.name}
-                          onClick={() => setConfirmDrop({ name: d.name, usedBy: d.usedBy })}
-                        >
-                          Drop
-                        </KitButton>
-                      </li>
+                  <RowList>
+                    {enums.map((t) => (
+                      <Row
+                        key={t.name}
+                        lead="none"
+                        title={<span className={`${ROW_TITLE} font-mono !text-[12.5px]`}>{t.name}</span>}
+                        actions={
+                          canWrite || canAdminister ? (
+                            <>
+                              {canWrite && (
+                                <KitButton size="sm" variant="ghost" icon={Plus} disabled={busy !== null} onClick={() => setAddingTo(t)}>
+                                  Add value
+                                </KitButton>
+                              )}
+                              {dropItem(t.name, t.usedBy)}
+                            </>
+                          ) : undefined
+                        }
+                      >
+                        <p className="mt-[4px] font-mono text-[12px] leading-[18px] text-zinc-300 [overflow-wrap:anywhere]">{t.values.join(', ')}</p>
+                        <Facts className="!mt-[6px]">{usedBy(t.usedBy)}</Facts>
+                      </Row>
                     ))}
-                  </ul>
+                  </RowList>
                 )}
-              </section>
+              </Panel>
+            </Section>
 
-              <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-faint">
-                There is no &ldquo;remove value&rdquo; for an enum. PostgreSQL has no{' '}
-                <span className="font-mono text-zinc-400">ALTER TYPE &hellip; DROP VALUE</span> at any version. Removing
-                one means creating a replacement type, converting every column that uses it and dropping the old one:
-                a migration that rewrites data, not a settings change.
-              </p>
-            </>
-          )}
-        </div>
+            <Section
+              id="types-domains"
+              title="Domains"
+              count={domains.length}
+              aside={canWrite ? <KitButton size="sm" icon={Plus} onClick={() => setCreatingDomain(true)} disabled={state !== 'ready'}>New domain</KitButton> : undefined}
+            >
+              <Panel>
+                {state === 'loading' ? (
+                  <RowSkeleton rows={1} lead="none" />
+                ) : domains.length === 0 ? (
+                  <EmptyLine>No domains yet. A domain is a base type with a rule, like an email that must contain an @.</EmptyLine>
+                ) : (
+                  <RowList>
+                    {domains.map((d) => (
+                      <Row
+                        key={d.name}
+                        lead="none"
+                        title={
+                          <span className="flex flex-wrap items-baseline gap-x-[10px]">
+                            <span className={`${ROW_TITLE} font-mono !text-[12.5px]`}>{d.name}</span>
+                            <span className="font-mono text-[12px] text-zinc-400">{d.baseType}</span>
+                          </span>
+                        }
+                        actions={dropItem(d.name, d.usedBy) ?? undefined}
+                      >
+                        {d.constraints.length > 0 && <p className="mt-[4px] font-mono text-[12px] leading-[18px] text-zinc-300 [overflow-wrap:anywhere]">{d.constraints.join(' ')}</p>}
+                        <Facts className="!mt-[6px]">
+                          {d.notNull && <Fact>Required</Fact>}
+                          {usedBy(d.usedBy)}
+                        </Facts>
+                      </Row>
+                    ))}
+                  </RowList>
+                )}
+              </Panel>
+            </Section>
+          </>
+        )}
       </div>
 
       {creatingEnum && (
         <EnumForm
           onClose={() => setCreatingEnum(false)}
           onSubmit={async (name, values) => {
-            if (await act({ action: 'create_enum', name, values }, `${name} created.`)) {
-              setCreatingEnum(false)
-            }
+            if (await act({ action: 'create_enum', name, values }, `${name} created.`)) setCreatingEnum(false)
           }}
         />
       )}
-
       {addingTo && (
         <AddValueForm
           enumName={addingTo.name}
           existing={addingTo.values}
           onClose={() => setAddingTo(null)}
           onSubmit={async (value) => {
-            if (await act({ action: 'add_enum_value', name: addingTo.name, value }, `${value} added to ${addingTo.name}.`)) {
-              setAddingTo(null)
-            }
+            if (await act({ action: 'add_enum_value', name: addingTo.name, value }, `${value} added to ${addingTo.name}.`)) setAddingTo(null)
           }}
         />
       )}
-
       {creatingDomain && (
         <DomainForm
           baseTypes={baseTypes}
           onClose={() => setCreatingDomain(false)}
           onSubmit={async (spec) => {
-            if (await act({ action: 'create_domain', ...spec }, `${spec.name} created.`)) {
-              setCreatingDomain(false)
-            }
+            if (await act({ action: 'create_domain', ...spec }, `${spec.name} created.`)) setCreatingDomain(false)
           }}
         />
       )}
 
       <KitConfirmDialog
-        open={!!confirmDrop}
+        open={!!toDrop}
         danger
         busy={busy !== null}
-        title={confirmDrop ? `Drop ${confirmDrop.name}?` : 'Drop type'}
-        description={
-          !confirmDrop
-            ? undefined
-            : confirmDrop.usedBy.length > 0
-            ? `${confirmDrop.name} is still used by ${confirmDrop.usedBy.join(', ')}. ` +
-              `Dropping it will be refused: the columns would have to go with it, and that is ` +
-              `data. Change those columns first.`
-            : `Nothing uses ${confirmDrop.name}, so dropping it affects no data. This cannot be undone.`
+        title={
+          <>
+            Drop <span className="font-mono text-[14px]">{toDrop?.name}</span>?
+          </>
         }
+        description={
+          !toDrop
+            ? undefined
+            : toDrop.usedBy.length > 0
+              ? `${toDrop.usedBy.join(', ')} still ${toDrop.usedBy.length === 1 ? 'uses' : 'use'} it, so dropping it is refused: those columns would go with it. Change them first.`
+              : 'Nothing uses it, so no data changes.'
+        }
+        undoable={toDrop && toDrop.usedBy.length === 0 ? false : undefined}
         confirmLabel="Drop"
-        onConfirm={() => confirmDrop && drop(confirmDrop.name)}
-        onCancel={() => {
-          if (busy === null) setConfirmDrop(null)
-        }}
+        onConfirm={() => toDrop && void drop(toDrop.name)}
+        onCancel={() => busy === null && setToDrop(null)}
       />
     </div>
   )
 }
 
-/** The dependents of a type, which is what makes a change safe or not. */
-function UsedBy({ usedBy }: { usedBy: string[] }) {
-  if (usedBy.length === 0) {
-    return <p className="mt-1.5 text-[12px] text-faint">Not used by any column.</p>
+/** A dialog that shows the server's refusal under its fields and stays open. */
+function useSubmit() {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const submit = async (fn: () => Promise<void>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That change was refused.')
+    } finally {
+      setBusy(false)
+    }
   }
+  return { busy, error, submit }
+}
+
+function Footer({ onClose, onSubmit, busy, disabled, label }: { onClose: () => void; onSubmit: () => void; busy: boolean; disabled: boolean; label: string }) {
   return (
-    <p className="mt-1.5 text-[12px] text-faint">
-      Used by <span className="font-mono text-zinc-400">{usedBy.join(', ')}</span>
-    </p>
+    <>
+      <KitButton variant="ghost" onClick={onClose} disabled={busy}>
+        Cancel
+      </KitButton>
+      <KitButton variant="primary" loading={busy} disabled={disabled} onClick={onSubmit}>
+        {label}
+      </KitButton>
+    </>
   )
 }
 
-function EnumForm({
-  onClose, onSubmit,
-}: { onClose: () => void; onSubmit: (name: string, values: string[]) => Promise<void> }) {
+function EnumForm({ onClose, onSubmit }: { onClose: () => void; onSubmit: (name: string, values: string[]) => Promise<void> }) {
   const [name, setName] = useState('')
   const [raw, setRaw] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const values = raw.split('\n').map(v => v.trim()).filter(Boolean)
-
+  const { busy, error, submit } = useSubmit()
+  const values = raw.split('\n').map((v) => v.trim()).filter(Boolean)
   return (
     <KitModal
       open
       title="New enum"
       description="A fixed set of values a column may hold."
       onClose={onClose}
-      footer={
-        <>
-          <KitButton variant="ghost" size="sm" onClick={onClose}>Cancel</KitButton>
-          <KitButton
-            variant="primary"
-            size="sm"
-            loading={!!busy}
-            disabled={busy || !name.trim() || values.length === 0}
-            onClick={async () => { setBusy(true); try { await onSubmit(name.trim(), values) } finally { setBusy(false) } }}
-          >
-            Create
-          </KitButton>
-        </>
-      }
+      footer={<Footer onClose={onClose} busy={busy} disabled={!name.trim() || values.length === 0} label="Create" onSubmit={() => void submit(() => onSubmit(name.trim(), values))} />}
     >
-      <div className="space-y-4">
-        <KitField label="Name" hint="Lower case, letters, digits and underscores.">
-          <KitInput value={name} onChange={e => setName(e.target.value)} placeholder="order_status" autoFocus />
+      <div className="space-y-[16px]">
+        <KitField label="Name" hint="Lower case letters, digits and underscores.">
+          <KitInput value={name} onChange={(e) => setName(e.target.value)} placeholder="order_status" spellCheck={false} className="font-mono" />
         </KitField>
-        <KitField label="Values" hint="One per line. Order is the sort order PostgreSQL will use.">
-          <textarea
-            value={raw}
-            onChange={e => setRaw(e.target.value)}
-            rows={6}
-            placeholder={'draft\npublished\narchived'}
-            className="w-full rounded-md border border-white/10 bg-[#08090a] px-3 py-2 font-mono text-[12px] text-zinc-50 placeholder:text-zinc-500 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
-          />
+        <KitField label="Values" hint="One per line, in the order PostgreSQL sorts them.">
+          <KitTextarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={5} placeholder={'draft\npublished\narchived'} spellCheck={false} className="font-mono sm:text-[12.5px]" />
         </KitField>
+        {error && <RefusedLine>{error}</RefusedLine>}
       </div>
     </KitModal>
   )
 }
 
-function AddValueForm({
-  enumName, existing, onClose, onSubmit,
-}: { enumName: string; existing: string[]; onClose: () => void; onSubmit: (value: string) => Promise<void> }) {
+function AddValueForm({ enumName, existing, onClose, onSubmit }: { enumName: string; existing: string[]; onClose: () => void; onSubmit: (value: string) => Promise<void> }) {
   const [value, setValue] = useState('')
-  const [busy, setBusy] = useState(false)
-
+  const { busy, error, submit } = useSubmit()
   return (
     <KitModal
       open
-      title={`Add a value to ${enumName}`}
-      // The safe change, and worth saying so: appending does not touch rows.
-      description="Appended to the end. Existing rows are untouched."
-      onClose={onClose}
-      footer={
+      title={
         <>
-          <KitButton variant="ghost" size="sm" onClick={onClose}>Cancel</KitButton>
-          <KitButton
-            variant="primary"
-            size="sm"
-            loading={!!busy}
-            disabled={busy || !value.trim()}
-            onClick={async () => { setBusy(true); try { await onSubmit(value.trim()) } finally { setBusy(false) } }}
-          >
-            Add
-          </KitButton>
+          Add a value to <span className="font-mono text-[14px]">{enumName}</span>
         </>
       }
+      // The safe change, and the rule an operator must know: values can be added, never removed.
+      description="It goes at the end and no row changes. A value can't be removed later: PostgreSQL has no way to drop one."
+      onClose={onClose}
+      footer={<Footer onClose={onClose} busy={busy} disabled={!value.trim()} label="Add" onSubmit={() => void submit(() => onSubmit(value.trim()))} />}
     >
-      <KitField label="Value" hint={`Current: ${existing.join(', ')}`}>
-        <KitInput value={value} onChange={e => setValue(e.target.value)} autoFocus />
-      </KitField>
+      <div className="space-y-[16px]">
+        <KitField label="Value" hint={`Now: ${existing.join(', ')}`}>
+          <KitInput value={value} onChange={(e) => setValue(e.target.value)} spellCheck={false} className="font-mono" />
+        </KitField>
+        {error && <RefusedLine>{error}</RefusedLine>}
+      </div>
     </KitModal>
   )
 }
 
 function DomainForm({
-  baseTypes, onClose, onSubmit,
+  baseTypes,
+  onClose,
+  onSubmit,
 }: {
   baseTypes: string[]
   onClose: () => void
@@ -426,56 +360,41 @@ function DomainForm({
   const [baseType, setBaseType] = useState(baseTypes[0] ?? 'text')
   const [notNull, setNotNull] = useState(false)
   const [check, setCheck] = useState('')
-  const [busy, setBusy] = useState(false)
-
+  const { busy, error, submit } = useSubmit()
   return (
     <KitModal
       open
       title="New domain"
-      description="A base type with a constraint attached, reusable across columns."
+      description="A base type with a rule, reusable across columns."
       onClose={onClose}
       footer={
-        <>
-          <KitButton variant="ghost" size="sm" onClick={onClose}>Cancel</KitButton>
-          <KitButton
-            variant="primary"
-            size="sm"
-            loading={!!busy}
-            disabled={busy || !name.trim()}
-            onClick={async () => {
-              setBusy(true)
-              try { await onSubmit({ name: name.trim(), baseType, notNull, check: check.trim() || null }) }
-              finally { setBusy(false) }
-            }}
-          >
-            Create
-          </KitButton>
-        </>
+        <Footer
+          onClose={onClose}
+          busy={busy}
+          disabled={!name.trim()}
+          label="Create"
+          onSubmit={() => void submit(() => onSubmit({ name: name.trim(), baseType, notNull, check: check.trim() || null }))}
+        />
       }
     >
-      <div className="space-y-4">
+      <div className="space-y-[16px]">
         <KitField label="Name">
-          <KitInput value={name} onChange={e => setName(e.target.value)} placeholder="email_address" autoFocus />
+          <KitInput value={name} onChange={(e) => setName(e.target.value)} placeholder="email_address" spellCheck={false} className="font-mono" />
         </KitField>
         <KitField label="Base type">
-          <select
-            value={baseType}
-            onChange={e => setBaseType(e.target.value)}
-            className="h-8 w-full rounded-md border border-white/10 bg-[#08090a] px-2 text-[12.5px] text-zinc-50 focus:border-violet-400/40 focus:outline-none"
-          >
-            {baseTypes.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
+          <KitSelect value={baseType} onChange={(e) => setBaseType(e.target.value)}>
+            {(baseTypes.length ? baseTypes : ['text']).map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </KitSelect>
         </KitField>
-        <label className="flex cursor-pointer items-center gap-2 text-[12px] text-zinc-300">
-          <input type="checkbox" checked={notNull} onChange={e => setNotNull(e.target.checked)} className="accent-violet-400" />
-          NOT NULL
-        </label>
-        <KitField
-          label="Check"
-          hint={<>Must refer to <span className="font-mono text-zinc-300">VALUE</span>, which is the column being checked.</>}
-        >
-          <KitInput value={check} onChange={e => setCheck(e.target.value)} placeholder="VALUE ~ '^[^@]+@[^@]+$'" />
+        <KitCheckbox checked={notNull} onChange={setNotNull} label="Required" description="NOT NULL: a column of this type may not be empty." />
+        <KitField label="Check" hint="Refers to VALUE, the value being checked.">
+          <KitInput value={check} onChange={(e) => setCheck(e.target.value)} placeholder="VALUE ~ '^[^@]+@[^@]+$'" spellCheck={false} className="font-mono" />
         </KitField>
+        {error && <RefusedLine>{error}</RefusedLine>}
       </div>
     </KitModal>
   )

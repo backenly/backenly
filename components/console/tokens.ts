@@ -28,9 +28,14 @@
  * 3. MONO IS FOR MACHINE TEXT. Code, SQL, ids, keys, endpoints, env names.
  *    Counts, dates, sizes and statuses are Geist with `tabular-nums`.
  *
- * 4. VIOLET IS AN ACCENT, NOT A FILL. Focus rings, links in prose, the lit
- *    canvas edge. Status is emerald / amber / rose, as a dot beside neutral
- *    text, never color alone.
+ * 4. VIOLET IS AN ACCENT, NOT A FILL. It marks what Backenly itself does
+ *    (the AI's replies, autonomy) and the lit canvas edge. Focus is white, as
+ *    on backenly.com: focus says where the person is, not what Backenly did
+ *    (console team pages, 2026-11-16). Status is monochrome (2026-11-16):
+ *    shape and brightness carry it, never hue. White asks for the person
+ *    (waiting, failed, near a limit), zinc-300 is normal (live, ok), dim is
+ *    quiet (not published). Rose stays only on destructive actions and on
+ *    error sentences.
  *
  * 5. TEXT READS AT 4.5:1 OR BETTER. Three steps: zinc-50…200 for what the
  *    page is about, zinc-300/400 for supporting copy, and `text-faint`
@@ -88,12 +93,15 @@ export const R_TAG = 'rounded-[5px]'
 
 /* ── Type roles ───────────────────────────────────────────────────────────── */
 
-/** Page title on document surfaces. */
-export const T_PAGE = 'text-[22px] font-semibold leading-[28px] tracking-[-0.022em] text-zinc-50'
+/**
+ * Page title on document surfaces: white and lighter than the old 22px
+ * semibold, so the console speaks in the site's voice (2026-11-16).
+ */
+export const T_PAGE = 'text-[28px] font-normal leading-[34px] tracking-[-0.03em] text-white'
 /** The sentence under a page title. */
 export const T_LEDE = 'text-[14px] leading-[22px] tracking-[-0.006em] text-zinc-400'
-/** A section heading inside a page. */
-export const T_SECTION = 'text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100'
+/** A section heading inside a page. It sits above its panel, never inside a box header. */
+export const T_SECTION = 'text-[16px] font-medium leading-[24px] tracking-[-0.012em] text-white'
 /** A row or card heading. */
 export const T_HEADING = 'text-[13px] font-medium leading-[20px] tracking-[-0.006em] text-zinc-100'
 /** Default UI text. */
@@ -118,8 +126,8 @@ export const PAGE_GUTTER = 'px-4 sm:px-6 lg:px-8'
 
 /* ── Focus ────────────────────────────────────────────────────────────────── */
 
-/** One focus treatment for every control in the console. */
+/** One focus treatment for every control in the console: white, as on backenly.com. */
 export const FOCUS =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c0d0f]'
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c0d0f]'
 /** Focus for controls that sit flush in a row, where an offset would clip. */
-export const FOCUS_INSET = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60'
+export const FOCUS_INSET = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70'

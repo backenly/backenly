@@ -220,7 +220,9 @@ describe('AUTH-F11: a project already requiring verification is not wedged', () 
 
 describe('AUTH-F11: the console renders and saves the policy', () => {
   it('the Auth page panel reads and writes the policy route', () => {
-    const panel = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'EmailSettingsPanel.tsx'), 'utf8')
+    // The sign-in rules (verified email, magic links, App URL and name) live in
+    // Sign-in methods since the console rebuild (2026-11-16).
+    const panel = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'AuthConfiguration.tsx'), 'utf8')
     expect(panel).toContain('/auth-email-settings')
     expect(panel).toMatch(/method: 'PUT'[\s\S]*requireEmailVerification/)
   })

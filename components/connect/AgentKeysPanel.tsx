@@ -1,41 +1,43 @@
 'use client'
 
 /**
- * AgentKeysPanel — key management + live usage for the Connect page's Agents
- * tab. Absorbed from the deleted MCP tab (components/hub/McpPanel.tsx): both
- * tabs minted the same scoped key and showed the same install commands, so the
- * setup funnel lives once in AgentInstallGuide and this panel keeps the two
- * things the MCP tab alone had — list/revoke with per-key usage, and the live
- * activity feed (calls, error rate, recent tool calls).
+ * Connect → Agents: the agents that can reach this project, and what they did.
  *
- * Renders in the right column of the Agents tab's split layout (funnel left,
- * capabilities + keys right). `refreshSignal` bumps when AgentInstallGuide
- * mints a key, so a key created in the funnel appears here without a reload.
+ *   Agents  2                                                       [Add agent]
+ *   ✳ Claude Code — MacBook ●                                                 ⋯
+ *     mcp_live_af6a4f6…   486 calls this week   Last call 12 min ago
+ *   ⌘ CI ○                                                                    ⋯
+ *     mcp_live_8c891a0…   Read-only   42 calls this week   Last call 1 d ago
  *
- * Presentation composes components/inspector/kit.tsx.
+ *   Tool calls                          64 in 24 h   1.6% failed   528 in 7 days
+ *   Today
+ *   ✓ 9:13:20 AM  read_backend_state   231 ms   Backend state Tables 8 follows…  ⌄
+ *
+ * Keys and agents signed in from the browser are one list, each with its own
+ * ⋯ (Revoke key, or Disconnect): they are the same thing to the person, an
+ * agent that can reach the project. A tool call expands in place to its full
+ * result or error. One "Add agent" dialog creates every agent key
+ * (AgentSetup.tsx), replacing "Generate key", the old "New key" dialog and
+ * the reveal box, which all made the same request.
+ *
+ * With no agent yet the tab is the setup itself (AgentSetup), and it stays the
+ * setup until the new key's first call, even though the key now exists, so
+ * the command does not vanish the moment it is made.
+ *
+ * Creating and revoking keys is ADMIN (mcp/keys). Everyone else reads the list
+ * and one sentence saying who can change it.
  */
 
-import { useEffect, useState, useCallback } from 'react'
-import { AlertTriangle, Check, KeyRound, Plug2, ShieldCheck, Trash2, Zap } from 'lucide-react'
-import { refreshAgentConnection } from '@/lib/hooks/useAgentConnection'
-import {
-  CopyField,
-  EmptyState,
-  GhostPreview,
-  KitButton,
-  KitConfirmDialog,
-  KitField,
-  KitInput,
-  KitModal,
-  KitNote,
-  KitSwitch,
-  SectionTitle,
-  Skeleton,
-  Stat,
-  StatStrip,
-  Tag,
-} from '@/components/inspector/kit'
-import { formatDay, plainText } from '@/components/console/format'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { KitButton, KitConfirmDialog, OverflowMenu, StatusGlyph } from '@/components/inspector/kit'
+import { EmptyLine, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { CodeWell, DayGroup, DayGroupList, EventRow } from '@/components/console/EventRow'
+import { Time, useNow } from '@/components/console/Time'
+import { duration, formatTime, groupByDay, plainText } from '@/components/console/format'
+import { refreshAgentConnection, useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
+import { AddAgentDialog, AgentSetup, AgentSetupSkeleton, agentMarkFor } from './AgentSetup'
 
 interface McpKey {
   id: string
@@ -48,10 +50,7 @@ interface McpKey {
   expiresAt: string | null
 }
 
-/**
- * An agent the user authorised by signing in from the browser (OAuth). It has
- * no key to show: no plaintext was ever issued.
- */
+/** An agent authorised by signing in from the browser (OAuth): no key was ever shown. */
 interface McpConnection {
   id: string
   client: string
@@ -60,474 +59,419 @@ interface McpConnection {
   lastUsed: string | null
 }
 
-/** What the confirm dialog is about to remove. */
-interface RevokeTarget {
-  id: string
-  title: string
-  kind: 'key' | 'connection'
-}
-
 interface McpUsage {
   calls24h: number
   calls7d: number
   errorRate: number
-  byKey: Array<{ keyId: string; name: string; label: string | null; calls7d: number; lastUsed: string | null }>
+  byKey: Array<{ keyId: string; calls7d: number; lastUsed: string | null }>
   recent: Array<{
-    id: string; keyId: string; endpoint: string; tool: string | null
-    statusCode: number; ms: number | null; summary: string | null
-    error: string | null; mutation: boolean; timestamp: string
+    id: string
+    keyId: string
+    endpoint: string
+    tool: string | null
+    statusCode: number
+    ms: number | null
+    summary: string | null
+    error: string | null
+    mutation: boolean
+    timestamp: string
   }>
 }
 
-async function readJson(res: Response): Promise<{ ok: boolean; status: number; data: any }> {
-  const text = await res.text()
-  let data: any = null
-  try { data = text ? JSON.parse(text) : null } catch { data = null }
-  return { ok: res.ok, status: res.status, data }
+/** One row of the list: a key or a browser sign-in. */
+interface AgentEntry {
+  id: string
+  kind: 'key' | 'connection'
+  name: string
+  masked: string | null
+  readOnly: boolean
+  createdAt: string
+  lastUsed: string | null
 }
 
-export function AgentKeysPanel({
-  projectId,
-  refreshSignal = 0,
-}: {
-  projectId: string
-  refreshSignal?: number
-}) {
+async function readJson(res: Response): Promise<any> {
+  try {
+    if (typeof res.text === 'function') {
+      const text = await res.text()
+      return text ? JSON.parse(text) : null
+    }
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+/** Called within the hour: the one state that may show as live (lib/mcp/agent-connection.ts). */
+const ACTIVE_WITHIN_MS = 60 * 60_000
+
+/** Agent-written text with its markdown taken out, line breaks kept. */
+function readable(s: string): string {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .trim()
+}
+
+/** A result's first line for its row: agent text flattened, its bullets read as a list rather than middle dots. */
+function oneLine(s: string): string {
+  return plainText(s).replace(/:\s*·\s*/g, ': ').replace(/\s*·\s*/g, ', ')
+}
+
+/** How many tool calls show before "Show all". */
+const CALLS_SHOWN = 10
+
+export function AgentKeysPanel({ projectId, refreshSignal = 0 }: { projectId: string; refreshSignal?: number }) {
+  const role = useProjectRole(projectId)
+  const agent = useAgentConnection(projectId)
+  const now = useNow()
   const [keys, setKeys] = useState<McpKey[]>([])
   const [connections, setConnections] = useState<McpConnection[]>([])
   const [usage, setUsage] = useState<McpUsage | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [creating, setCreating] = useState(false)
-  const [newKey, setNewKey] = useState<{ rawKey: string; label: string | null } | null>(null)
-  const [showNew, setShowNew] = useState(false)
-  const [newLabel, setNewLabel] = useState('')
-  const [newReadOnly, setNewReadOnly] = useState(false)
-  const [revoking, setRevoking] = useState<string | null>(null)
-  const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const [usageFailed, setUsageFailed] = useState(false)
+  const [load, setLoad] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [staleAt, setStaleAt] = useState<number | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [revokeTarget, setRevokeTarget] = useState<AgentEntry | null>(null)
+  const [revoking, setRevoking] = useState(false)
+  const [refusal, setRefusal] = useState<{ id: string; message: string } | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [showAllCalls, setShowAllCalls] = useState(false)
+  const loaded = useRef(false)
+  // The setup stays on screen from its Generate key until the agent's first call.
+  const [setupPinned, setSetupPinned] = useState(false)
 
   const fetchAll = useCallback(async () => {
-    if (!projectId) return
     try {
       const [kRes, uRes] = await Promise.all([
-        fetch(`/api/projects/${projectId}/mcp/keys`),
-        fetch(`/api/projects/${projectId}/mcp/usage`),
+        fetch(`/api/projects/${projectId}/mcp/keys`, { credentials: 'include' }),
+        fetch(`/api/projects/${projectId}/mcp/usage`, { credentials: 'include' }),
       ])
       const k = await readJson(kRes)
-      if (!k.ok) throw new Error(k.data?.error || `Could not load keys (HTTP ${k.status})`)
-      setKeys(k.data?.keys ?? [])
-      // Agents authorised from the browser. The route always returned them;
-      // nothing rendered them, so a connected agent could not be seen or
-      // disconnected here, the one place the docs send people (T4, CON-09).
-      setConnections(k.data?.connections ?? [])
-
+      if (!kRes.ok || !k) throw new Error(k?.error || `HTTP ${kRes.status}`)
+      setKeys(Array.isArray(k.keys) ? k.keys : [])
+      // Agents authorised from the browser: the route always returned them.
+      setConnections(Array.isArray(k.connections) ? k.connections : [])
       const u = await readJson(uRes)
-      if (u.ok && u.data) setUsage(u.data)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load')
+      if (uRes.ok && u) {
+        setUsage(u)
+        setUsageFailed(false)
+      } else {
+        setUsageFailed(true)
+      }
+      loaded.current = true
+      setLoad('ready')
+      setStaleAt(null)
+    } catch {
+      // A failed refresh keeps the list and says how old it is; a failed first read says so instead.
+      if (loaded.current) setStaleAt(Date.now())
+      else setLoad('error')
     } finally {
-      setLoading(false)
+      setRetrying(false)
     }
   }, [projectId])
 
-  useEffect(() => { fetchAll() }, [fetchAll, refreshSignal])
+  useEffect(() => {
+    void fetchAll()
+  }, [fetchAll, refreshSignal])
 
-  async function createKey() {
-    setCreating(true)
-    setError(null)
-    try {
-      const res = await fetch(`/api/projects/${projectId}/mcp/keys`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        // The runtime serves a read-only key 16 tools instead of 23; the docs
-        // say read-only is chosen at issuance, and this is the issuance.
-        body: JSON.stringify({ label: newLabel.trim() || null, readOnly: newReadOnly }),
-      })
-      const { ok, status, data } = await readJson(res)
-      if (!ok || !data?.rawKey) throw new Error(data?.error || `Could not create key (HTTP ${status})`)
-      setNewKey({ rawKey: data.rawKey, label: data.key.label })
-      setNewLabel('')
-      setNewReadOnly(false)
-      setTestResult(null)
-      setShowNew(false)
-      fetchAll()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create key')
-    } finally {
-      setCreating(false)
+  // A passed Test connection is not the agent calling: the setup stays until the person moves on.
+  const [setupTested, setSetupTested] = useState(false)
+  // The agent's first call ends the setup: show the list it now belongs to.
+  useEffect(() => {
+    if (setupPinned && agent.connected && !setupTested) {
+      setSetupPinned(false)
+      void fetchAll()
     }
-  }
+  }, [setupPinned, agent.connected, setupTested, fetchAll])
 
-  async function revokeKey(id: string) {
-    setRevoking(id)
+  const entries = useMemo<AgentEntry[]>(
+    () => [
+      ...keys.map((k) => ({
+        id: k.id,
+        kind: 'key' as const,
+        name: k.label || k.name,
+        masked: k.masked,
+        readOnly: k.readOnly,
+        createdAt: k.createdAt,
+        lastUsed: k.lastUsed,
+      })),
+      ...connections.map((c) => ({
+        id: c.id,
+        kind: 'connection' as const,
+        name: c.client,
+        masked: null,
+        readOnly: c.readOnly,
+        createdAt: c.createdAt,
+        lastUsed: c.lastUsed,
+      })),
+    ],
+    [keys, connections],
+  )
+
+  async function revoke(target: AgentEntry) {
+    setRevoking(true)
+    setRefusal(null)
     try {
-      const res = await fetch(`/api/projects/${projectId}/mcp/keys/${id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('Revoke failed')
-      fetchAll()
-      // Revoking the last used key disconnects the agent; the top bar and the
-      // empty states should say so now, not on the next focus.
+      const res = await fetch(`/api/projects/${projectId}/mcp/keys/${target.id}`, { method: 'DELETE', credentials: 'include' })
+      if (!res.ok) {
+        const body = await readJson(res)
+        throw new Error(body?.error || 'Could not revoke it. Try again.')
+      }
+      setRevokeTarget(null)
+      await fetchAll()
+      // Revoking the last used key disconnects the agent: every surface should say so now.
       void refreshAgentConnection(projectId)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Revoke failed')
+      setRevokeTarget(null)
+      setRefusal({ id: target.id, message: err instanceof Error ? err.message : 'Could not revoke it. Try again.' })
     } finally {
-      setRevoking(null)
+      setRevoking(false)
     }
   }
 
-  async function testConnection() {
-    if (!newKey) return
-    setTesting(true)
-    setTestResult(null)
-    try {
-      // Hits /api/mcp/health with the just-issued raw key — the same call the
-      // npm package makes on boot, so this proves the key end-to-end without
-      // leaving the dashboard.
-      const res = await fetch('/api/mcp/health', {
-        headers: { 'x-api-key': newKey.rawKey },
-      })
-      const { ok, status, data } = await readJson(res)
-      if (!ok || !data) {
-        setTestResult({ ok: false, message: data?.error || `HTTP ${status}` })
-      } else {
-        setTestResult({
-          ok: true,
-          message: `Connected: ${data.toolCount} tools on ${data.project?.name ?? data.projectId}.`,
-        })
-        // The test authenticated with the key, which is what marks it used.
-        void refreshAgentConnection(projectId)
-      }
-    } catch (err) {
-      setTestResult({ ok: false, message: err instanceof Error ? err.message : 'Network error' })
-    } finally {
-      setTesting(false)
-    }
+  const canChange = role.canAdminister
+
+  if (load === 'loading' || (role.loading && entries.length === 0)) {
+    return (
+      <Section id="agents" title="Agents">
+        <Panel>
+          <RowSkeleton rows={2} lead="icon" />
+        </Panel>
+      </Section>
+    )
   }
 
-  const hasLiveActivity = !!usage && usage.calls7d > 0
+  if (load === 'error') {
+    return (
+      <Section id="agents" title="Agents">
+        <Panel>
+          <ErrorRow
+            things="agents"
+            onRetry={() => {
+              setRetrying(true)
+              void fetchAll()
+            }}
+            retrying={retrying}
+          />
+        </Panel>
+      </Section>
+    )
+  }
+
+  // No agent yet: the tab is the setup, as on a new project's Overview.
+  if (entries.length === 0 || setupPinned) {
+    if (role.loading) {
+      return (
+        <Section id="agents-setup" title="Connect your coding agent">
+          <AgentSetupSkeleton />
+        </Section>
+      )
+    }
+    if (canChange || setupPinned) {
+      return (
+        <Section id="agents-setup" title="Connect your coding agent">
+          <AgentSetup
+            projectId={projectId}
+            onKeyCreated={() => {
+              setSetupPinned(true)
+              void fetchAll()
+            }}
+            onTested={() => setSetupTested(true)}
+          />
+        </Section>
+      )
+    }
+    return (
+      <Section id="agents" title="Agents">
+        <Panel>
+          <div className="px-[20px] py-[18px]">
+            <h3 className="text-[15px] font-medium leading-[22px] tracking-[-0.012em] text-white">No agents yet</h3>
+            <p className="mt-[4px] text-[13px] leading-[20px] text-zinc-400">
+              Agents connected to this project appear here. Only an owner or admin can connect one.
+            </p>
+          </div>
+        </Panel>
+      </Section>
+    )
+  }
+
+  const statOf = (id: string) => usage?.byKey.find((b) => b.keyId === id)
+  const recent = usage?.recent ?? []
+  const calls = showAllCalls ? recent : recent.slice(0, CALLS_SHOWN)
 
   return (
-    <div className="min-w-0 space-y-10">
-      {error && !showNew && <KitNote tone="danger" icon={AlertTriangle}>{error}</KitNote>}
-
-      {/* ── Live activity ─────────────────────────────────────────────── */}
-      {hasLiveActivity && (
-        <section aria-labelledby="agent-activity-heading">
-          <SectionTitle title={<span id="agent-activity-heading">Agent activity</span>} description="Tool calls your agents made in the last 7 days." />
-          <StatStrip className="mb-3">
-            <Stat label="Calls, 24 hours" value={usage!.calls24h.toLocaleString()} />
-            <Stat label="Calls, 7 days" value={usage!.calls7d.toLocaleString()} />
-            <Stat
-              label="Error rate, 24 hours"
-              value={`${(usage!.errorRate * 100).toFixed(1)}%`}
-              tone={usage!.errorRate > 0.1 ? 'warn' : 'neutral'}
-            />
-          </StatStrip>
-
-          {usage!.recent.length > 0 && (
-            <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-              <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
-                <h3 className="text-[13px] font-medium text-zinc-100">Recent tool calls</h3>
-                <span className="text-[12px] tabular-nums text-faint">{usage!.recent.length} events</span>
-              </div>
-              <ul
-                tabIndex={0}
-                aria-label="Recent tool calls"
-                className="max-h-[380px] divide-y divide-white/[0.05] overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60"
-              >
-                {usage!.recent.map((r) => {
-                  const ok = r.statusCode >= 200 && r.statusCode < 300
-                  return (
-                    <li key={r.id} className="flex items-center gap-3 px-4 py-2.5">
-                      <span
-                        role="img"
-                        className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${ok ? 'bg-emerald-400' : 'bg-rose-400'}`}
-                        aria-label={ok ? `Succeeded (${r.statusCode})` : `Failed (${r.statusCode})`}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <code className="truncate font-mono text-[12.5px] text-zinc-100">{r.tool ?? r.endpoint}</code>
-                          {r.mutation && <Tag tone="violet">Write</Tag>}
-                          {!ok && <span className="text-[12px] tabular-nums text-rose-300">{r.statusCode}</span>}
-                        </div>
-                        {(r.summary || r.error) && (
-                          <div className="mt-0.5 truncate text-[12px] text-faint">{plainText(r.error ?? r.summary ?? '')}</div>
-                        )}
-                      </div>
-                      <div className="w-16 flex-shrink-0 text-right text-[12px] tabular-nums text-faint">{r.ms ?? 0} ms</div>
-                      <div className="w-10 flex-shrink-0 text-right text-[12px] tabular-nums text-faint">{timeAgo(r.timestamp)}</div>
-                    </li>
-                  )
-                })}
-              </ul>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* ── Connected agents (browser sign-in, no key) ────────────────── */}
-      {connections.length > 0 && (
-        <section aria-labelledby="agent-connections-heading">
-          <div className="mb-4">
-            <h2 id="agent-connections-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">Connected agents</h2>
-            <p className="mt-1 text-[13px] text-zinc-400">Agents you authorised by signing in from the browser. There is no key to copy; disconnect one and it stops working at once.</p>
-          </div>
-          <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-            <table className="w-full min-w-[520px] text-left">
-              <thead>
-                <tr className="border-b border-white/[0.06] text-[12px] text-faint">
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Agent</th>
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Connected</th>
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium"><span className="sr-only">Actions</span></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/[0.05]">
-                {connections.map((c) => {
-                  const stat = usage?.byKey.find((b) => b.keyId === c.id)
-                  return (
-                    <tr key={c.id} className="group transition-colors hover:bg-white/[0.02]">
-                      <td className="px-4 py-3">
-                        <div className="truncate text-[13px] font-medium text-zinc-100">{c.client}</div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                          {c.readOnly && <Tag tone="neutral">Read-only</Tag>}
-                          {stat && stat.calls7d > 0 && (
-                            <span className="text-[12px] tabular-nums text-faint">{stat.calls7d.toLocaleString()} calls this week</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {formatDay(c.createdAt)}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {c.lastUsed ? `${timeAgo(c.lastUsed)} ago` : <span className="text-faint">Never</span>}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <KitButton
-                          size="sm"
-                          variant="ghost"
-                          icon={Trash2}
-                          loading={revoking === c.id}
-                          onClick={() => setRevokeTarget({ id: c.id, title: c.client, kind: 'connection' })}
-                          className="hover:!bg-rose-500/[0.10] hover:!text-rose-200"
-                        >
-                          Disconnect
-                        </KitButton>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {/* ── Keys ────────────────────────────────────────────────────────
-          The label and read-only choice open in a dialog behind New key. They
-          sat inline in this header, which in the narrow right column pushed
-          the button past the column's edge. */}
-      <section aria-labelledby="agent-keys-heading">
-        <SectionTitle
-          title={<span id="agent-keys-heading">Agent keys</span>}
-          description="Server-side only, rate limited per key, and every change is audited."
-          actions={
-            <KitButton
-              icon={Plug2}
-              onClick={() => {
-                setError(null)
-                setShowNew(true)
-              }}
-            >
-              New key
+    <div className="space-y-[36px]">
+      <Section
+        id="agents"
+        title="Agents"
+        count={entries.length}
+        aside={
+          canChange ? (
+            <KitButton size="sm" onClick={() => setAdding(true)}>
+              Add agent
             </KitButton>
-          }
-        />
-
-        {newKey && (
-          <div className="mb-4 rounded-[10px] border border-emerald-400/20 bg-emerald-400/[0.04] p-4">
-            <p className="flex items-center gap-2 text-[13px] font-medium text-zinc-100">
-              <Check className="h-4 w-4 text-emerald-300" />
-              Key created{newKey.label ? `: ${newKey.label}` : ''}
-            </p>
-            <p className="mb-3 mt-1 text-[12.5px] text-zinc-400">Copy it now. It will not be shown again.</p>
-            <CopyField value={newKey.rawKey} />
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <KitButton size="sm" icon={Zap} loading={testing} onClick={testConnection}>
-                Test connection
-              </KitButton>
-              {testResult && (
-                <span
-                  role="status"
-                  className={`flex items-center gap-1.5 text-[12.5px] ${testResult.ok ? 'text-emerald-300' : 'text-rose-300'}`}
-                >
-                  {testResult.ok ? <ShieldCheck className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-                  {testResult.message}
-                </span>
-              )}
-              <KitButton size="sm" variant="ghost" className="ml-auto" onClick={() => { setNewKey(null); setTestResult(null) }}>
-                I’ve saved it
-              </KitButton>
-            </div>
-          </div>
-        )}
-
-        {loading ? (
-          <div className="space-y-2">
-            <Skeleton className="h-[56px] w-full rounded-[10px]" />
-          </div>
-        ) : keys.length === 0 ? (
-          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-            <EmptyState
-              icon={KeyRound}
-              preview={<GhostPreview kind="list" />}
-              title="No agent keys yet"
-              description="Generate one in step 1, or create a labelled key here, to wire your first agent."
-              className="py-10"
-            />
-          </div>
-        ) : (
-          <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-            <table className="w-full min-w-[520px] text-left">
-              <thead>
-                <tr className="border-b border-white/[0.06] text-[12px] text-faint">
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Key</th>
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Created</th>
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
-                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium"><span className="sr-only">Actions</span></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/[0.05]">
-                {keys.map((k) => {
-                  const stat = usage?.byKey.find((b) => b.keyId === k.id)
-                  return (
-                    <tr key={k.id} className="group transition-colors hover:bg-white/[0.02]">
-                      <td className="px-4 py-3">
-                        <div className="truncate text-[13px] font-medium text-zinc-100">{k.label || k.name}</div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                          <code className="font-mono text-[12px] text-faint">{k.masked}</code>
-                          {k.readOnly && <Tag tone="neutral">Read-only</Tag>}
-                          {stat && stat.calls7d > 0 && (
-                            <span className="text-[12px] tabular-nums text-faint">{stat.calls7d.toLocaleString()} calls this week</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {formatDay(k.createdAt)}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {k.lastUsed ? `${timeAgo(k.lastUsed)} ago` : <span className="text-faint">Never</span>}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <KitButton
-                          size="sm"
-                          variant="ghost"
-                          icon={Trash2}
-                          loading={revoking === k.id}
-                          onClick={() => setRevokeTarget({ id: k.id, title: k.label || k.name, kind: 'key' })}
-                          className="hover:!bg-rose-500/[0.10] hover:!text-rose-200"
-                        >
-                          Revoke
-                        </KitButton>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <KitModal
-        open={showNew}
-        onClose={() => {
-          if (!creating) setShowNew(false)
-        }}
-        title="New agent key"
-        description="Scoped to this project and revocable. The key is shown once, after you create it."
-        footer={
-          <>
-            <KitButton variant="ghost" onClick={() => setShowNew(false)} disabled={creating}>
-              Cancel
-            </KitButton>
-            <KitButton variant="primary" icon={Plug2} loading={creating} onClick={createKey}>
-              {creating ? 'Creating…' : 'Create key'}
-            </KitButton>
-          </>
+          ) : undefined
         }
       >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            createKey()
-          }}
-          className="space-y-4"
-        >
-          <KitField label="Label" hint="Optional. Name the machine or agent that will use it.">
-            <KitInput
-              name="agent-key-label"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="CI server…"
-              value={newLabel}
-              onChange={(e) => setNewLabel(e.target.value)}
-              disabled={creating}
-              aria-label="Label"
+        <Panel clip={false}>
+          {staleAt && (
+            <ErrorRow
+              things="agents"
+              staleAt={staleAt}
+              onRetry={() => {
+                setRetrying(true)
+                void fetchAll()
+              }}
+              retrying={retrying}
             />
-          </KitField>
-          <div className="flex items-start justify-between gap-4 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
-            <span className="min-w-0">
-              <span className="block text-[13px] font-medium text-zinc-100">Read-only</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
-                The agent can read the schema and data but cannot change anything.
-              </span>
-            </span>
-            <KitSwitch checked={newReadOnly} onChange={setNewReadOnly} disabled={creating} label="Read-only" className="mt-0.5" />
-          </div>
-          {error && (
-            <KitNote tone="danger" icon={AlertTriangle}>
-              {error}
-            </KitNote>
           )}
-        </form>
-      </KitModal>
+          <RowList>
+            {entries.map((e) => {
+              const stat = statOf(e.id)
+              const lastMs = e.lastUsed ? Date.parse(e.lastUsed) : NaN
+              const active = now !== null && Number.isFinite(lastMs) && now - lastMs < ACTIVE_WITHIN_MS
+              return (
+                <Row
+                  key={e.id}
+                  lead="icon"
+                  icon={agentMarkFor(e.name)}
+                  title={
+                    <p className={`flex min-w-0 flex-wrap items-center gap-x-[8px] ${ROW_TITLE}`}>
+                      <span className="min-w-0 [overflow-wrap:anywhere]">{e.name}</span>
+                      <StatusGlyph
+                        state={active ? 'live' : 'idle'}
+                        label={active ? 'Called within the hour' : e.lastUsed ? 'Quiet' : 'Never used'}
+                      />
+                    </p>
+                  }
+                  actions={
+                    canChange ? (
+                      <OverflowMenu
+                        label={`Actions for ${e.name}`}
+                        items={[
+                          e.kind === 'key'
+                            ? { label: 'Revoke key', danger: true, onClick: () => setRevokeTarget(e) }
+                            : { label: 'Disconnect', danger: true, onClick: () => setRevokeTarget(e) },
+                        ]}
+                      />
+                    ) : undefined
+                  }
+                >
+                  <Facts>
+                    {e.masked ? (
+                      <Fact>
+                        <code className="font-mono text-[11.5px] text-zinc-400">{e.masked}</code>
+                      </Fact>
+                    ) : (
+                      <Fact>Signed in from the browser</Fact>
+                    )}
+                    {e.readOnly && <Fact strong>Read-only</Fact>}
+                    {stat && stat.calls7d > 0 && (
+                      <Fact>
+                        {stat.calls7d.toLocaleString('en-US')} {stat.calls7d === 1 ? 'call' : 'calls'} this week
+                      </Fact>
+                    )}
+                    <Fact>{e.lastUsed ? <Time iso={e.lastUsed} prefix="Last call" /> : 'Never used'}</Fact>
+                  </Facts>
+                  {refusal?.id === e.id && <RefusedLine className="mt-[8px]">{refusal.message}</RefusedLine>}
+                </Row>
+              )
+            })}
+          </RowList>
+        </Panel>
+        {!canChange && !role.loading && (
+          <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">Only owners and admins can add or revoke keys.</p>
+        )}
+      </Section>
+
+      <Section
+        id="tool-calls"
+        title="Tool calls"
+        aside={
+          usage && usage.calls7d > 0 ? (
+            <span className="flex flex-wrap items-center justify-end gap-x-[14px] gap-y-[2px] text-[12.5px] tabular-nums text-faint">
+              <span>{usage.calls24h.toLocaleString('en-US')} in 24 h</span>
+              <span className={usage.errorRate > 0.1 ? 'font-medium text-zinc-50' : ''}>{(usage.errorRate * 100).toFixed(1)}% failed</span>
+              <span>{usage.calls7d.toLocaleString('en-US')} in 7 days</span>
+            </span>
+          ) : undefined
+        }
+      >
+        <Panel>
+          {usageFailed && !usage ? (
+            <ErrorRow things="tool calls" stillWorks="Your agents keep working." onRetry={() => void fetchAll()} />
+          ) : recent.length === 0 ? (
+            <EmptyLine>No tool calls in the last 7 days.</EmptyLine>
+          ) : (
+            <>
+              <DayGroupList>
+                {groupByDay(calls, (r) => r.timestamp).map((g) => (
+                  <DayGroup key={g.key} label={g.label}>
+                    {g.items.map((r) => {
+                      const ok = r.statusCode >= 200 && r.statusCode < 300
+                      const text = readable(r.error ?? r.summary ?? '')
+                      return (
+                        <EventRow
+                          key={r.id}
+                          glyph={ok ? 'done' : 'failed'}
+                          glyphLabel={ok ? 'Succeeded' : `Failed with ${r.statusCode}`}
+                          time={r.timestamp}
+                          what={r.tool ?? r.endpoint}
+                          mono
+                          result={r.ms === null ? '' : duration(r.ms)}
+                          line={text ? oneLine(text) : ok ? '' : String(r.statusCode)}
+                          lineMono={!ok && /^[A-Z_]+$/.test(text)}
+                          expanded={expanded === r.id}
+                          onToggle={() => setExpanded((cur) => (cur === r.id ? null : r.id))}
+                          columns={{ what: 168, result: 64 }}
+                        >
+                          <CodeWell
+                            label={ok ? (r.mutation ? 'What it changed' : 'What it returned') : `Failed with ${r.statusCode}`}
+                            copy={text || undefined}
+                          >
+                            {text || (ok ? 'It returned nothing to show.' : `HTTP ${r.statusCode}`)}
+                            {'\n\n'}
+                            {formatTime(r.timestamp, 'dateTime')}
+                            {r.ms !== null ? `, ${duration(r.ms)}` : ''}
+                          </CodeWell>
+                        </EventRow>
+                      )
+                    })}
+                  </DayGroup>
+                ))}
+              </DayGroupList>
+              {recent.length > CALLS_SHOWN && (
+                <div className="border-t border-white/[0.06] px-[20px] py-[10px]">
+                  <KitButton size="sm" variant="ghost" onClick={() => setShowAllCalls((v) => !v)} className="-ml-[10px]">
+                    {showAllCalls ? 'Show fewer' : `Show all ${recent.length}`}
+                  </KitButton>
+                </div>
+              )}
+            </>
+          )}
+        </Panel>
+      </Section>
+
+      <AddAgentDialog open={adding} projectId={projectId} onClose={() => setAdding(false)} onCreated={() => void fetchAll()} />
 
       <KitConfirmDialog
         open={!!revokeTarget}
         onCancel={() => setRevokeTarget(null)}
         onConfirm={() => {
-          if (revokeTarget) revokeKey(revokeTarget.id)
-          setRevokeTarget(null)
+          if (revokeTarget) void revoke(revokeTarget)
         }}
-        title={
-          revokeTarget?.kind === 'connection'
-            ? `Disconnect ${revokeTarget.title}?`
-            : `Revoke ${revokeTarget?.title || 'key'}?`
-        }
+        busy={revoking}
+        danger
+        title={revokeTarget?.kind === 'connection' ? `Disconnect ${revokeTarget.name}?` : `Revoke ${revokeTarget?.name ?? 'key'}?`}
         description={
           revokeTarget?.kind === 'connection'
-            ? 'It stops working immediately, and its sign-in cannot be refreshed. To use it again, sign in from the agent.'
-            : 'Any agent using it will stop working immediately.'
+            ? 'It stops working immediately. To use it again, sign in from the agent.'
+            : 'Any agent using it stops working immediately.'
         }
+        undoable={false}
         confirmLabel={revokeTarget?.kind === 'connection' ? 'Disconnect' : 'Revoke key'}
-        danger
       />
     </div>
   )
-}
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h`
-  const d = Math.floor(h / 24)
-  return `${d}d`
 }

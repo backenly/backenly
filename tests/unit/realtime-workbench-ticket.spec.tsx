@@ -80,7 +80,7 @@ describe('the Realtime page', () => {
     expect(asked).toContain('POST /api/projects/p1/realtime-ticket')
     expect(opened).toEqual(['https://backenly.test/api/v1/p1/realtime?ticket=one.time.ticket'])
     expect(asked.some((a) => a.endsWith('/anon-key'))).toBe(false)
-    expect(screen.queryByText(/Showing only changes an anonymous visitor could read/)).toBeNull()
+    expect(screen.queryByText(/Showing only what a signed-out visitor can read/)).toBeNull()
   })
 
   it('falls back to the anon key only when the project cannot issue a ticket, and says so', async () => {
@@ -88,6 +88,6 @@ describe('the Realtime page', () => {
     render(<RealtimeWorkbench projectId="p1" />)
     await waitFor(() => expect(opened.length).toBeGreaterThan(0))
     expect(opened).toEqual(['https://backenly.test/api/v1/p1/realtime?apiKey=proj_live_anon_test_key'])
-    expect(screen.getByText(/Showing only changes an anonymous visitor could read/)).toBeInTheDocument()
+    expect(screen.getByText(/Showing only what a signed-out visitor can read/)).toBeInTheDocument()
   })
 })

@@ -767,10 +767,14 @@ export function replayRefusal(status: string, active: boolean): string | null {
  * Only FAILED and DEAD_LETTER deliveries qualify (replayRefusal). The original
  * row is left as it was, so the history still says what happened the first
  * time; the new row says what happened now.
+ *
+ * `webhookId`, when given, must be the delivery's own endpoint: the console's
+ * route names both ids in its path, and a delivery of another endpoint (or
+ * another project) is then the same "not found" a missing id gets.
  */
-export async function redeliverWebhookLog(projectId: string, logId: string) {
+export async function redeliverWebhookLog(projectId: string, logId: string, webhookId?: string) {
   const original = await prisma.webhookLog.findFirst({
-    where: { id: logId, webhook: { projectId } },
+    where: { id: logId, ...(webhookId ? { webhookId } : {}), webhook: { projectId } },
     include: { webhook: true },
   })
   if (!original) return null

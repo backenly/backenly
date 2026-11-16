@@ -15,6 +15,7 @@
  * The point of this interface is that there is exactly ONE authority.
  */
 
+import type { Prisma } from '@prisma/client'
 import type { CloudRegionId } from '@/lib/regions'
 
 /** Which edition is running. Resolved once, in lib/edition/index.ts. */
@@ -44,6 +45,33 @@ const ROLE_RANK: Record<ProjectRole, number> = { OWNER: 3, ADMIN: 2, DEVELOPER: 
  */
 export function roleAtLeast(role: ProjectRole, minimum: ProjectRole): boolean {
   return ROLE_RANK[role] >= ROLE_RANK[minimum]
+}
+
+/**
+ * What the console is told about the caller's authority on one project, with
+ * the project itself (GET /api/projects/[id]).
+ *
+ * Built from the one resolution the server's permission checks make
+ * (lib/edition/guard.ts): `canWrite` is canWriteProject's floor, DEVELOPER, and
+ * `canAdminister` is canAdministerProject's, ADMIN. The console hides what the
+ * floor rules out, so nobody is offered a control that answers 403; the server
+ * still refuses on its own, whatever the console shows.
+ */
+export interface ProjectRoleFields {
+  role: ProjectRole
+  canWrite: boolean
+  canAdminister: boolean
+  /** The team that owns the project. Null without one: self-hosted, or made before teams. */
+  organizationId: string | null
+}
+
+export function projectRoleFields(project: Pick<ResolvedProject, 'callerRole' | 'organizationId'>): ProjectRoleFields {
+  return {
+    role: project.callerRole,
+    canWrite: roleAtLeast(project.callerRole, 'DEVELOPER'),
+    canAdminister: roleAtLeast(project.callerRole, 'ADMIN'),
+    organizationId: project.organizationId ?? null,
+  }
 }
 
 /**
@@ -217,6 +245,22 @@ export interface ProjectListEntry {
   pausedAt: Date | null
   /** The Backenly Cloud region holding the project's data. Null is the home region. */
   region: string | null
+  /**
+   * When the project was last really used (lib/projects/activity.ts), at most
+   * once an hour. Null until it has been.
+   */
+  lastActivityAt: Date | null
+  /**
+   * The team that owns it (Backenly Cloud). Null on a self-hosted deployment
+   * and for a project made before teams existed. The console's project
+   * switcher lists only the projects of the open project's team.
+   */
+  organizationId: string | null
+  /**
+   * Where an import moved it in from: lib/import/contract.ts ImportedFrom,
+   * written once by lib/import/jobs.ts. Null when created from scratch.
+   */
+  importedFrom: Prisma.JsonValue | null
   _count: { tables: number; workspaces: number }
 }
 

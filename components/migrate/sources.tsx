@@ -17,7 +17,7 @@ export interface Source {
 }
 
 export const SOURCES: Record<SourceId, Source> = {
-  supabase: { id: 'supabase', name: 'Supabase', connect: 'Sign in to Supabase and pick a project' },
+  supabase: { id: 'supabase', name: 'Supabase', connect: 'Paste the project’s connection string' },
   firebase: { id: 'firebase', name: 'Firebase', connect: 'Upload a service account key' },
   postgres: { id: 'postgres', name: 'Postgres', connect: 'Paste a connection string from any host' },
 }

@@ -227,19 +227,26 @@ describe('SET-04: withProjectAccess routes carry their own floors', () => {
     expect(await prisma.shareToken.count({ where: { projectId } })).toBe(1)
   }, 60_000)
 
-  it('a VIEWER cannot run the workspace importer', async () => {
+  // The workspace importer that wrote INTO an existing project is retired:
+  // moving a backend in now creates a new project (POST /api/import), which
+  // takes an organization owner or admin. Its old door stays shut for
+  // everyone, the old flag included.
+  it('the retired workspace importer answers 404 to anyone, flag or not', async () => {
     process.env.SUPABASE_IMPORT_ENABLED = 'true'
     try {
       const mod = await import('@/app/api/projects/[id]/import/supabase/route')
-      currentUserId = viewer.id
-      const res: any = await (mod as any).POST(
-        req({
-          method: 'POST', path: `/api/projects/${projectId}/import/supabase`,
-          body: { connectionString: 'postgresql://u:p@db.example:5432/x' },
-        }) as any,
-        params({ id: projectId }),
-      )
-      expect(res.status).toBe(403)
+      for (const who of [viewer, orgAdmin, owner]) {
+        currentUserId = who.id
+        const res: any = await (mod as any).POST(
+          req({
+            method: 'POST', path: `/api/projects/${projectId}/import/supabase`, token: who.token,
+            body: { connectionString: 'postgresql://u:p@db.example:5432/x' },
+          }) as any,
+          params({ id: projectId }),
+        )
+        expect(res.status).toBe(404)
+      }
+      expect(await prisma.table.count({ where: { projectId } })).toBe(0)
     } finally {
       delete process.env.SUPABASE_IMPORT_ENABLED
     }

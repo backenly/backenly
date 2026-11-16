@@ -601,7 +601,8 @@ export interface QueuePendingActionInput {
   params: Record<string, unknown>
   target?: string
   riskLevel: BackendRiskLevel
-  source: 'brain-risk' | 'orchestration-risk'
+  /** `import`: a source's access rules, translated and held by lib/import/rules.ts. */
+  source: 'brain-risk' | 'orchestration-risk' | 'import'
   reason: string
 }
 

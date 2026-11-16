@@ -11,7 +11,7 @@
  * The composition (see components/console/tokens.ts):
  *
  *   ┌ chrome: one night surface ────────────────────────────────────────┐
- *   │ ◆  /  account  /  project ▾                 ⌘K  ⎔  Ask  Connect (A) │
+ *   │ ◆  /  team  /  ● project ⌃                       ⌘K  ▢◆  Ask  (A) │
  *   │ nav        ╭──────────────── lit edge ─────────────────╮            │
  *   │ nav        │ canvas: the page                          │            │
  *   │ nav        │                                           │            │
@@ -23,7 +23,7 @@
  * carry one page's scroll position into the next.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -37,6 +37,7 @@ import { CANVAS, CHROME, FOCUS, R_CONTROL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { OrgSwitcher } from '@cloud/org-switcher'
 import { sharedRead } from '@/lib/client/shared-read'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
 
 /* ── Frame ─────────────────────────────────────────────────────────────── */
 
@@ -51,7 +52,11 @@ export function ConsoleFrame({
   /** The sidebar's navigation. Rendered in the desktop rail and the phone drawer. */
   sidebar: ReactNode
   children: ReactNode
-  /** Reserve room on the right for the assistant panel (lg+). */
+  /**
+   * Reserve room on the right for the assistant panel, from 1536px. Narrower,
+   * the panel overlays the page: squeezed to about 650px at 1280, the page
+   * truncated its own words ("Data…", "Stora…").
+   */
   rightInset?: boolean
   drawerLabel?: string
 }) {
@@ -127,7 +132,7 @@ export function ConsoleFrame({
       {/* The canvas */}
       <div
         className={`pt-[var(--console-bar)] md:pb-[var(--console-gap)] md:pl-[240px] md:pr-[var(--console-gap)] ${
-          rightInset ? 'lg:pr-[388px]' : ''
+          rightInset ? '2xl:pr-[388px]' : ''
         } transition-[padding] duration-200`}
       >
         <main
@@ -157,7 +162,6 @@ function LitEdge() {
   return (
     <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 hidden h-[90px] overflow-hidden md:block md:rounded-t-[14px]">
       <div className="absolute inset-x-[14%] top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(196,181,253,0.35)_28%,rgba(255,255,255,0.55)_50%,rgba(196,181,253,0.35)_72%,transparent)]" />
-      <div className="absolute left-1/2 top-[-60px] h-[120px] w-[62%] -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(167,139,250,0.07),transparent)]" />
     </div>
   )
 }
@@ -189,9 +193,9 @@ export function BrandHome({ href = '/app' }: { href?: string }) {
 }
 
 /** The breadcrumb separator. */
-export function Crumb() {
+export function Crumb({ className = '' }: { className?: string }) {
   return (
-    <svg aria-hidden viewBox="0 0 16 16" className="h-4 w-4 flex-shrink-0 text-zinc-700" fill="none">
+    <svg aria-hidden viewBox="0 0 16 16" className={`h-4 w-4 flex-shrink-0 text-zinc-700 ${className}`} fill="none">
       <path d="M10.5 2.5 5.5 13.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
     </svg>
   )
@@ -213,24 +217,39 @@ export function MobileNavButton() {
   )
 }
 
-/** Opens the ⌘K palette. A button, because it looked like one and did nothing. */
+/**
+ * Opens the ⌘K palette. A button, because it looked like one and did nothing.
+ * Below `lg` it is an icon button: it used to be hidden there, which left
+ * phones and tablets with no search at all.
+ */
 export function SearchTrigger() {
   const [isMac, setIsMac] = useState(true)
   useEffect(() => {
     setIsMac(/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent))
   }, [])
   return (
-    <button
-      type="button"
-      onClick={openCommandPalette}
-      aria-label="Search and jump to"
-      className={`group hidden h-[30px] items-center gap-2 ${R_CONTROL} border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1.5 text-[12.5px] text-faint transition-colors hover:border-white/[0.13] hover:text-zinc-300 lg:inline-flex ${FOCUS}`}
-    >
-      <Search className="h-3.5 w-3.5" strokeWidth={2} />
-      <span className="pr-6">Search</span>
-      <Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd>
-      <Kbd className="-ml-1">K</Kbd>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={openCommandPalette}
+        aria-label="Search and jump to"
+        className={`group hidden h-[30px] items-center gap-2 ${R_CONTROL} border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1.5 text-[12.5px] text-faint transition-colors hover:border-white/[0.13] hover:text-zinc-300 lg:inline-flex ${FOCUS}`}
+      >
+        <Search className="h-3.5 w-3.5" strokeWidth={2} />
+        <span className="pr-6">Search</span>
+        <Kbd>{isMac ? '⌘' : 'Ctrl'}</Kbd>
+        <Kbd className="-ml-1">K</Kbd>
+      </button>
+      <button
+        type="button"
+        onClick={openCommandPalette}
+        aria-label="Search and jump to"
+        title={`Search (${isMac ? '⌘' : 'Ctrl+'}K)`}
+        className={`inline-flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center ${R_CONTROL} text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-100 lg:hidden ${FOCUS}`}
+      >
+        <Search className="h-4 w-4" strokeWidth={1.75} />
+      </button>
+    </>
   )
 }
 
@@ -301,34 +320,202 @@ export function displayNameOf(user: MeUser | null, fallback = 'Account'): string
   return user?.name?.split(' ')[0] ?? user?.email?.split('@')[0] ?? fallback
 }
 
-let cachedPlan: string | null | undefined
+const ORG_IN_PATH = /^\/app\/org\/([^/]+)/
+const PROJECT_IN_PATH = /^\/app\/projects\/([^/]+)/
+/** Where the Cloud org switcher remembers the organization last opened. */
+const ACTIVE_ORG_KEY = 'backenly.activeOrgId'
+
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
+interface ProjectTeam {
+  /** A project page whose team is (or is about to be) known. */
+  inProject: boolean
+  /** The project's team; `undefined` while its answer is on its way. */
+  orgId: string | null | undefined
+}
 
 /**
- * The account's plan name on Backenly Cloud ("Free", "Pro", "Enterprise"), or
- * null while it loads and on a self-hosted build, which has no plan.
- *
- * Both bars used to print the literal "Free", so an account that had paid for
- * Pro was told it was on the free tier on every page. The answer comes from
- * the same subscription row Billing reads, fetched once per page load.
+ * The team that owns the project in the URL (useProjectRole, from the project's
+ * own read). A project with no team, or one that could not be read, is not
+ * "in a project" here: the bar then falls back to the remembered team.
  */
-export function usePlanName(): string | null {
-  const [plan, setPlan] = useState<string | null>(cachedPlan ?? null)
+function useProjectTeam(pathname: string | null): ProjectTeam {
+  const match = pathname?.match(PROJECT_IN_PATH)
+  const projectId = match ? decodeURIComponent(match[1]) : null
+  const role = useProjectRole(projectId)
+  if (!projectId) return { inProject: false, orgId: null }
+  if (role.loading) return { inProject: true, orgId: undefined }
+  if (!role.organizationId) return { inProject: false, orgId: null }
+  return { inProject: true, orgId: role.organizationId }
+}
+
+/**
+ * Make `orgId` the remembered team, by the switcher's own protocol
+ * (components/cloud/OrgSwitcher.tsx): the key it reads and the event every
+ * org-aware surface listens for. Written here rather than through the
+ * switcher's module, which is Cloud overlay the public shell must not import.
+ */
+function rememberOrg(orgId: string): void {
+  try {
+    if (window.localStorage.getItem(ACTIVE_ORG_KEY) === orgId) return
+    window.localStorage.setItem(ACTIVE_ORG_KEY, orgId)
+  } catch {
+    // Blocked storage: nothing is remembered, so there is nothing to announce.
+    return
+  }
+  window.dispatchEvent(new CustomEvent('backenly:org-changed', { detail: { orgId } }))
+}
+
+/**
+ * The organization the bar and the account pages are about: the one in the
+ * URL; on a project page, the team that owns the project; else the one last
+ * opened (the switcher's memory). `undefined` until the answer is in, so
+ * nothing is fetched for the wrong team first.
+ *
+ * A project page used to show whichever team the browser remembered, so a
+ * project of one team sat under another team's name and plan.
+ */
+export function useScopedOrgId(): string | null | undefined {
+  const pathname = usePathname()
+  const match = pathname?.match(ORG_IN_PATH)
+  const inPath = match ? decodeURIComponent(match[1]) : null
+  const team = useProjectTeam(pathname)
+  const [stored, setStored] = useState<string | null | undefined>(undefined)
+  useEffect(() => {
+    let value: string | null = null
+    try {
+      value = window.localStorage.getItem(ACTIVE_ORG_KEY)
+    } catch {
+      // Blocked storage: no remembered organization.
+    }
+    setStored(value)
+    const onChange = (e: Event) => setStored((e as CustomEvent<{ orgId?: string }>).detail?.orgId ?? null)
+    window.addEventListener('backenly:org-changed', onChange)
+    return () => window.removeEventListener('backenly:org-changed', onChange)
+  }, [])
+  if (inPath) return inPath
+  if (team.inProject) return team.orgId
+  return stored
+}
+
+export interface PlanState {
+  /** "Free", "Pro", "Enterprise". */
+  name: string | null
+  /** The subscription's status: ACTIVE, FREE, GRACE (a payment failed) and so on. */
+  status: string | null
+}
+
+const planCache = new Map<string, PlanState>()
+
+/**
+ * The plan of the organization in view on Backenly Cloud, or null while it
+ * loads and on a self-hosted build, which has no plan.
+ *
+ * It used to ask for the signed-in person's own plan and keep that answer for
+ * the whole visit, so a Pro team's page said "Free" to a member whose own
+ * account was free. /api/billing/current takes the organization (and checks
+ * the caller belongs to it); the answer is kept per organization.
+ */
+export function usePlan(): PlanState | null {
+  const orgId = useScopedOrgId()
+  const key = orgId ?? ''
+  const [plan, setPlan] = useState<PlanState | null>(() => planCache.get(key) ?? null)
   useEffect(() => {
     // A self-hosted build has no billing routes; asking would be a 404.
-    if (!CLOUD_CONTROL_PLANE || cachedPlan !== undefined) return
+    if (!CLOUD_CONTROL_PLANE || orgId === undefined) return
+    const hit = planCache.get(key)
+    if (hit) {
+      setPlan(hit)
+      return
+    }
+    setPlan(null)
     let cancelled = false
-    fetch('/api/billing/current', { credentials: 'include' })
+    fetch(orgId ? `/api/billing/current?orgId=${encodeURIComponent(orgId)}` : '/api/billing/current', { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        cachedPlan = typeof d?.displayName === 'string' && d.displayName ? d.displayName : null
-        if (!cancelled) setPlan(cachedPlan)
+        const value: PlanState = {
+          name: typeof d?.displayName === 'string' && d.displayName ? d.displayName : null,
+          status: typeof d?.subscriptionStatus === 'string' ? d.subscriptionStatus : null,
+        }
+        planCache.set(key, value)
+        if (!cancelled) setPlan(value)
       })
       .catch(() => {})
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [key, orgId])
   return plan
+}
+
+/** The plan's name alone ("Free", "Pro"), for the bar's scope chip. */
+export function usePlanName(): string | null {
+  return usePlan()?.name ?? null
+}
+
+interface QuotaAxis {
+  axis?: string
+  label: string
+  used: number
+  included: number | null
+  projected: number
+}
+
+const quotaCache = new Map<string, string | null>()
+
+/** The Usage page's names for the quotas, so the sidebar and the page say the same words. */
+const QUOTA_LABEL: Record<string, string> = {
+  mau: 'Monthly active users',
+  fn_runs: 'Function runs',
+  egress_bytes: 'Data transfer',
+  db_bytes: 'Database storage',
+  file_bytes: 'File storage',
+}
+
+/**
+ * The one quota worth a line in the sidebar, in words, or null: over the plan,
+ * at 90% or more, or on course to pass it before the cycle resets (the
+ * server's own projection). Read from the same description the Usage page and
+ * the MCP usage read use (/api/usage/account), once per organization.
+ */
+function useQuotaException(enabled: boolean): string | null {
+  const orgId = useScopedOrgId()
+  const key = orgId ?? ''
+  const [line, setLine] = useState<string | null>(() => quotaCache.get(key) ?? null)
+  useEffect(() => {
+    if (!enabled || !CLOUD_CONTROL_PLANE || orgId === undefined) return
+    if (quotaCache.has(key)) {
+      setLine(quotaCache.get(key) ?? null)
+      return
+    }
+    let cancelled = false
+    fetch(orgId ? `/api/usage/account?orgId=${encodeURIComponent(orgId)}` : '/api/usage/account', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const axes: QuotaAxis[] = Array.isArray(d?.axes) ? d.axes : []
+        let worst: { axis: QuotaAxis; share: number } | null = null
+        for (const axis of axes) {
+          if (!axis.included || axis.included <= 0) continue
+          const share = axis.used / axis.included
+          if (!worst || share > worst.share) worst = { axis, share }
+        }
+        let value: string | null = null
+        if (worst) {
+          const pct = Math.floor(worst.share * 100)
+          const name = (worst.axis.axis && QUOTA_LABEL[worst.axis.axis]) || worst.axis.label
+          if (worst.share >= 1) value = `${name} is over the plan`
+          else if (pct >= 90) value = `${name} ${pct}% used`
+          else if (worst.axis.projected > (worst.axis.included ?? Infinity)) value = `${name} will pass the plan this month`
+        }
+        quotaCache.set(key, value)
+        if (!cancelled) setLine(value)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [enabled, key, orgId])
+  return enabled ? line : null
 }
 
 /**
@@ -336,11 +523,22 @@ export function usePlanName(): string | null {
  * self-hosted build), with the plan beside it. A short placeholder holds the
  * place until the signed-in user is known, so the bar never flashes a
  * made-up "Personal" before the real name arrives.
+ *
+ * On a project page that is the project's own team. Opening a project makes
+ * its team the remembered one, before the switcher first reads its memory, so
+ * the crumb never shows another team on the way, and /app returns to the team
+ * whose project was open, as visiting a team's own page already does.
  */
 export function AccountScope({ className = '' }: { className?: string }) {
   const user = useMe()
   const plan = usePlanName()
-  if (!user) return <Skeleton className={`mx-1.5 h-[14px] w-[72px] ${className}`} />
+  const team = useProjectTeam(usePathname())
+  useIsomorphicLayoutEffect(() => {
+    if (CLOUD_CONTROL_PLANE && team.inProject && team.orgId) rememberOrg(team.orgId)
+  }, [team.inProject, team.orgId])
+  if (!user || (team.inProject && team.orgId === undefined)) {
+    return <Skeleton className={`mx-1.5 h-[14px] w-[72px] ${className}`} />
+  }
   return (
     <div className={`min-w-0 ${className}`}>
       <OrgSwitcher fallbackName={displayNameOf(user, 'Personal')} plan={plan ?? ''} />
@@ -427,9 +625,9 @@ export function AccountMenu() {
             >
               Account settings
             </MenuItem>
+            {/* Not red: logging out loses nothing, and red is kept for what does. */}
             <MenuItem
               icon={LogOut}
-              danger
               onClick={() => {
                 close()
                 signOut().catch((error) => console.error('Sign-out failed:', error))
@@ -448,10 +646,11 @@ export function AccountMenu() {
 
 /**
  * The rail: the navigation list, then a footer pinned under it. The list is
- * the part that scrolls. Sixteen project items fit a 13-inch laptop's browser
- * (about 600px under the bar), with Branches and History; below that the list scrolls, and its last
- * 20px fade out so an item cut by the footer reads as "more below" rather than
- * as the footer drawn over it, which is what a hard edge looked like.
+ * the part that scrolls. The project's fourteen items and Settings fit a
+ * 13-inch laptop's browser (about 600px under the bar); below that the list
+ * scrolls, and its last 20px fade out so an item cut by the footer reads as
+ * "more below" rather than as the footer drawn over it, which is what a hard
+ * edge looked like.
  */
 export function SidebarNav({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
   return (
@@ -484,21 +683,30 @@ export function NavItem({
   trailing,
   tourTarget,
   external = false,
+  ariaLabel,
+  title,
 }: {
   href: string
   icon: LucideIcon
   label: string
   active: boolean
+  /** A state at the end of the row (the agent's glyph on Connect). Never a count. */
   trailing?: ReactNode
   tourTarget?: string
   /** Opens in a new tab (the docs), and says so to sighted and screen-reader users alike. */
   external?: boolean
+  /** The name with its state, when `trailing` says something ("Connect, not connected"). Starts with `label`. */
+  ariaLabel?: string
+  /** The state in full, on hover. */
+  title?: string
 }) {
   return (
     <li>
       <Link
         href={href}
         data-tour={tourTarget}
+        aria-label={ariaLabel}
+        title={title}
         aria-current={active ? 'page' : undefined}
         {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
         className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[28px] ${FOCUS} ${
@@ -518,7 +726,7 @@ export function NavItem({
           <>
             <ArrowUpRight
               aria-hidden
-              className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600 transition-colors duration-150 group-hover:text-zinc-400"
+              className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100"
               strokeWidth={1.75}
             />
             <span className="sr-only">(opens in a new tab)</span>
@@ -531,45 +739,34 @@ export function NavItem({
 }
 
 /**
- * The plan at the foot of the account sidebar. On Free it says what upgrading
- * buys and links to Billing; on a paid plan it is absent, because the bar's
- * scope chip already names the plan. Cloud only (a self-hosted build has no
- * plans), and silent until the plan is known, so it never flashes a guess.
+ * The plan at the foot of the account sidebar: one line that links to
+ * Billing. On Free it reads "Free plan" with "Upgrade to Pro"; under it, in
+ * white, the one thing worth knowing when there is one (a quota near or over
+ * the plan, a failed payment). On a paid plan it appears only for such a
+ * thing, because the bar's scope chip already names the plan. Hidden on
+ * Billing itself, Cloud only, and silent until the plan is known.
  */
 export function SidebarPlan({ billingHref }: { billingHref: string }) {
-  const plan = usePlanName()
-  if (!CLOUD_CONTROL_PLANE || plan !== 'Free') return null
+  const plan = usePlan()
+  const pathname = usePathname() ?? ''
+  const onBilling = /\/billing(\/|$)/.test(pathname)
+  const exception = useQuotaException(!!plan?.name && !onBilling)
+  if (!CLOUD_CONTROL_PLANE || !plan?.name || onBilling) return null
+  const free = plan.name === 'Free'
+  const grace = plan.status === 'GRACE'
+  if (!free && !grace && !exception) return null
+  const note = grace ? 'A payment failed. Update your card.' : exception
   return (
-    <div className="mb-2 rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-      <p className="text-[12.5px] font-medium leading-[18px] text-zinc-100">Free plan</p>
-      <p className="mt-0.5 text-[12px] leading-[17px] text-faint [text-wrap:pretty]">
-        Upgrade for production-severity support and higher limits.
-      </p>
-      <Link
-        href={billingHref}
-        className={`mt-2.5 inline-flex h-[26px] items-center ${R_CONTROL} border border-white/[0.10] bg-white/[0.05] px-2.5 text-[12px] font-medium text-zinc-100 transition-[background-color,border-color] duration-150 hover:border-white/[0.16] hover:bg-white/[0.08] ${FOCUS}`}
-      >
-        Upgrade
-      </Link>
-    </div>
-  )
-}
-
-/** Trailing count on a nav item: plain tabular text, not a pill. */
-export function NavCount({ value }: { value: number }) {
-  return <span className="text-[12px] font-normal tabular-nums text-faint">{value}</span>
-}
-
-/** Trailing tag on a nav item (e.g. MCP). */
-export function NavTag({ children, active }: { children: ReactNode; active?: boolean }) {
-  return (
-    <span
-      className={`rounded-[4px] border px-1 text-[10.5px] font-medium leading-[16px] ${
-        active ? 'border-violet-300/25 text-violet-200' : 'border-white/[0.08] text-faint'
-      }`}
+    <Link
+      href={billingHref}
+      className={`group mb-1 block rounded-[7px] px-2.5 py-2 transition-colors duration-150 hover:bg-white/[0.04] ${FOCUS}`}
     >
-      {children}
-    </span>
+      <span className="flex items-center justify-between gap-2 text-[13px] leading-[18px]">
+        <span className="text-zinc-400">{plan.name} plan</span>
+        {free && <span className="font-medium text-zinc-100 transition-colors group-hover:text-white">Upgrade to Pro</span>}
+      </span>
+      {note && <span className="mt-0.5 block text-[12px] leading-[16px] text-zinc-50">{note}</span>}
+    </Link>
   )
 }
 

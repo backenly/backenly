@@ -21,6 +21,8 @@ import { countRepairs, recentlyResolved } from '@/lib/autonomy/resolution'
 import { loadSensorState } from '@/lib/autonomy/sensor-state'
 import { countPendingAgentApprovals } from '@/lib/mcp/pending-approvals'
 import { countWaitingRequests } from '@/lib/evolution-engine/request'
+import { consume, refund } from '@/lib/security/auth-rate-limit'
+import { throttleDecision } from '@/lib/security/rate-limit-decision'
 
 /**
  * How many findings the summary payload carries. A preview, not the truth —
@@ -270,11 +272,38 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 //
 // DEVELOPER and above, as dismissing a finding (POST) is: a scan writes
 // findings and checks the stored integration keys with their providers.
+//
+// One a project every ten minutes (Autonomy's "Scan now", 2026-11-16): the
+// scan runs synchronously and checks every stored provider key, so a button
+// pressed again and again would rerun it back to back. The same budget the
+// architecture route's "Look now" keeps, per project; the scheduler scans
+// every day besides.
+
+/** How often a person may ask for a scan, per project. */
+const SCAN_EVERY_MS = 10 * 60_000
 
 export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
+    const budget = await consume(`health-scan:${projectId}`, 1, SCAN_EVERY_MS)
+    if (!budget.allowed && budget.outcome === 'store_unavailable') {
+      const unavailable = throttleDecision(budget)
+      return NextResponse.json({ success: false, error: unavailable.message, code: unavailable.code }, { status: unavailable.status, headers: unavailable.headers })
+    }
+    if (!budget.allowed) {
+      const retryAfter = budget.retryAfter ?? SCAN_EVERY_MS / 1000
+      const minutes = Math.max(1, Math.ceil(retryAfter / 60))
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Backenly scanned this project in the last 10 minutes. Scan again in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`,
+          code: 'SCANNED_RECENTLY',
+          retryAfter,
+        },
+        { status: 429, headers: { 'Retry-After': String(retryAfter) } },
+      )
+    }
     let skipped: { reason: 'served-elsewhere' | 'unreachable'; region: string | null } | null = null
     try {
       const { runObserverForProject } = await import('@/lib/services/workspace-observer')
@@ -284,6 +313,8 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
       // nothing was scanned now, and the answer says so instead of a scan time.
       if (observed.skipped) skipped = { reason: observed.skipped, region: observed.region ?? null }
     } catch (err: any) {
+      // A scan that failed did not scan: the person may ask again at once.
+      await refund(`health-scan:${projectId}`).catch(() => {})
       return NextResponse.json(
         { success: false, error: sanitizeDiagnostic(err) || 'Health scan failed' },
         { status: 500 },

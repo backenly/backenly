@@ -28,6 +28,7 @@ export type ChangeSource =
   | 'branch_merge' // a preview branch replayed onto production
   | 'autonomy' // the self-healing loop
   | 'system' // Backenly itself: an automatic recovery
+  | 'import' // a person moving a backend in (lib/import/jobs.ts): grouped by `import:<jobId>`
 
 /** Sources that carry a person's explicit decision for this exact change. */
 export const HUMAN_DECIDED_SOURCES: ReadonlySet<string> = new Set(['dashboard', 'approval'])

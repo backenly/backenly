@@ -8,6 +8,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { builtInAuthTemplate } from '@/lib/email/auth-builtins'
 import {
   KIND_LABELS,
   REQUIRED_VARIABLES,
@@ -41,6 +42,10 @@ export async function listProjectTemplates(projectId: string) {
         subject: override?.subject ?? null,
         bodyHtml: override?.bodyHtml ?? null,
         updatedAt: override?.updatedAt?.toISOString() ?? null,
+        // What is sent while there is no override, as a template: the editor
+        // starts from these words rather than from an empty box, and saving
+        // them unchanged is accepted (lib/email/auth-builtins.ts).
+        builtIn: builtInAuthTemplate(kind),
       }
     }),
   }

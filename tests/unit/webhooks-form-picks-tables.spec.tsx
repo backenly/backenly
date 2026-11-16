@@ -9,7 +9,20 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 
 jest.mock('@cloud/control-plane', () => ({ CLOUD_CONTROL_PLANE: true }))
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: jest.fn(), replace: jest.fn(), prefetch: jest.fn(), back: jest.fn(), refresh: jest.fn() }),
+  usePathname: () => '/app/projects/p1/webhooks',
+  useSearchParams: () => new URLSearchParams(),
+  useParams: () => ({ id: 'p1' }),
+}))
 import { WebhooksPanel } from '@/components/integrations/WebhooksPanel'
+import { forgetProjectReads } from '@/lib/api/projects'
+import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
+
+beforeEach(() => {
+  forgetProjectReads()
+  clearProjectRoleCache()
+})
 
 const ROW = (over: Record<string, unknown> = {}) => ({
   id: 'w1', eventType: 'row.inserted', targetUrl: 'https://hooks.example.test/in', active: true, tables: [],
@@ -22,7 +35,9 @@ function stub(webhooks: unknown[] = []) {
     if (init?.method === 'POST' && path === '/api/projects/p1/webhooks') {
       return Promise.resolve({ ok: true, status: 201, json: async () => ({ webhook: { ...ROW(), secret: 's' }, captureError: null }) } as Response)
     }
-    const body = path.endsWith('/trigger-webhooks')
+    const body = path === '/api/projects/p1'
+      ? { success: true, data: { id: 'p1', name: 'shop', organizationId: 'org_1', role: 'DEVELOPER', canWrite: true, canAdminister: false } }
+      : path.endsWith('/trigger-webhooks')
       ? { triggers: [], deliveries: [] }
       : { webhooks, availableTables: ['orders', 'product_views'], capture: { tables: [], required: false, healthy: true, readable: true }, plan: { allowed: true } }
     return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)

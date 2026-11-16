@@ -35,7 +35,7 @@ export async function GET(
     // exactly how a dead credential sits unnoticed until a function fails.
     const keyVault: Record<
       string,
-      { maskedKey: string; connectedAt: string; verification: string; verificationDetail?: string }
+      { maskedKey: string; connectedAt: string; verification: string; verificationDetail?: string; verifiedAt: string | null }
     > = {}
     for (const ks of keyStatuses) {
       keyVault[ks.integrationId] = {
@@ -43,6 +43,8 @@ export async function GET(
         connectedAt: ks.connectedAt,
         verification: ks.verification,
         verificationDetail: ks.verificationDetail,
+        // When the provider last confirmed it: "Checked 2 h ago", not just "verified".
+        verifiedAt: ks.verifiedAt ?? null,
       }
     }
 

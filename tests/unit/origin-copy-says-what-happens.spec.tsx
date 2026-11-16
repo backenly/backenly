@@ -37,12 +37,12 @@ async function renderCards() {
 
 it('says a request without an Origin failed its key check, in a sentence that agrees with its number', async () => {
   await renderCards()
-  expect(screen.getByText(/^1 request without an Origin header\s+failed the API key check \(last .+\)\. Usually/)).toBeInTheDocument()
+  expect(screen.getByText(/^1 request without an Origin header failed the API key check, the last 33 min ago\. Usually/)).toBeInTheDocument()
   expect(screen.queryByText(/were rejected/)).toBeNull()
 })
 
 it('says the allowlist binds browsers, not every caller', async () => {
   await renderCards()
-  expect(screen.getByText('1 active. Browsers block calls from other sites; servers and mobile apps are not affected.')).toBeInTheDocument()
+  expect(screen.getByText('Browsers on other sites are blocked. Servers and mobile apps are not affected.')).toBeInTheDocument()
   expect(screen.queryByText(/Only these origins can call/)).toBeNull()
 })

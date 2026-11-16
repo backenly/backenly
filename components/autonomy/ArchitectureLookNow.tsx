@@ -13,14 +13,17 @@
  * most every 10 minutes per project; the route says when the next may start.
  * A look that finds a change worth making puts it in "Waiting on you", which
  * re-reads.
+ *
+ * Since 2026-11-16 it is the third line of Autonomy's Checks section
+ * ("Every day  Architecture review ran 3 h ago.  [Look now]"), drawn by
+ * CheckLine (components/autonomy/CheckLine.tsx).
  */
 
 import { useEffect, useState } from 'react'
-import { ScanSearch } from 'lucide-react'
 import { KitButton } from '@/components/inspector/kit'
-import { ago } from '@/components/changes/present'
+import { formatTime } from '@/components/console/format'
 import { announceArchitectureChange } from '@/components/autonomy/architecture-decisions'
-import { PANEL } from '@/components/autonomy/rows'
+import { CheckLine } from '@/components/autonomy/CheckLine'
 
 interface LookAnswer {
   ok?: boolean
@@ -29,7 +32,19 @@ interface LookAnswer {
   error?: string
 }
 
-export function ArchitectureLookNow({ projectId, onLooked }: { projectId: string; onLooked: () => void }) {
+export function ArchitectureLookNow({
+  projectId,
+  onLooked,
+  canLook = true,
+  as = 'div',
+}: {
+  projectId: string
+  onLooked: () => void
+  /** Asking takes an organization admin; others read the line without the button. */
+  canLook?: boolean
+  /** 'li' inside the Checks list. */
+  as?: 'li' | 'div'
+}) {
   // undefined until read; null when Backenly has not looked yet.
   const [analyzedAt, setAnalyzedAt] = useState<string | null | undefined>(undefined)
   const [reads, setReads] = useState(0)
@@ -90,25 +105,21 @@ export function ArchitectureLookNow({ projectId, onLooked }: { projectId: string
   if (analyzedAt === undefined) return null
 
   return (
-    <section aria-label="Architecture review">
-      <div className={`${PANEL} flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5`}>
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium leading-[20px] text-zinc-100">Architecture review</p>
-          <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">
-            {analyzedAt
-              ? `Backenly last looked for changes worth making ${ago(analyzedAt)}. It looks every day.`
-              : 'Backenly has not looked for changes worth making yet. It looks every day.'}
-          </p>
-        </div>
-        <KitButton variant="secondary" size="sm" icon={ScanSearch} loading={busy} onClick={look}>
-          Look now
-        </KitButton>
-      </div>
-      {note && (
-        <p role="status" className="mt-2 text-[12.5px] leading-[18px] text-faint">
-          {note}
-        </p>
-      )}
-    </section>
+    <CheckLine
+      as={as}
+      cadence="Every day"
+      action={
+        canLook ? (
+          <KitButton variant="secondary" size="sm" loading={busy} onClick={look}>
+            Look now
+          </KitButton>
+        ) : undefined
+      }
+      note={note}
+    >
+      {analyzedAt
+        ? `Architecture review ran ${formatTime(analyzedAt, 'ago')}.`
+        : 'Architecture review has not run yet.'}
+    </CheckLine>
   )
 }

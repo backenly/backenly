@@ -20,7 +20,9 @@ import type { ComponentType, ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { ChevronDown } from 'lucide-react'
 import { EDGE, FOCUS, R_PANEL, T_SECTION, WELL } from '@/components/console/tokens'
-import { KIT } from '@/components/inspector/kit'
+import { KIT, Skeleton, StatusGlyph, type GlyphState } from '@/components/inspector/kit'
+import { ActorMark, type Actor } from '@/components/console/ActorMark'
+import { IconWell } from '@/components/console/IconWell'
 
 type IconLike = LucideIcon | ComponentType<{ className?: string; strokeWidth?: number }>
 
@@ -62,8 +64,16 @@ export function Section({
 /** The panel a section's rows sit in: one hairline outline, rows divided inside. */
 export const PANEL = `overflow-hidden border ${EDGE} ${R_PANEL} ${KIT.surface}`
 
-export function Panel({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`${PANEL} ${className}`}>{children}</div>
+/**
+ * The same panel without the clip, for one that holds a popover drawn in place
+ * (not in a portal). Its first and last children round their own corners.
+ * OverflowMenu and KitSelect never need it: the menu opens in a portal and the
+ * select is native.
+ */
+export const PANEL_OPEN = `border ${EDGE} ${R_PANEL} ${KIT.surface} [&>*:first-child]:rounded-t-[9px] [&>*:last-child]:rounded-b-[9px]`
+
+export function Panel({ children, className = '', clip = true }: { children: ReactNode; className?: string; clip?: boolean }) {
+  return <div className={`${clip ? PANEL : PANEL_OPEN} ${className}`}>{children}</div>
 }
 
 export function RowList({ children }: { children: ReactNode }) {
@@ -72,11 +82,12 @@ export function RowList({ children }: { children: ReactNode }) {
 
 type Tone = 'neutral' | 'attention' | 'danger' | 'done' | 'accent'
 
+// Monochrome: a row's icon says what kind of thing it is, never its state in a colour.
 const TILE_ICON: Record<Tone, string> = {
   neutral: 'text-zinc-300',
-  attention: 'text-amber-300',
-  danger: 'text-rose-300',
-  done: 'text-emerald-300',
+  attention: 'text-zinc-50',
+  danger: 'text-zinc-300',
+  done: 'text-zinc-500',
   accent: 'text-violet-300',
 }
 
@@ -95,8 +106,35 @@ export function RowTile({ icon: Icon, tone = 'neutral', busy = false }: { icon: 
 }
 
 /**
+ * What leads a row (project decision 7): whatever varies down that list.
+ *   'glyph'  a state (StatusGlyph): functions, endpoints, snapshots
+ *   'actor'  who did it (24px ActorMark): changes, tool calls
+ *   'well'   the kind of thing in a 28px IconWell: what waits on you, what
+ *            Backenly found and fixed, branches (the founder's call, 2026-11-16:
+ *            the spanner and the bin say more than a dot)
+ *   'icon'   a bare 16px kind icon: file types
+ *   'none'   nothing varies, so nothing leads
+ * Leaving `lead` unset keeps the retired 32px tile for the rows that still use it.
+ */
+export type RowLead = 'glyph' | 'actor' | 'well' | 'icon' | 'none'
+
+const LEAD_ICON: Record<Tone, string> = {
+  neutral: 'text-zinc-400',
+  attention: 'text-zinc-50',
+  danger: 'text-zinc-400',
+  done: 'text-zinc-500',
+  accent: 'text-violet-300',
+}
+
+/**
  * One row. The title and everything under it share a column; the actions sit
  * at the top right and wrap under the text on a narrow screen.
+ *
+ *   <Row lead="glyph" glyph="failed" glyphLabel="Failed" title={…} />
+ *   <Row lead="actor" actor={{ type: 'agent', label: 'Claude Code' }} title={…} />
+ *   <Row lead="well" icon={Wrench} title={…} />
+ *   <Row lead="icon" icon={FileImage} title={…} />
+ *   <Row lead="none" title={…} />
  */
 export function Row({
   icon,
@@ -106,21 +144,68 @@ export function Row({
   actions,
   children,
   className = '',
+  lead,
+  glyph = 'idle',
+  glyphLabel,
+  actor,
+  id,
 }: {
-  icon: IconLike
+  /**
+   * The row's anchor, for links from other pages (Overview's "Waiting on
+   * you" opens /autonomy#approval-<id>). The row a link points at is lit
+   * while `data-target` is set on it (useHashTarget).
+   */
+  id?: string
+  /** The kind icon (lead 'icon') or the old tile's icon (no lead). */
+  icon?: IconLike
   tone?: Tone
   busy?: boolean
   title: ReactNode
   actions?: ReactNode
   children?: ReactNode
   className?: string
+  lead?: RowLead
+  /** lead 'glyph': the state. */
+  glyph?: GlyphState
+  /** lead 'glyph': the state in words, read by screen readers. */
+  glyphLabel?: string
+  /** lead 'actor': who did it. */
+  actor?: Pick<Actor, 'type' | 'label'>
 }) {
+  if (lead === undefined) {
+    return (
+      <li id={id} className={`px-5 py-4 ${ANCHORED} ${className}`}>
+        <div className="flex items-start gap-3.5">
+          {icon && <RowTile icon={icon} tone={tone} busy={busy} />}
+          <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-6 gap-y-3 sm:flex-nowrap">
+            <div className="min-w-0 flex-[1_1_260px] pt-[5px]">
+              {title}
+              {children}
+            </div>
+            {actions && <div className="flex flex-shrink-0 items-center gap-2">{actions}</div>}
+          </div>
+        </div>
+      </li>
+    )
+  }
+  // Each lead is centred on the title's first line (21px).
+  const Icon = icon
+  const leadNode =
+    lead === 'glyph' ? (
+      <StatusGlyph state={glyph} label={glyphLabel ?? glyph} className={`mt-[4.5px] ${busy ? 'motion-safe:animate-pulse' : ''}`} />
+    ) : lead === 'actor' && actor ? (
+      <ActorMark actor={actor} size={24} className="-mt-[1.5px]" />
+    ) : lead === 'well' && Icon ? (
+      <IconWell icon={Icon} quiet={tone === 'done'} className={`-mt-[3.5px] ${busy ? 'motion-safe:animate-pulse' : ''}`} />
+    ) : lead === 'icon' && Icon ? (
+      <Icon className={`mt-[2.5px] h-4 w-4 flex-shrink-0 ${LEAD_ICON[tone]}`} strokeWidth={1.75} />
+    ) : null
   return (
-    <li className={`px-5 py-4 ${className}`}>
-      <div className="flex items-start gap-3.5">
-        <RowTile icon={icon} tone={tone} busy={busy} />
+    <li id={id} className={`px-[20px] py-[14px] ${ANCHORED} ${className}`}>
+      <div className="flex items-start gap-[12px]">
+        {leadNode && <span className="flex flex-shrink-0">{leadNode}</span>}
         <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-6 gap-y-3 sm:flex-nowrap">
-          <div className="min-w-0 flex-[1_1_260px] pt-[5px]">
+          <div className="min-w-0 flex-[1_1_260px]">
             {title}
             {children}
           </div>
@@ -128,6 +213,34 @@ export function Row({
         </div>
       </div>
     </li>
+  )
+}
+
+/** A row a link can land on: clear of the top bar, and lit while it is the target. */
+const ANCHORED = 'scroll-mt-[96px] transition-colors duration-500 data-[target]:bg-white/[0.04]'
+
+/** Row-shaped placeholders in the new row anatomy, so a panel loads in one pass. */
+export function RowSkeleton({ rows = 3, lead = 'glyph' }: { rows?: number; lead?: RowLead }) {
+  const mark =
+    lead === 'glyph'
+      ? 'mt-[4.5px] h-[12px] w-[12px] !rounded-full'
+      : lead === 'actor'
+        ? 'h-[24px] w-[24px] !rounded-full'
+        : lead === 'well'
+          ? '-mt-[3.5px] h-[28px] w-[28px] !rounded-[7px]'
+          : 'mt-[2.5px] h-[16px] w-[16px]'
+  return (
+    <ul aria-hidden className="divide-y divide-white/[0.06]">
+      {Array.from({ length: rows }, (_, i) => (
+        <li key={i} className="flex items-start gap-[12px] px-[20px] py-[14px]">
+          {lead !== 'none' && <Skeleton className={`flex-shrink-0 ${mark}`} />}
+          <div className="min-w-0 flex-1 space-y-[8px] pt-[3px]">
+            <Skeleton className={`h-[13px] ${i % 2 ? 'w-[46%]' : 'w-[58%]'}`} />
+            <Skeleton className={`h-[10px] ${i % 2 ? 'w-[30%]' : 'w-[38%]'}`} />
+          </div>
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -192,11 +305,12 @@ export function RowNote({
   children: ReactNode
   role?: 'status' | 'alert'
 }) {
+  // Monochrome, except a failure's own words, which keep the console's one danger colour.
   const text = {
     neutral: 'text-zinc-400',
-    done: 'text-emerald-300',
+    done: 'text-zinc-300',
     danger: 'text-rose-300',
-    attention: 'text-amber-200',
+    attention: 'text-zinc-50',
   }[tone]
   return (
     <p role={role} className={`mt-2.5 flex items-start gap-2 text-[12.5px] leading-[18px] ${text}`}>
@@ -206,8 +320,14 @@ export function RowNote({
   )
 }
 
-/** A panel's one line when it has nothing in it. */
-export function EmptyLine({ icon: Icon, children }: { icon: IconLike; children: ReactNode }) {
+/**
+ * A panel's one line when it has nothing in it. New uses pass no icon (the
+ * tile is retired); the icon is kept for the rows that still have one.
+ */
+export function EmptyLine({ icon: Icon, children }: { icon?: IconLike; children: ReactNode }) {
+  if (!Icon) {
+    return <p className="px-[20px] py-[14px] text-[13px] leading-[20px] text-zinc-400">{children}</p>
+  }
   return (
     <div className="flex items-center gap-3.5 px-5 py-4">
       <RowTile icon={Icon} tone="neutral" />

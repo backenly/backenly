@@ -18,7 +18,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   LogOut, Mail, Lock, Trash2, HelpCircle, Key, Check, X,
-  User, Shield, AlertTriangle, Sparkles, Smartphone,
+  User, Shield, AlertTriangle, Lightbulb, Smartphone,
   Activity, Calendar, FolderKanban, Loader2, Copy, ShieldCheck, ShieldAlert,
   Send, ArrowUpRight, CheckCircle2, LifeBuoy, Bell,
 } from 'lucide-react'
@@ -297,8 +297,8 @@ export default function SettingsPage() {
         <div className="fixed top-16 right-6 z-50">
           <div role="status" aria-live="polite" className={`flex items-center gap-2.5 rounded-[10px] px-3.5 py-2.5 ${RAISE} ${FLOAT}`}>
             {toast.kind === 'success'
-              ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              : <AlertTriangle className="h-4 w-4 text-rose-400" />}
+              ? <CheckCircle2 className="h-4 w-4 text-zinc-300" />
+              : <AlertTriangle className="h-4 w-4 text-zinc-50" />}
             <p className="text-[12.5px] font-medium text-zinc-100">{toast.msg}</p>
           </div>
         </div>
@@ -375,7 +375,7 @@ export default function SettingsPage() {
         <ModalShell onClose={() => !deletingAccount && setShowDeleteModal(false)} accent="danger">
           <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
             <div className="flex items-center gap-2.5">
-              <AlertTriangle className="h-4 w-4 text-rose-400" />
+              <AlertTriangle className="h-4 w-4 text-zinc-50" />
               <h3 className="text-base font-semibold text-white">Delete account</h3>
             </div>
             <button onClick={() => setShowDeleteModal(false)} className="rounded-md p-1 text-zinc-500 transition hover:bg-white/[0.06] hover:text-white" aria-label="Close">
@@ -383,19 +383,19 @@ export default function SettingsPage() {
             </button>
           </div>
           <div className="p-5">
-            <div className="rounded-lg border border-rose-500/15 bg-rose-500/[0.04] p-4">
-              <p className="text-[13px] font-semibold text-rose-300">This is permanent and cannot be undone.</p>
+            <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] p-4">
+              <p className="text-[13px] font-semibold text-zinc-50">This is permanent and cannot be undone.</p>
               <ul className="mt-3 space-y-1.5">
                 {['Your account and profile', 'All projects and databases', 'All files and configurations', 'All billing information'].map((item) => (
                   <li key={item} className="flex items-center gap-2 text-[12.5px] text-zinc-400">
-                    <span className="h-1 w-1 rounded-full bg-rose-400/50" />
+                    <span className="h-1 w-1 rounded-full bg-zinc-50/50" />
                     {item}
                   </li>
                 ))}
               </ul>
             </div>
             <div className="mt-4">
-              <KitField label={<span>Type <span className="font-mono text-rose-300">DELETE</span> to confirm</span>}>
+              <KitField label={<span>Type <span className="font-mono text-zinc-50">DELETE</span> to confirm</span>}>
                 <KitInput
                   value={deleteConfirmText}
                   onChange={(e) => setDeleteConfirmText(e.target.value)}
@@ -656,13 +656,13 @@ function SecuritySection({
           actions={
             twoFAOn
               ? <KitButton variant="secondary" size="sm" onClick={on2FADisableOpen} disabled={twoFALoading}>Disable</KitButton>
-              : <KitButton variant="primary" size="sm" icon={Sparkles} onClick={on2FAEnroll} disabled={twoFALoading}>Enable 2FA</KitButton>
+              : <KitButton variant="primary" size="sm" icon={ShieldCheck} onClick={on2FAEnroll} disabled={twoFALoading}>Enable 2FA</KitButton>
           }
         />
         <KitCardBody>
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
-              <Smartphone className={`h-4 w-4 ${twoFAOn ? 'text-emerald-400' : 'text-zinc-500'}`} />
+              <Smartphone className={`h-4 w-4 ${twoFAOn ? 'text-zinc-300' : 'text-zinc-500'}`} />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-zinc-100">Authenticator app</p>
@@ -709,7 +709,7 @@ function SecuritySection({
         <KitCardBody>
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+              <CheckCircle2 className="h-4 w-4 text-zinc-300" />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-zinc-100">This browser</p>
@@ -860,7 +860,7 @@ const SECONDARY_MAX = 5000
 const SECONDARY_MIN = 10
 
 const FEATURE_FORM = {
-  icon: Sparkles,
+  icon: Lightbulb,
   title: 'Request a feature',
   cardDesc: 'Tell us what you want to see in Backenly next.',
   formDesc: 'Help us understand the problem you want to solve, not just the solution.',
@@ -911,7 +911,7 @@ function SupportSection({ userEmail }: { userEmail?: string }) {
               )}
               <button onClick={() => setFeatureFormOpen(true)} className={cardClass}>
                 <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
-                  <Sparkles className="h-4 w-4 text-zinc-400 transition-colors group-hover:text-violet-300" />
+                  <Lightbulb className="h-4 w-4 text-zinc-400 transition-colors group-hover:text-violet-300" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1">
@@ -991,8 +991,8 @@ function InlineForm({
   if (sent) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
-        <div className="flex h-11 w-11 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
-          <Check className="h-5 w-5 text-emerald-400" strokeWidth={3} />
+        <div className="flex h-11 w-11 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03]">
+          <Check className="h-5 w-5 text-zinc-300" strokeWidth={3} />
         </div>
         <p className="mt-4 text-[14px] font-semibold text-white">{successTitle}</p>
         <p className="mt-1.5 max-w-[320px] text-[12.5px] leading-relaxed text-zinc-500">{successMsg}</p>
@@ -1043,8 +1043,8 @@ function InlineForm({
         </KitField>
 
         {error && (
-          <div className="flex items-start gap-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2.5">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-rose-400" />
+          <div className="flex items-start gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2.5">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-zinc-50" />
             <p className="text-[12px] leading-snug text-rose-300">{error}</p>
           </div>
         )}
@@ -1064,16 +1064,16 @@ function InlineForm({
 
 function DangerSection({ onOpenDelete }: { onOpenDelete: () => void }) {
   return (
-    <KitCard className="border-rose-500/20">
-      <div className="flex items-center gap-2.5 border-b border-rose-500/[0.12] bg-rose-500/[0.03] px-5 py-3.5">
-        <AlertTriangle className="h-4 w-4 text-rose-400" />
+    <KitCard>
+      <div className="flex items-center gap-2.5 border-b border-white/[0.08] bg-white/[0.03] px-5 py-3.5">
+        <AlertTriangle className="h-4 w-4 text-zinc-50" />
         <div>
           <h2 className="text-[13px] font-semibold text-white">Danger zone</h2>
           <p className="text-[12.5px] text-zinc-500">Irreversible and destructive actions.</p>
         </div>
       </div>
       <KitCardBody>
-        <div className="rounded-lg border border-rose-500/15 bg-rose-500/[0.03] p-4">
+        <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] p-4">
           <p className="text-[13px] font-semibold text-white">Delete account permanently</p>
           <p className="mt-1 text-[12px] text-zinc-500">Removes your account, all projects and data, files, and memberships forever.</p>
           <div className="mt-4">
@@ -1103,7 +1103,7 @@ function ModalShell({ children, onClose, accent = 'default' }: { children: React
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/65" onClick={onClose} />
-      <div role="dialog" aria-modal="true" className={`relative w-full max-w-md overflow-hidden rounded-[14px] ${RAISE} ${FLOAT} ${accent === 'danger' ? 'ring-1 ring-rose-400/25' : ''}`}>
+      <div role="dialog" aria-modal="true" className={`relative w-full max-w-md overflow-hidden rounded-[14px] ${RAISE} ${FLOAT} ${accent === 'danger' ? 'ring-1 ring-white/[0.08]' : ''}`}>
         {children}
       </div>
     </div>

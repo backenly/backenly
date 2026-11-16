@@ -1,38 +1,20 @@
 'use client'
 
 /**
- * Overview — the project home, inside the ONE workspace shell.
+ * Overview: the project home (project console decision 10, 2026-11-16).
  *
- * Post chat-door removal (2026-07-17) this page is a thin frame around
- * MainWorkspace, which fetches its own backend state (/state, /build-status)
- * and renders WorkspaceHome — the System Overview hero, tables/APIs, health
- * ("A few things to clear"), and activity. Builds arrive through the one
- * door — the user's coding agent over MCP — so there is no build mirror,
- * chat store, or prompt bridge here anymore.
+ * A thin frame around MainWorkspace, which reads the project, its published
+ * version and its backend state, and shows the live summary (WorkspaceHome)
+ * or, with nothing built yet, connecting the agent (WorkspaceSetup). Builds
+ * arrive through the one door, the user's coding agent over MCP.
  */
 
-import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { MainWorkspace } from '@/components/workspace/MainWorkspace'
-import { getProjects } from '@/lib/api/projects'
 
 export default function OverviewPage() {
   const params = useParams()
   const projectId = params.id as string
-
-  const [projectName, setProjectName] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!projectId) return
-    getProjects()
-      .then((projects) => {
-        const name = projects.find((p) => p.id === projectId)?.name
-        if (name) setProjectName(name)
-      })
-      .catch(() => {})
-  }, [projectId])
-
-  // A document surface: the page scrolls with the window (the console frame
-  // owns scrolling), so no fixed-height wrapper here.
-  return <MainWorkspace projectId={projectId} projectName={projectName} />
+  // A document surface: the page scrolls with the window (the console frame owns scrolling).
+  return <MainWorkspace projectId={projectId} />
 }

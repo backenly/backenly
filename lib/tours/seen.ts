@@ -10,7 +10,7 @@
 import { prisma } from '@/lib/db/prisma'
 
 /** Every tour the console knows. A client cannot mark anything else. */
-export const TOUR_IDS = ['console'] as const
+export const TOUR_IDS = ['console', 'start-choice'] as const
 export type TourId = (typeof TOUR_IDS)[number]
 
 export function isTourId(value: unknown): value is TourId {

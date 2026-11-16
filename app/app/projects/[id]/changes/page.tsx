@@ -2,11 +2,13 @@
 
 /**
  * History: one place for every change to the backend, and the way back from
- * any of them (components/changes/ChangeHistory.tsx).
+ * any of them (components/changes/ChangeHistory.tsx, which draws the header,
+ * the filter and the ledger).
  *
  * The schema and the rest of the backend share one history (lib/changes): a
- * change that adds a table and a bucket is one row, restored as one. The tabs
- * narrow it to one part of the backend; published versions mark the full list.
+ * change that adds a table and a bucket is one row, undone as one. One quiet
+ * filter narrows it to a part of the backend (?part=, kept from the old tabs;
+ * a change opens in a drawer at ?change=).
  *
  * At /changes, not /history: that path is a permanent redirect to the Overview
  * (next.config.js, from the activity page deleted in July 2026), and browsers
@@ -14,7 +16,6 @@
  */
 
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
-import { KitCard, KitTab, KitTabs, PageHeader } from '@/components/inspector/kit'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { ChangeHistory } from '@/components/changes/ChangeHistory'
 import { RESOURCES } from '@/components/changes/present'
@@ -36,22 +37,7 @@ export default function HistoryPage() {
 
   return (
     <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
-      <PageHeader
-        className="!px-0"
-        title="History"
-        description="Every change to your backend, from your coding agents, from Backenly and from you. Each is checked after it applies, and any can be restored."
-        tabs={
-          <KitTabs>
-            <KitTab active={!resource} onClick={() => show(null)}>All</KitTab>
-            {RESOURCES.map((r) => (
-              <KitTab key={r.id} active={resource === r.id} onClick={() => show(r.id)}>{r.label}</KitTab>
-            ))}
-          </KitTabs>
-        }
-      />
-      <KitCard className="mt-5 overflow-hidden">
-        <ChangeHistory key={resource ?? 'all'} projectId={projectId} resource={resource} />
-      </KitCard>
+      <ChangeHistory key={resource ?? 'all'} projectId={projectId} resource={resource} onResource={show} />
     </div>
   )
 }

@@ -101,7 +101,7 @@ describe('every surface reads the mode rather than the dial', () => {
   it('the Autonomy page shows shadow over the dial, and says why', () => {
     const src = read('components/AutonomyGuardrailsSettings.tsx')
     // The badge.
-    expect(src).toMatch(/shadow\s*\n?\s*\?\s*\{ label: 'Shadow'/)
+    expect(src).toMatch(/shadow\s*\n?\s*\?\s*\{ label: 'Watching only'/)
     // And the body, because a badge is a label and this is the most important
     // fact on the page when it is true.
     expect(src).toContain('Watching, not repairing')

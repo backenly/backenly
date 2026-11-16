@@ -167,7 +167,8 @@ setup('sign up the first operator', async ({ page, request, baseURL }) => {
   expect(seen.available, 'the installed tour migration is unavailable').toBe(true)
   if (!seen.seen.includes('console')) {
     await page.goto(`/app/projects/${id}`)
-    await expect(page.locator('[data-tour="connect-agent"]')).toBeVisible({ timeout: 15_000 })
+    // The tour's first stop: the sidebar's Connect item, on every project page.
+    await expect(page.locator('[data-tour="nav-connect"]')).toBeVisible({ timeout: 15_000 })
     for (const title of [
       'Connect your coding agent',
       'Everything your agent builds lands here',

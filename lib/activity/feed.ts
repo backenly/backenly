@@ -143,6 +143,11 @@ function labelForAudit(
   const t = type.toLowerCase()
   const d = detail ?? {}
 
+  // A backend moved in (lib/import/jobs.ts): its start and its end carry their own sentence.
+  if (t === 'import') {
+    return { kind: 'general', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : humaniseAction(action) }
+  }
+
   // An architecture change milestone carries the sentence written for it.
   if (t === ARCHITECTURE_LOG_TYPE) {
     return { kind: 'autonomy', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : 'Backenly recorded an architecture change' }

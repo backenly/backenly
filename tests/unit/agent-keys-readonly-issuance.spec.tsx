@@ -14,12 +14,16 @@
  * with no marker. The only read-only path was the Cloud OAuth consent screen,
  * which a self-hosted install cannot even reach.
  *
- * Renders the real panel: the switch in the New key dialog sends readOnly, and a
- * read-only key is labelled in the list.
+ * Renders the real panel: the switch in the Add agent dialog sends readOnly, a
+ * read-only key is labelled in the list, and the setup's Generate key names the
+ * key after the chosen agent instead of "Agent setup" (2026-11-16).
  */
 
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { AgentKeysPanel } from '@/components/connect/AgentKeysPanel'
+import { forgetProjectReads } from '@/lib/api/projects'
+import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
+import { clearAgentConnectionCache } from '@/lib/hooks/useAgentConnection'
 
 jest.mock('next/navigation', () => ({
   useRouter: () => ({ push: jest.fn(), replace: jest.fn(), prefetch: jest.fn(), back: jest.fn(), refresh: jest.fn() }),
@@ -32,12 +36,17 @@ const posted: Array<Record<string, unknown>> = []
 let listedKeys: Array<Record<string, unknown>> = []
 
 function json(status: number, body: unknown) {
-  return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) } as Response
+  return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body), json: async () => body } as Response
 }
 
+const EXISTING = { id: 'k0', name: 'MCP key', label: 'laptop', readOnly: false, masked: 'mcp_live_cccc…', createdAt: new Date().toISOString(), lastUsed: null, expiresAt: null }
+
 beforeEach(() => {
+  forgetProjectReads()
+  clearProjectRoleCache()
+  clearAgentConnectionCache()
   posted.length = 0
-  listedKeys = []
+  listedKeys = [EXISTING]
   global.fetch = jest.fn(async (url: any, init?: any) => {
     const path = String(url).split('?')[0]
     if (path.endsWith('/mcp/keys') && init?.method === 'POST') {
@@ -48,22 +57,23 @@ beforeEach(() => {
     if (path.endsWith('/mcp/keys')) return json(200, { keys: listedKeys })
     if (path.endsWith('/mcp/usage')) return json(200, { calls24h: 0, calls7d: 0, errorRate: 0, byKey: [], recent: [] })
     if (path.endsWith('/mcp/status')) return json(200, { connected: false, lastSeenAt: null, client: null })
+    if (path === '/api/projects/p1') return json(200, { success: true, data: { id: 'p1', name: 'shop', role: 'OWNER', canWrite: true, canAdminister: true } })
     return json(404, {})
   }) as any
 })
 
-// The label and the read-only choice live in the dialog behind New key.
-async function openNewKey() {
-  fireEvent.click(screen.getByText('New key'))
+// The name and the read-only choice live in the dialog behind Add agent.
+async function openAddAgent() {
+  fireEvent.click(screen.getByRole('button', { name: 'Add agent' }))
   await act(async () => {})
 }
 
 it('the Read-only switch issues a read-only key', async () => {
   render(<AgentKeysPanel projectId="p1" />)
   await act(async () => {})
-  await openNewKey()
+  await openAddAgent()
   fireEvent.click(screen.getByRole('switch', { name: /read-only/i }))
-  fireEvent.change(screen.getByPlaceholderText(/CI server/), { target: { value: 'contractor agent' } })
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'contractor agent' } })
   fireEvent.click(screen.getByText('Create key'))
   await act(async () => {})
   expect(posted).toHaveLength(1)
@@ -73,8 +83,8 @@ it('the Read-only switch issues a read-only key', async () => {
 it('left off, the key is read-write as before', async () => {
   render(<AgentKeysPanel projectId="p1" />)
   await act(async () => {})
-  await openNewKey()
-  fireEvent.change(screen.getByPlaceholderText(/CI server/), { target: { value: 'ci server' } })
+  await openAddAgent()
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'ci server' } })
   fireEvent.click(screen.getByText('Create key'))
   await act(async () => {})
   expect(posted[0]).toMatchObject({ readOnly: false })
@@ -87,7 +97,16 @@ it('a read-only key is labelled in the list, a read-write one is not', async () 
   ]
   render(<AgentKeysPanel projectId="p1" />)
   await act(async () => {})
-  expect(screen.getAllByText('Read-only')).toHaveLength(1) // the one badge; the switch is in the closed dialog
+  expect(screen.getAllByText('Read-only')).toHaveLength(1) // the one fact; the switch is in the closed dialog
   expect(screen.getByText('inspector')).toBeTruthy()
   expect(screen.getByText('builder')).toBeTruthy()
+})
+
+it('with no agent yet, Generate key names the key after the chosen agent', async () => {
+  listedKeys = []
+  render(<AgentKeysPanel projectId="p1" />)
+  await act(async () => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Generate key' }))
+  await act(async () => {})
+  expect(posted[0]).toMatchObject({ label: 'Claude Code', readOnly: false })
 })

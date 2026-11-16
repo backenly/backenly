@@ -19,9 +19,15 @@
  * not on the page is dropped rather than pointed at empty space.
  *
  * A user whose coding agent is already connected is not told to connect it:
- * the Connect stop is dropped and the tour ends on Done. The answer is the top
- * bar's (lib/hooks/useAgentConnection.ts), read as it stands when the tour
- * starts rather than asked for again.
+ * the Connect stop is dropped and the tour ends on Done. Nor is someone who
+ * cannot create keys (below ADMIN, the floor of POST /mcp/keys). Both answers
+ * are the shell's (lib/hooks/useAgentConnection.ts, lib/hooks/useProjectRole.ts),
+ * read as they stand when the tour starts rather than asked for again; an
+ * answer not in yet keeps the stop, since a new user is who it is for.
+ *
+ * The Connect stop points at the sidebar's Connect item, which is on every
+ * page and carries the agent's state. The top bar's "Connect agent" is not on
+ * every page (not on Overview or Connect, nor once an agent connects).
  *
  * Motion. The spotlight and the card travel on one spring, so moving between
  * stops reads as one camera move rather than a card blinking out and back in
@@ -40,6 +46,7 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion, type Variants 
 import { ArrowRight, X } from 'lucide-react'
 import { placeTooltip, type Box, type Side } from '@/lib/tours/placement'
 import { readAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { readProjectRole } from '@/lib/hooks/useProjectRole'
 import { BUTTON_BASE, BUTTON_SIZES, BUTTON_VARIANTS } from '@/components/inspector/kit'
 import { FLOAT, FOCUS, R_PANEL, RAISE } from '@/components/console/tokens'
 import { TourScene, type SceneName } from './TourScenes'
@@ -78,8 +85,8 @@ interface Step {
  */
 export const CONSOLE_TOUR: Step[] = [
   {
-    target: 'connect-agent',
-    side: 'bottom',
+    target: 'nav-connect',
+    side: 'right',
     scene: 'connect',
     title: 'Connect your coding agent',
     body: 'Your agent builds this backend over MCP. Create a project-scoped key here and copy the install command for Claude Code, Cursor, Codex or Antigravity.',
@@ -166,7 +173,9 @@ export function ConsoleTour() {
   // False from the moment the tour is dismissed. The layer is then hidden from
   // assistive technology and lets clicks through, fades, and unmounts.
   const [open, setOpen] = useState(false)
-  const [agentConnected, setAgentConnected] = useState(false)
+  // Whether the tour may send this person to connect an agent: theirs is not
+  // connected yet, and they can create keys.
+  const [offerConnect, setOfferConnect] = useState(true)
   const [index, setIndex] = useState(0)
   // Which way the last move went, so the card's contents slide with it.
   const [direction, setDirection] = useState<1 | -1>(1)
@@ -198,14 +207,15 @@ export function ConsoleTour() {
         // Let the page settle so the first spotlight lands on a painted target.
         timer = setTimeout(() => {
           if (cancelled || window.innerWidth < MIN_WIDTH) return
-          // Still unknown here means the top bar has not heard back: keep the
+          // Still unknown here means the shell has not heard back: keep the
           // Connect stop, since a new user is who it is for.
           const connected = !!projectId && readAgentConnection(projectId).status === 'connected'
-          const present = CONSOLE_TOUR.filter(
-            (s) => targetEl(s.target) && !(connected && s.target === 'connect-agent'),
-          )
+          const role = projectId ? readProjectRole(projectId) : null
+          const cannotCreateKeys = !!role && !role.loading && !role.error && !role.canAdminister
+          const offer = !connected && !cannotCreateKeys
+          const present = CONSOLE_TOUR.filter((s) => targetEl(s.target) && (offer || s.target !== 'nav-connect'))
           if (present.length > 0) {
-            setAgentConnected(connected)
+            setOfferConnect(offer)
             setSteps(present)
             setOpen(true)
           }
@@ -462,7 +472,7 @@ export function ConsoleTour() {
                   Back
                 </button>
               )}
-              {last && projectId && !agentConnected ? (
+              {last && projectId && offerConnect ? (
                 <button type="button" onClick={connect} className={`group ${button} ${BUTTON_VARIANTS.primary}`}>
                   Connect your agent
                   <ArrowRight className="h-[13px] w-[13px] transition-transform duration-150 group-hover:translate-x-0.5" aria-hidden />

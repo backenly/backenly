@@ -1,14 +1,30 @@
 'use client'
 
 /**
- * /app/support/[id]: one support case, as a correspondence timeline.
+ * /app/support/[id]: one support case, read as a thread.
  *
- * The opening description is the first entry; Backenly AI's instant answer and
- * the team's replies follow in order, each under its author. The AI entry tells
- * the truth about itself: writing (and retrying, which the server does on its
- * own after a transient failure), answered, or not answered, with the reason in
- * the customer's terms and a way to ask again when another attempt can help
- * (lib/support/constants.ts supportAiRetryAllowed, the same rule the API holds).
+ *   Support / #1043
+ *   Webhook retries stopped after the region move                [Mark resolved]
+ *   ◆ Waiting on you   Production impaired   API & runtime   checkout-api   Opened Nov 15, 8:31 PM
+ *
+ *   (AJ) You  5h ago
+ *        Since moving checkout-api to N. Virginia yesterday, …
+ *   (▣)  Backenly AI  Answered 41 s after you opened the case
+ *        ┌ the answer, on a panel lit violet along its top edge ┐
+ *   (▤)  Backenly team  First reply 3 h 12 m after you opened it
+ *        ┌ the reply, on a panel ┐
+ *   (AJ) [ reply composer ]
+ *
+ * One column, no side panel: what a side panel used to repeat (status,
+ * severity, category, project, opened) is the facts line under the title.
+ * Your own words sit plain; Backenly's replies sit on panels, the AI's marked
+ * by its sparkle and a violet edge, the team's by the logo.
+ *
+ * The AI entry tells the truth about itself: writing (and retrying, which the
+ * server does on its own after a transient failure), answered, or not
+ * answered, with the reason in the customer's terms and a way to ask again
+ * when another attempt can help (lib/support/constants.ts
+ * supportAiRetryAllowed, the same rule the API holds).
  *
  * The page polls while the AI answer is being written, then refreshes gently
  * while the tab is visible so a team reply appears without a reload. A polite
@@ -16,24 +32,24 @@
  */
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import Link from 'next/link'
 import { notFound, useParams, useRouter } from 'next/navigation'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { ArrowUpRight, Check, LifeBuoy, RotateCcw, Send, Sparkles } from 'lucide-react'
+import { RotateCcw } from 'lucide-react'
+import { ActorMark } from '@/components/console/ActorMark'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { Avatar, useMe } from '@/components/shell/ConsoleChrome'
 import { Logo } from '@/components/Logo'
-import {
-  Breadcrumbs, EmptyState, KitButton, KitButtonLink, KitCard, KitNote, PageHeader, Skeleton, Spinner, StatusDot, Tag,
-} from '@/components/inspector/kit'
-import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_PANEL, WELL } from '@/components/console/tokens'
+import { Breadcrumbs, KitButton, KitNote, PageHeader, Skeleton, Spinner } from '@/components/inspector/kit'
+import { EDGE, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_PANEL, WELL } from '@/components/console/tokens'
 import {
   getSupportTicket, patchSupportTicket, replyToSupportTicket, SupportApiError, timeAgo,
   type SupportLevel, type TicketDetail, type TicketMessage,
 } from '@/lib/api/support'
 import {
-  SEVERITY_TAG_TONE, STATUS_BADGE, aiShortfall, categoryLabel, docsFor, formatDateTime, severityLabel, teamTargetLabel,
+  aiShortfall, caseState, categoryLabel, docsFor, formatDateTime, formatSpan, formatWhen, isProductionSeverity,
+  severityLabel, teamTargetLabel,
 } from '@/components/support/presentation'
+import { CaseGlyph, ExternalLink, InlineLink, SeverityTag } from '@/components/support/parts'
 import { SupportMarkdown } from '@/components/support/SupportMarkdown'
 import { TICKET_BODY_MAX, supportAiRetryAllowed } from '@/lib/support/constants'
 
@@ -42,6 +58,8 @@ const AI_WAIT_MS = 4 * 60_000
 const AI_POLL_MS = 3_000
 /** While visible, so a team reply shows up without a reload. */
 const REFRESH_MS = 30_000
+/** The reading column: a thread is read, not scanned. */
+const COLUMN = 'max-w-[760px]'
 
 const draftKey = (id: string) => `bk.support.draft.v1.${id}`
 
@@ -73,7 +91,8 @@ function SupportCase() {
   const [ticket, setTicket] = useState<TicketDetail | null>(null)
   const [level, setLevel] = useState<SupportLevel | null>(null)
   const [missing, setMissing] = useState(false)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState(false)
+  const [retryingLoad, setRetryingLoad] = useState(false)
   const [busy, setBusy] = useState<'status' | 'retry' | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [waitOver, setWaitOver] = useState(false)
@@ -88,7 +107,7 @@ function SupportCase() {
       setTicket(r.ticket)
       setOpenedPhase((p) => p ?? phaseOf(r.ticket, false))
       if (r.level) setLevel(r.level)
-      setLoadError(null)
+      setLoadError(false)
     } catch (e) {
       if (e instanceof SupportApiError && e.status === 401) {
         router.push(`/auth/login?redirect=/app/support/${ticketId}`)
@@ -98,7 +117,7 @@ function SupportCase() {
         setMissing(true)
         return
       }
-      setLoadError(e instanceof Error ? e.message : 'Could not load the case')
+      setLoadError(true)
     }
   }, [ticketId, router])
 
@@ -159,24 +178,44 @@ function SupportCase() {
       }
       await load()
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'That did not work')
+      setActionError(e instanceof Error ? e.message : 'That did not work. Try again.')
     } finally {
       setBusy(null)
     }
   }
 
-  if (missing) {
+  const retryLoad = async () => {
+    setRetryingLoad(true)
+    await load()
+    setRetryingLoad(false)
+  }
+
+  if (missing || (!ticket && loadError)) {
     return (
       <OrgShell>
-        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} py-10`}>
-          <KitCard>
-            <EmptyState
-              icon={LifeBuoy}
-              title="Case not found"
-              description="It may belong to another account, or the link is wrong."
-              action={<KitButtonLink href="/app/support">Back to Support</KitButtonLink>}
+        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+          <div className={COLUMN}>
+            <PageHeader
+              flush
+              breadcrumb={<Breadcrumbs items={[{ label: 'Support', href: '/app/support' }, { label: 'Case' }]} />}
+              title={missing ? 'Case not found' : 'Case'}
             />
-          </KitCard>
+            <div className={`${PLATE} border ${EDGE} ${R_PANEL} flex flex-wrap items-center gap-x-[12px] gap-y-[8px] px-[16px] py-[15px] text-[13px] leading-[20px] text-zinc-300 sm:px-[20px]`}>
+              {missing ? (
+                <span>
+                  It may belong to another account, or the link is wrong.{' '}
+                  <InlineLink href="/app/support">Back to Support</InlineLink>
+                </span>
+              ) : (
+                <>
+                  <span className="min-w-0 flex-1">Could not load the case.</span>
+                  <KitButton size="sm" onClick={retryLoad} loading={retryingLoad}>
+                    Try again
+                  </KitButton>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </OrgShell>
     )
@@ -185,115 +224,118 @@ function SupportCase() {
   if (!ticket) {
     return (
       <OrgShell>
-        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-7 sm:pt-9`} aria-busy="true">
-          {loadError ? (
-            <KitCard>
-              <EmptyState
-                icon={LifeBuoy}
-                title="Could not load the case"
-                description={loadError}
-                action={<KitButton onClick={load}>Try again</KitButton>}
-              />
-            </KitCard>
-          ) : (
-            <>
-              <Skeleton className="h-[14px] w-32" />
-              <Skeleton className="mt-4 h-[26px] w-[420px] max-w-full" />
-              <Skeleton className="mt-3 h-[14px] w-56" />
-              <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_300px]">
-                <div className="space-y-6">
-                  <Skeleton className="h-[120px] w-full" />
-                  <Skeleton className="h-[160px] w-full" />
+        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`} aria-busy="true" aria-label="Loading the case">
+          <div className={`${COLUMN} pt-[28px] sm:pt-[36px]`}>
+            <Skeleton className="h-[12px] w-[96px]" />
+            <Skeleton className="mt-[16px] h-[24px] w-[440px] max-w-full" />
+            <Skeleton className="mt-[12px] h-[12px] w-[360px] max-w-full" />
+            <div className="mt-[36px] space-y-[28px]">
+              {[0, 1].map((i) => (
+                <div key={i} className="flex gap-[14px]">
+                  <Skeleton className="h-[28px] w-[28px] flex-shrink-0 !rounded-full" />
+                  <div className="flex-1 space-y-[10px] pt-[6px]">
+                    <Skeleton className="h-[12px] w-[160px]" />
+                    <Skeleton className={i ? 'h-[96px] w-full' : 'h-[44px] w-4/5'} />
+                  </div>
                 </div>
-                <Skeleton className="h-[280px] w-full" />
-              </div>
-            </>
-          )}
+              ))}
+            </div>
+          </div>
         </div>
       </OrgShell>
     )
   }
 
-  const status = STATUS_BADGE[ticket.status] ?? { tone: 'neutral' as const, label: ticket.status }
+  const state = caseState(ticket.status)
   const aiMessage = ticket.messages.find((m) => m.author === 'ai')
-  const afterOpening = ticket.messages
+  const firstStaff = ticket.messages.find((m) => m.author === 'staff')
   // The AI entry sits where its answer would be: right after the opening
   // message, ahead of any later correspondence.
   const showAiEntry = !aiMessage && phase !== 'superseded'
   const canRetry = supportAiRetryAllowed(ticket) && phase === 'missed'
+  const opened = new Date(ticket.createdAt).getTime()
+
+  /** "Answered 41 s after you opened the case", from the message times. */
+  const sinceOpened = (at: string): string => formatSpan(new Date(at).getTime() - opened)
+
+  const whenFor = (m: TicketMessage): ReactNode => {
+    if (m.id === aiMessage?.id && sinceOpened(m.createdAt)) {
+      return `Answered ${sinceOpened(m.createdAt)} after you opened the case`
+    }
+    if (m.id === firstStaff?.id) {
+      const at = ticket.firstStaffReplyAt ?? m.createdAt
+      if (sinceOpened(at)) return `First reply ${sinceOpened(at)} after you opened it`
+    }
+    return timeAgo(m.createdAt)
+  }
 
   return (
     <OrgShell>
-      <PageHeader
-        breadcrumb={<Breadcrumbs items={[{ label: 'Support', href: '/app/support' }, { label: `Case #${ticket.caseNumber}` }]} />}
-        title={ticket.subject}
-        meta={null}
-        description={
-          <span className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px]">
-            <StatusDot tone={status.tone} label={<span className="text-[13px]">{status.label}</span>} />
-            <span className="text-faint">
-              Opened{' '}
-              <time dateTime={ticket.createdAt} title={formatDateTime(ticket.createdAt)}>
-                {timeAgo(ticket.createdAt)}
-              </time>
-            </span>
-            {ticket.project && (
-              <span className="text-faint">
-                Project{' '}
-                <Link
-                  href={`/app/projects/${ticket.project.id}`}
-                  className={`rounded-[3px] text-zinc-300 underline decoration-white/20 underline-offset-[3px] hover:text-zinc-100 ${FOCUS}`}
-                >
-                  {ticket.project.name}
-                </Link>
-              </span>
-            )}
-          </span>
-        }
-        actions={
-          ticket.status === 'resolved' ? (
-            <KitButton icon={RotateCcw} loading={busy === 'status'} onClick={() => act('status', () => patchSupportTicket(ticketId, 'reopen'))}>
-              Reopen case
-            </KitButton>
-          ) : ticket.status !== 'closed' ? (
-            <KitButton icon={Check} loading={busy === 'status'} onClick={() => act('status', () => patchSupportTicket(ticketId, 'resolve'))}>
-              Mark resolved
-            </KitButton>
-          ) : null
-        }
-      />
-
       <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
-        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-          {announcement}
-        </p>
+        <div className={COLUMN}>
+          <PageHeader
+            flush
+            breadcrumb={<Breadcrumbs items={[{ label: 'Support', href: '/app/support' }, { label: `#${ticket.caseNumber}` }]} />}
+            title={<span className="block text-[24px] leading-[30px] tracking-[-0.025em] [overflow-wrap:anywhere]">{ticket.subject}</span>}
+            description={
+              <span className="mt-[4px] flex flex-wrap items-center gap-x-[16px] gap-y-[6px] text-[13px] leading-[20px] text-faint">
+                <CaseGlyph state={state} showLabel={state === 'waiting'} />
+                {isProductionSeverity(ticket.severity) ? (
+                  <SeverityTag severity={ticket.severity} />
+                ) : (
+                  <span>{severityLabel(ticket.severity)}</span>
+                )}
+                <span>{categoryLabel(ticket.category)}</span>
+                {ticket.project && <InlineLink href={`/app/projects/${ticket.project.id}`}>{ticket.project.name}</InlineLink>}
+                <span>
+                  Opened{' '}
+                  <time dateTime={ticket.createdAt} title={formatDateTime(ticket.createdAt)} className="tabular-nums">
+                    {formatWhen(ticket.createdAt)}
+                  </time>
+                </span>
+                {state === 'resolved' && ticket.resolvedAt && (
+                  <span>
+                    Resolved{' '}
+                    <time dateTime={ticket.resolvedAt} title={formatDateTime(ticket.resolvedAt)} className="tabular-nums">
+                      {formatWhen(ticket.resolvedAt)}
+                    </time>
+                  </span>
+                )}
+              </span>
+            }
+            actions={
+              state === 'resolved' ? (
+                <KitButton loading={busy === 'status'} onClick={() => act('status', () => patchSupportTicket(ticketId, 'reopen'))}>
+                  Reopen case
+                </KitButton>
+              ) : state !== 'closed' ? (
+                <KitButton loading={busy === 'status'} onClick={() => act('status', () => patchSupportTicket(ticketId, 'resolve'))}>
+                  Mark resolved
+                </KitButton>
+              ) : null
+            }
+          />
 
-        {actionError && (
-          <div className="mb-5">
-            <KitNote tone="danger" title="That did not work">
-              {actionError}
-            </KitNote>
-          </div>
-        )}
+          <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+            {announcement}
+          </p>
 
-        <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_300px]">
-          <section aria-label="Correspondence" className="min-w-0">
-            {ticket.status === 'resolved' && (
-              <div className="mb-6">
-                <KitNote tone="success" title="Resolved">
-                  {ticket.resolvedBy === 'staff' ? 'The team marked this case resolved.' : 'You marked this case resolved.'} Reply if the
-                  problem is back; replying reopens it.
-                </KitNote>
-              </div>
-            )}
+          {actionError && (
+            <div className="mb-[20px]">
+              <KitNote tone="danger" title="That did not work">
+                {actionError}
+              </KitNote>
+            </div>
+          )}
 
-            <ol className="relative">
-              <ThreadEntry author="user" at={ticket.createdAt} label="opened the case">
-                <PlainBody text={ticket.message} />
-              </ThreadEntry>
+          <ol aria-label="Correspondence" className="relative">
+            <Entry author="user" meta={<When at={ticket.createdAt}>{timeAgo(ticket.createdAt)}</When>}>
+              <PlainBody text={ticket.message} />
+            </Entry>
 
-              {showAiEntry && (
-                <ThreadEntry author="ai" at={null} label="instant answer">
+            {showAiEntry && (
+              <Entry author="ai" meta={aiPending ? 'Writing an answer' : 'No instant answer'}>
+                <ReplyPanel ai>
                   {aiPending ? (
                     <AiWriting retrying={phase === 'retrying'} />
                   ) : (
@@ -306,131 +348,120 @@ function SupportCase() {
                       onRetry={() => act('retry', () => patchSupportTicket(ticketId, 'retry_ai'))}
                     />
                   )}
-                </ThreadEntry>
-              )}
+                </ReplyPanel>
+              </Entry>
+            )}
 
-              {afterOpening.map((m) => (
-                <ThreadEntry key={m.id} author={m.author} at={m.createdAt}>
-                  {m.author === 'user' ? <PlainBody text={m.body} /> : <SupportMarkdown>{m.body}</SupportMarkdown>}
-                </ThreadEntry>
-              ))}
-
-              <li className="relative flex gap-3.5">
-                {closed ? (
-                  <div className="ml-[46px] min-w-0 flex-1">
-                    <KitNote title="This case is closed">
-                      Closed cases are read-only.{' '}
-                      <Link href="/app/support/new" className="text-violet-300 underline underline-offset-2 hover:text-violet-200">
-                        Open a new case
-                      </Link>{' '}
-                      if the problem is back.
-                    </KitNote>
-                  </div>
+            {ticket.messages.map((m) => (
+              <Entry key={m.id} author={m.author} meta={<When at={m.createdAt}>{whenFor(m)}</When>}>
+                {m.author === 'user' ? (
+                  <PlainBody text={m.body} />
                 ) : (
-                  <ReplyComposer
-                    ticketId={ticketId}
-                    resolved={ticket.status === 'resolved'}
-                    onSent={load}
-                  />
+                  <ReplyPanel ai={m.author === 'ai'}>
+                    <SupportMarkdown>{m.body}</SupportMarkdown>
+                  </ReplyPanel>
                 )}
-              </li>
-            </ol>
-          </section>
+              </Entry>
+            ))}
 
-          <CaseDetails ticket={ticket} level={level} />
+            <li className="relative flex gap-[14px]">
+              {closed ? (
+                <p className="ml-[42px] text-[13px] leading-[20px] text-faint">
+                  This case is closed. <InlineLink href="/app/support/new">Open a new case</InlineLink> if the problem is back.
+                </p>
+              ) : (
+                <ReplyComposer ticketId={ticketId} resolved={state === 'resolved'} onSent={load} />
+              )}
+            </li>
+          </ol>
         </div>
       </div>
     </OrgShell>
   )
 }
 
-/* ── Timeline ─────────────────────────────────────────────────────────────── */
+/* ── Thread ───────────────────────────────────────────────────────────────── */
 
-const AUTHOR: Record<TicketMessage['author'], { name: string; role?: string }> = {
-  user: { name: 'You' },
-  ai: { name: 'Backenly AI', role: 'AI' },
-  staff: { name: 'Backenly team', role: 'Support' },
+const AUTHOR_NAME: Record<TicketMessage['author'], string> = {
+  user: 'You',
+  ai: 'Backenly AI',
+  staff: 'Backenly team',
 }
 
 function AuthorMark({ author }: { author: TicketMessage['author'] }) {
   const me = useMe()
-  if (author === 'user') return <Avatar user={me} size={32} />
+  if (author === 'user') return <Avatar user={me} size={28} className="text-[10.5px]" />
   if (author === 'ai') {
-    return (
-      <span
-        aria-hidden
-        className="flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-full bg-[#141518] text-violet-300 ring-1 ring-inset ring-violet-300/25"
-      >
-        <Sparkles className="h-[15px] w-[15px]" strokeWidth={1.75} />
-      </span>
-    )
+    // Backenly's own tile mark: the instant answer is Backenly replying, not a generic "AI" sparkle.
+    return <ActorMark actor={{ type: 'backenly', label: 'Backenly' }} size={28} />
   }
   return (
     <span
       aria-hidden
-      className="flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#141518] ring-1 ring-inset ring-white/[0.12] [&_svg]:h-[18px] [&_svg]:w-[18px]"
+      className="flex h-[28px] w-[28px] flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#141518] ring-1 ring-inset ring-white/[0.12] [&_svg]:h-[16px] [&_svg]:w-[16px]"
     >
       <Logo />
     </span>
   )
 }
 
-/**
- * One entry: who, when, what. A hairline rail joins the entries, because the
- * thread is a real sequence. Customer text sits plain; replies sit on a panel.
- */
-function ThreadEntry({
-  author,
-  at,
-  label,
-  children,
-}: {
-  author: TicketMessage['author']
-  at: string | null
-  label?: string
-  children: ReactNode
-}) {
-  const meta = AUTHOR[author] ?? AUTHOR.user
+/** A time with its full date on hover. */
+function When({ at, children }: { at: string; children: ReactNode }) {
   return (
-    <li className="relative flex gap-3.5 pb-7">
-      <span aria-hidden className="absolute bottom-0 left-[15.5px] top-[40px] w-px bg-white/[0.07]" />
-      <div className="relative z-[1] pt-px">
+    <time dateTime={at} title={formatDateTime(at)}>
+      {children}
+    </time>
+  )
+}
+
+/**
+ * One entry: who and when on one line, then what they wrote. A hairline joins
+ * the marks, because the thread is a real sequence.
+ */
+function Entry({ author, meta, children }: { author: TicketMessage['author']; meta: ReactNode; children: ReactNode }) {
+  return (
+    <li className="relative flex gap-[14px] pb-[28px]">
+      <span aria-hidden className="absolute bottom-[4px] left-[13.5px] top-[36px] w-px bg-white/[0.07]" />
+      <div className="relative z-[1]">
         <AuthorMark author={author} />
       </div>
-      <article className={`min-w-0 flex-1 overflow-hidden ${PLATE} border ${EDGE} ${R_PANEL}`}>
-        <header className={`flex flex-wrap items-center gap-x-2 gap-y-1 border-b ${RULE} bg-white/[0.015] px-4 py-2.5`}>
-          <span className="text-[13px] font-semibold text-zinc-100">{meta.name}</span>
-          {meta.role && <Tag tone={author === 'ai' ? 'violet' : 'neutral'}>{meta.role}</Tag>}
-          {label && <span className="text-[12.5px] text-faint">{label}</span>}
-          {at && (
-            <time dateTime={at} title={formatDateTime(at)} className="ml-auto text-[12px] tabular-nums text-faint">
-              {timeAgo(at)}
-            </time>
-          )}
+      <article className="min-w-0 flex-1">
+        <header className="flex min-h-[28px] flex-wrap items-center gap-x-[10px] gap-y-[2px]">
+          <h2 className="text-[13px] font-medium leading-[20px] text-zinc-100">{AUTHOR_NAME[author] ?? AUTHOR_NAME.user}</h2>
+          <span className="text-[12.5px] leading-[18px] tabular-nums text-faint">{meta}</span>
         </header>
-        <div className="px-4 py-3.5">{children}</div>
+        <div className="mt-[6px]">{children}</div>
       </article>
     </li>
   )
 }
 
-function PlainBody({ text }: { text: string }) {
+/** Backenly's words sit on a panel; the AI's carries a violet top edge, Backenly acting. */
+function ReplyPanel({ ai = false, children }: { ai?: boolean; children: ReactNode }) {
   return (
-    <p className="whitespace-pre-wrap text-[13.5px] leading-[22px] text-zinc-200 [overflow-wrap:anywhere]">{text}</p>
+    <div
+      className={`${PLATE} border ${EDGE} ${R_PANEL} px-[16px] py-[14px] sm:px-[18px] ${
+        ai ? 'shadow-[inset_0_1px_0_rgba(167,139,250,0.7)]' : ''
+      }`}
+    >
+      {children}
+    </div>
   )
+}
+
+function PlainBody({ text }: { text: string }) {
+  return <p className="whitespace-pre-wrap text-[13.5px] leading-[22px] text-zinc-200 [overflow-wrap:anywhere]">{text}</p>
 }
 
 /** The answer being written: what it is doing, in a sentence, over a quiet placeholder. */
 function AiWriting({ retrying }: { retrying: boolean }) {
   return (
     <div aria-busy="true">
-      <p className="flex items-center gap-2 text-[13px] text-zinc-300">
+      <p className="flex items-center gap-[8px] text-[13px] leading-[20px] text-zinc-300">
         <Spinner className="h-3.5 w-3.5 text-violet-300" />
-        {retrying
-          ? 'Taking longer than usual. Trying again…'
-          : 'Reading your case and the docs that cover it…'}
+        {retrying ? 'Taking longer than usual. Trying again.' : 'Reading your case and the docs that cover it.'}
       </p>
-      <div className="mt-3 space-y-2" aria-hidden>
+      <div className="mt-[12px] space-y-[8px]" aria-hidden>
         <Skeleton className="h-[10px] w-[92%]" />
         <Skeleton className="h-[10px] w-[78%]" />
         <Skeleton className="h-[10px] w-[64%]" />
@@ -462,31 +493,23 @@ function AiMissed({
   const target = level?.targetResponseHours
   return (
     <div>
-      <p className="text-[13.5px] font-medium text-zinc-100">
+      <p className="text-[13.5px] font-medium leading-[21px] text-zinc-100">
         {stillWorking ? 'Still working on an instant answer.' : 'No instant answer this time.'}
       </p>
-      <p className="mt-1 max-w-[62ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">
+      <p className="mt-[4px] max-w-[62ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">
         {stillWorking ? 'It will appear here when it is ready.' : aiShortfall(ticket.aiState, ticket.aiError)} The Backenly team has your
         case and replies in this thread{target ? `, usually ${teamTargetLabel(target).toLowerCase()}` : ''}.
       </p>
-      <div className="mt-3.5 flex flex-wrap items-center gap-2">
+      <div className="mt-[12px] flex flex-wrap items-center gap-x-[16px] gap-y-[8px] text-[13px] leading-[20px]">
         {canRetry && (
-          <KitButton size="sm" icon={Sparkles} loading={retrying} onClick={onRetry}>
+          <KitButton size="sm" icon={RotateCcw} loading={retrying} onClick={onRetry}>
             Try the instant answer again
           </KitButton>
         )}
         {docsFor(ticket.category).map((d) => (
-          <a
-            key={d.href}
-            href={d.href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={`inline-flex h-[28px] items-center gap-1.5 rounded-[7px] px-2.5 text-[12px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.05] hover:text-zinc-100 ${FOCUS}`}
-          >
+          <ExternalLink key={d.href} href={d.href}>
             {d.title}
-            <ArrowUpRight aria-hidden className="h-3.5 w-3.5 text-zinc-500" strokeWidth={1.75} />
-            <span className="sr-only">(opens in a new tab)</span>
-          </a>
+          </ExternalLink>
         ))}
       </div>
     </div>
@@ -531,7 +554,7 @@ function ReplyComposer({ ticketId, resolved, onSent }: { ticketId: string; resol
     const el = areaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(Math.max(el.scrollHeight, 104), 360)}px`
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 96), 360)}px`
   }, [text])
 
   const send = async () => {
@@ -549,7 +572,7 @@ function ReplyComposer({ ticketId, resolved, onSent }: { ticketId: string; resol
       setText('')
       await onSent()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The reply was not sent')
+      setError(e instanceof Error ? e.message : 'The reply was not sent. Try again.')
     } finally {
       setSending(false)
     }
@@ -557,11 +580,11 @@ function ReplyComposer({ ticketId, resolved, onSent }: { ticketId: string; resol
 
   return (
     <>
-      <div className="relative z-[1] pt-px">
+      <div className="relative z-[1]">
         <AuthorMark author="user" />
       </div>
       <form
-        className={`min-w-0 flex-1 overflow-hidden ${PLATE} border ${EDGE} ${R_PANEL} transition-[border-color] duration-150 focus-within:border-white/[0.16]`}
+        className={`min-w-0 flex-1 overflow-hidden ${PLATE} border ${EDGE} ${R_PANEL} transition-[border-color,box-shadow] duration-150 focus-within:border-white/30 focus-within:ring-[3px] focus-within:ring-white/[0.08]`}
         onSubmit={(e) => {
           e.preventDefault()
           send()
@@ -588,24 +611,24 @@ function ReplyComposer({ ticketId, resolved, onSent }: { ticketId: string; resol
           rows={4}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? 'case-reply-error' : 'case-reply-hint'}
-          placeholder={resolved ? 'Still broken? Describe what you see. Replying reopens the case…' : 'Reply to the team. Paste exact errors where you can…'}
-          className={`block w-full resize-none bg-transparent px-4 py-3.5 text-[16px] leading-[22px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none sm:text-[13.5px]`}
+          placeholder={resolved ? 'Still broken? Describe what you see. Replying reopens the case.' : 'Reply to the team. Paste exact errors where you can.'}
+          className="block w-full resize-none bg-transparent px-[16px] py-[13px] text-[16px] leading-[22px] text-zinc-100 placeholder:text-faint focus:outline-none sm:text-[13.5px]"
           disabled={sending}
         />
-        <div className={`flex flex-wrap items-center justify-between gap-3 border-t ${RULE} ${WELL} px-3 py-2.5 sm:px-4`}>
+        <div className={`flex flex-wrap items-center justify-between gap-[12px] border-t ${RULE} ${WELL} py-[10px] pl-[16px] pr-[10px]`}>
           {error ? (
-            <p id="case-reply-error" role="alert" className="text-[12.5px] text-rose-300">
+            <p id="case-reply-error" role="alert" className="text-[12.5px] leading-[18px] text-rose-300">
               {error}
             </p>
           ) : (
-            <p id="case-reply-hint" className="text-[12px] text-faint">
+            <p id="case-reply-hint" className="text-[12px] leading-[18px] text-faint">
               Replies go to the Backenly team.{' '}
               <span className="hidden sm:inline">
-                <kbd className="font-sans">{isMac ? '⌘' : 'Ctrl'}</kbd>&nbsp;<kbd className="font-sans">Enter</kbd> to send.
+                <kbd className="font-sans">{isMac ? '⌘' : 'Ctrl'}</kbd>&nbsp;<kbd className="font-sans">Enter</kbd> sends.
               </span>
             </p>
           )}
-          <KitButton type="submit" variant="primary" icon={Send} loading={sending}>
+          <KitButton type="submit" variant="primary" loading={sending}>
             {sending ? 'Sending…' : 'Send reply'}
           </KitButton>
         </div>
@@ -622,90 +645,5 @@ function useIsMac(): boolean {
     noSubscription,
     () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
     () => true,
-  )
-}
-
-/* ── Details ──────────────────────────────────────────────────────────────── */
-
-function CaseDetails({ ticket, level }: { ticket: TicketDetail; level: SupportLevel | null }) {
-  const status = STATUS_BADGE[ticket.status] ?? { tone: 'neutral' as const, label: ticket.status }
-  const aiLabel =
-    ticket.aiState === 'replied'
-      ? 'Answered'
-      : ticket.aiState === 'none'
-        ? ticket.messages.some((m) => m.author === 'staff')
-          ? 'Not needed'
-          : 'Being written'
-        : 'Not answered'
-  return (
-    <aside className="space-y-4 lg:sticky lg:top-[calc(var(--console-bar)+24px)]" aria-label="Case details">
-      <section className={`${PLATE} border ${EDGE} ${R_PANEL}`}>
-        <h2 className={`border-b ${RULE} px-4 py-3 text-[13px] font-semibold text-zinc-100`}>Case details</h2>
-        <dl className="divide-y divide-white/[0.05] px-4">
-          <Detail term="Status">
-            <StatusDot tone={status.tone} label={<span className="text-[13px] text-zinc-200">{status.label}</span>} />
-          </Detail>
-          <Detail term="Severity">
-            <Tag tone={SEVERITY_TAG_TONE[ticket.severity] ?? 'neutral'}>{severityLabel(ticket.severity)}</Tag>
-          </Detail>
-          <Detail term="Category">{categoryLabel(ticket.category)}</Detail>
-          {ticket.project && (
-            <Detail term="Project">
-              <Link
-                href={`/app/projects/${ticket.project.id}`}
-                className={`truncate rounded-[3px] underline decoration-white/20 underline-offset-[3px] hover:text-zinc-50 ${FOCUS}`}
-              >
-                {ticket.project.name}
-              </Link>
-            </Detail>
-          )}
-          <Detail term="Case">
-            <span className="tabular-nums">#{ticket.caseNumber}</span>
-          </Detail>
-          <Detail term="Opened">
-            <time dateTime={ticket.createdAt} className="tabular-nums">
-              {formatDateTime(ticket.createdAt)}
-            </time>
-          </Detail>
-          <Detail term="Last update">
-            <time dateTime={ticket.lastMessageAt} title={formatDateTime(ticket.lastMessageAt)} className="tabular-nums">
-              {timeAgo(ticket.lastMessageAt)}
-            </time>
-          </Detail>
-          <Detail term="Instant answer">{aiLabel}</Detail>
-        </dl>
-      </section>
-
-      {level && (
-        <section className={`${PLATE} border ${EDGE} ${R_PANEL} px-4 py-3.5`}>
-          <h2 className="text-[13px] font-semibold text-zinc-100">Your support</h2>
-          <dl className="mt-2 space-y-1.5 text-[12.5px]">
-            <div className="flex justify-between gap-3">
-              <dt className="text-faint">Plan</dt>
-              <dd className="text-zinc-300">{level.plan}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-faint">Team reply</dt>
-              <dd className="text-zinc-300">{teamTargetLabel(level.targetResponseHours)}</dd>
-            </div>
-            {level.priority && (
-              <div className="flex justify-between gap-3">
-                <dt className="text-faint">Queue</dt>
-                <dd className="text-zinc-300">Priority</dd>
-              </div>
-            )}
-          </dl>
-        </section>
-      )}
-    </aside>
-  )
-}
-
-function Detail({ term, children }: { term: string; children: ReactNode }) {
-  return (
-    <div className="flex min-h-[40px] items-center justify-between gap-3 py-2">
-      <dt className="flex-shrink-0 text-[12.5px] text-faint">{term}</dt>
-      <dd className="flex min-w-0 justify-end text-right text-[13px] text-zinc-200">{children}</dd>
-    </div>
   )
 }

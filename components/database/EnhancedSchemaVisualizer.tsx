@@ -311,7 +311,7 @@ export default function EnhancedSchemaVisualizer({
   if (error) return (
     <div className="flex items-center justify-center h-full">
       <div className="text-center">
-        <AlertCircle className="w-4 h-4 text-rose-300 mx-auto mb-3" />
+        <AlertCircle className="w-4 h-4 text-zinc-50 mx-auto mb-3" />
         <p className="text-[13px] font-semibold text-zinc-200 mb-1">Couldn&apos;t load the data model</p>
         <p className="text-[12px] text-zinc-500">{error}</p>
       </div>

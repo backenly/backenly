@@ -117,9 +117,9 @@ export function DeploymentRecoverySection() {
       </KitCard>
 
       {result && (
-        <KitCard className="border-amber-500/20">
-          <div className="flex items-center gap-2.5 border-b border-amber-500/[0.12] bg-amber-500/[0.03] px-5 py-3.5">
-            <AlertTriangle className="h-4 w-4 text-amber-400" />
+        <KitCard>
+          <div className="flex items-center gap-2.5 border-b border-white/[0.08] bg-white/[0.03] px-5 py-3.5">
+            <AlertTriangle className="h-4 w-4 text-zinc-50" />
             <div>
               <h2 className="text-[13px] font-semibold text-white">
                 Recovery credential — shown once

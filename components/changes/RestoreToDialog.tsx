@@ -28,12 +28,17 @@ type Phase =
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
-function StepList({ items }: { items: Array<{ seq: number; summary: string; tail?: string }> }) {
+/**
+ * The changes a restore would undo (or did), newest first: "#48  Created table
+ * reviews". Exported for the other places that list the steps of a way back:
+ * an agent's rollback request in Autonomy, a version's Restore in Deploy.
+ */
+export function StepList({ items }: { items: Array<{ seq: number; summary: string; tail?: string }> }) {
   return (
-    <ul className="max-h-[248px] divide-y divide-white/[0.05] overflow-y-auto rounded-[8px] border border-white/[0.07]">
+    <ul tabIndex={items.length > 6 ? 0 : undefined} className="max-h-[248px] divide-y divide-white/[0.05] overflow-y-auto rounded-[8px] border border-white/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
       {items.map((s, i) => (
         <li key={`${s.seq}-${i}`} className="grid grid-cols-[2.75rem_minmax(0,1fr)_auto] items-baseline gap-x-2 px-3 py-2 text-[12.5px]">
-          <span className="font-mono tabular-nums text-faint">#{s.seq}</span>
+          <span className="tabular-nums text-faint">#{s.seq}</span>
           <span className="truncate text-zinc-200" title={s.summary}>{s.summary}</span>
           {s.tail && <span className="text-faint">{s.tail}</span>}
         </li>
@@ -181,7 +186,7 @@ export function RestoreToDialog({
               <ul className="space-y-1.5">
                 {phase.outcome.kept.map((k) => (
                   <li key={k.id} className="text-[12.5px] leading-[18px] [overflow-wrap:anywhere]">
-                    <span className="text-zinc-200">#{k.seq} · {k.summary}</span>
+                    <span className="text-zinc-200">#{k.seq} {k.summary}</span>
                     <span className="block text-faint">{k.reason}</span>
                   </li>
                 ))}

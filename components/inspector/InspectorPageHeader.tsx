@@ -49,11 +49,11 @@ interface InspectorPageHeaderProps {
 }
 
 // Status renders as telemetry — dot + mono text — matching the workspace
-// home command bar. live = healthy (emerald), managed/governed = system-owned
+// home command bar. live = healthy (mid grey), managed/governed = system-owned
 // (neutral), beta = brand-flagged (violet, the only decorative violet allowed).
 const BADGE_STYLES: Record<BadgeProps['variant'], { dot: string; text: string }> = {
   managed:  { dot: 'bg-zinc-500',    text: 'text-zinc-400'       },
-  live:     { dot: 'bg-emerald-400', text: 'text-emerald-300/90' },
+  live:     { dot: 'bg-zinc-300',    text: 'text-zinc-300'       },
   governed: { dot: 'bg-zinc-500',    text: 'text-zinc-400'       },
   beta:     { dot: 'bg-violet-300',  text: 'text-violet-300'     },
 }

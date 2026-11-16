@@ -3688,7 +3688,7 @@ export async function dispatchTool(
       // ended here. Both facts are cheap — `status` is already loaded — so both
       // ride along on every response, and the refusal carries the deep link.
       const appUrl = publicOrigin()
-      const armUrl = `${appUrl}/app/projects/${ctx.projectId}/connect?tab=direct`
+      const armUrl = `${appUrl}/app/projects/${ctx.projectId}/connect?tab=postgres`
       const access = {
         readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
         readWriteArmed: status.credentials.some((c) => c.mode === 'READ_WRITE'),

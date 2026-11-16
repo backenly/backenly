@@ -92,7 +92,8 @@ it('asks for the list, every table, and every relationship: three reads', async 
   render(<SchemaDiagram projectId="p1" activeSchema="workspace_p1" />)
   await settle()
 
-  expect(await screen.findByText(/5 tables · 4 rels/)).toBeTruthy()
+  expect(await screen.findByText('5 tables')).toBeTruthy()
+  expect(screen.getByText('4 relationships')).toBeTruthy()
   const reads = calls.map((c) => {
     const url = new URL(c, 'http://localhost')
     return `${url.pathname}${url.searchParams.has('table') ? ' (one table)' : ''}`
@@ -104,7 +105,8 @@ it('draws the columns it was given for each table', async () => {
   render(<SchemaDiagram projectId="p1" activeSchema="workspace_p1" />)
   await settle()
 
-  expect(await screen.findByText(/5 tables · 4 rels/)).toBeTruthy()
+  expect(await screen.findByText('5 tables')).toBeTruthy()
+  expect(screen.getByText('4 relationships')).toBeTruthy()
   expect(screen.getAllByText('user_id').length).toBeGreaterThan(0)
   expect(screen.getAllByText('product_id').length).toBeGreaterThan(0)
 })

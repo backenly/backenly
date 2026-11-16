@@ -8,7 +8,9 @@
  *
  * F9: the Users tab stored one 50-row page from an uncapped fetch and showed
  * its length as the user count, so large projects under-reported and rows
- * past the first page were unreachable.
+ * past the first page were unreachable. Since the console rebuild
+ * (2026-11-16) the server pages and searches the list, and the count is the
+ * server's total.
  */
 
 import fs from 'fs'
@@ -16,7 +18,10 @@ import path from 'path'
 
 const ROOT = process.cwd()
 const configPage = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'AuthConfiguration.tsx'), 'utf8')
+const providers = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'providers.tsx'), 'utf8')
 const workbench = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'AuthWorkbench.tsx'), 'utf8')
+const usersApi = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'api.ts'), 'utf8')
+const usersPane = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'UsersPane.tsx'), 'utf8')
 const authStatus = fs.readFileSync(path.join(ROOT, 'lib', 'services', 'auth-status.ts'), 'utf8')
 const oauthRoutes = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'oauth.ts'), 'utf8')
 const saveRoute = fs.readFileSync(path.join(ROOT, 'app', 'api', 'projects', '[id]', 'credentials', 'route.ts'), 'utf8')
@@ -28,8 +33,9 @@ describe('AUTH-F7: provider universe', () => {
     expect(oauthRoutes).toContain('facebook')
   })
 
-  it('the Configuration tab renders every served provider', () => {
-    expect(configPage).toContain("'google', 'github', 'discord', 'facebook'")
+  it('the Sign-in methods tab renders every served provider', () => {
+    expect(providers).toContain("'google', 'github', 'discord', 'facebook'")
+    expect(configPage).toContain('OAUTH_PROVIDER_IDS.map(')
   })
 
   it('auth-state knows the same set', () => {
@@ -50,13 +56,16 @@ describe('AUTH-F7: provider universe', () => {
 })
 
 describe('AUTH-F9: the Users tab', () => {
-  it('pages through the route cap instead of storing one page', () => {
-    expect(workbench).toContain('limit=200&page=')
-    expect(workbench).toContain('totalPages')
+  it('asks the server for each page and each search, instead of storing one page', () => {
+    expect(usersApi).toContain('page: String(opts.page)')
+    expect(usersApi).toContain("qs.set('search', opts.search)")
+    expect(usersApi).toContain('totalPages')
+    expect(usersPane).toContain('pages={data.totalPages}')
   })
 
   it('shows the server total, not the loaded length', () => {
-    expect(workbench).toContain("${total.toLocaleString()} ${total === 1 ? 'user' : 'users'}")
-    expect(workbench).not.toContain("${users.length.toLocaleString()} ${users.length === 1")
+    expect(workbench).toContain('const total = stats?.totalUsers')
+    expect(workbench).toContain("${total.toLocaleString('en-US')} ${total === 1 ? 'user' : 'users'}")
+    expect(workbench).not.toMatch(/users\.length\.toLocaleString/)
   })
 })

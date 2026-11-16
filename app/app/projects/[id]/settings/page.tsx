@@ -1,361 +1,277 @@
 'use client'
 
 /**
- * Project Settings — first-class page (IA restructure §6.15).
+ * Project settings: one page, no tabs (project console decisions, 2026-11-16).
  *
- * Three tabs:
+ *   Settings
+ *   General          name, description; project ID, region, created
+ *   Access  2        who can open this project       [Manage members]  (Cloud)
+ *   Delete project   one row, then a dialog that asks for the name
  *
- *   • General  — name / description, connection facts (project id, API base
- *     URL, where it runs), and the danger zone (delete).
- *   • API Keys — THE one key-management surface (ClientKeysPanel). Connect →
- *     Direct links here instead of duplicating the manager.
- *   • Access   — who can open this project. Project access is org membership
- *     (lib/auth/project-access.ts), so this shows the live org roster and
- *     points to /app/members for management — read here, manage there.
+ * Settings holds no credentials (decision 4): API keys moved to Connect → API,
+ * and the old `?tab=keys` link lands there. `?tab=access` scrolls to Access.
  *
- * Deep-linkable via ?tab=keys|access. Settings are cards of one concern each:
- * title, sentence, control, and a footer holding the hint and the action.
+ * Roles come from useProjectRole (GET /api/projects/[id], the server's own
+ * resolution). Viewers read General and are told who can change it;
+ * developers edit it; deleting is ADMIN, and everyone else is told so instead
+ * of seeing a button the server refuses. Access is the team's: "Manage
+ * members" and "Upgrade to Pro" open the project's own team
+ * (organizationId), never the team the browser last remembered.
+ *
+ * A project that could not be loaded is never drawn as an empty one: its
+ * name would be blank and a delete confirmation would match nothing.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useState, type ReactNode } from 'react'
+import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
-import { SlidersHorizontal, KeyRound, Users, Check, Trash2, Crown, UserPlus, FolderLock, Lock, Plus, X, AlertTriangle, RotateCw } from 'lucide-react'
 import { setCurrentProjectId } from '@/lib/api/client'
-import { getProject, updateProject, deleteProject, type Project } from '@/lib/api/projects'
+import { deleteProject, forgetProjectReads, getProject, updateProject, type Project } from '@/lib/api/projects'
 import {
   CopyField,
-  DetailList,
-  DetailRow,
-  KitBadge,
   KitButton,
+  KitButtonLink,
+  KitConfirmDialog,
   KitInput,
-  KitNote,
-  KitTab,
-  KitTabs,
   PageHeader,
-  SettingsCard,
   Skeleton,
+  Tag,
 } from '@/components/inspector/kit'
-import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
+import { EmptyLine, Panel, RowSkeleton, Section } from '@/components/autonomy/rows'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { formatTime } from '@/components/console/format'
+import { FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { regionLabel } from '@/lib/regions'
+import { findRegion, HOME_REGION } from '@/lib/regions'
+import { refreshProjectRole, useProjectRole, type ProjectRoleState } from '@/lib/hooks/useProjectRole'
 
-type Tab = 'general' | 'keys' | 'access'
+const LINK = `rounded-[3px] text-zinc-200 underline decoration-white/25 underline-offset-[3px] transition-colors duration-150 hover:text-white hover:decoration-white/60 ${FOCUS}`
 
 export default function ProjectSettingsPage() {
   const params = useParams()
   const router = useRouter()
   const projectId = params.id as string
-  const [tab, setTab] = useState<Tab>('general')
-
-  // Deep link: /settings?tab=keys|access (used by Connect → Direct). Read after
-  // mount — useSearchParams would need a Suspense boundary at export time.
-  useEffect(() => {
-    const t = new URLSearchParams(window.location.search).get('tab')
-    if (t === 'keys' || (t === 'access' && CLOUD_CONTROL_PLANE)) setTab(t)
-  }, [])
-
-  // Keep the URL in step with the tab, so a refresh or a shared link lands on
-  // the same tab. replaceState: switching tabs is not navigation.
-  const selectTab = (next: Tab) => {
-    setTab(next)
-    const url = new URL(window.location.href)
-    if (next === 'general') url.searchParams.delete('tab')
-    else url.searchParams.set('tab', next)
-    window.history.replaceState(null, '', url.toString())
-  }
+  const role = useProjectRole(projectId)
+  const [project, setProject] = useState<Project | null>(null)
+  const [load, setLoad] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [retrying, setRetrying] = useState(false)
+  const [redirecting, setRedirecting] = useState(false)
 
   if (projectId && typeof window !== 'undefined') setCurrentProjectId(projectId)
   useEffect(() => {
     if (projectId) setCurrentProjectId(projectId)
   }, [projectId])
 
-  return (
-    <div className="pb-16">
-      <PageHeader
-        title="Settings"
-        description="Project identity, API keys and access. Every change here is scoped to this project."
-        tabs={
-          <KitTabs>
-            <KitTab active={tab === 'general'} onClick={() => selectTab('general')}>
-              <SlidersHorizontal />
-              General
-            </KitTab>
-            <KitTab active={tab === 'keys'} onClick={() => selectTab('keys')}>
-              <KeyRound />
-              API keys
-            </KitTab>
-            {/* Access is team management, and a team is an organization. Both the
-                page and the API behind it are Cloud control plane, so a public
-                build has no roster to show and no route to ask. */}
-            {CLOUD_CONTROL_PLANE && (
-              <KitTab active={tab === 'access'} onClick={() => selectTab('access')}>
-                <Users />
-                Access
-              </KitTab>
-            )}
-          </KitTabs>
-        }
-      />
+  // API keys live on Connect → API now; an old link to them still lands on them.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tab') === 'keys') {
+      setRedirecting(true)
+      router.replace(`/app/projects/${projectId}/connect?tab=api`)
+    }
+  }, [projectId, router])
 
-      {tab === 'general' && <GeneralTab projectId={projectId} onDeleted={() => router.push('/app')} />}
-      {tab === 'keys' && <ClientKeysPanel />}
-      {tab === 'access' && CLOUD_CONTROL_PLANE && <AccessTab projectId={projectId} />}
-    </div>
-  )
-}
-
-/**
- * The settings body. Each card is split from lg up: what the setting is on
- * the left, the control on the right. A single 760px column used to sit under
- * a 1200px header and leave the right of a wide screen empty.
- */
-function SettingsColumn({ children }: { children: React.ReactNode }) {
-  return (
-    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-8`}>
-      <div className="space-y-10">{children}</div>
-    </div>
-  )
-}
-
-// ── General ──────────────────────────────────────────────────────────────────
-
-function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: () => void }) {
-  const [project, setProject] = useState<Project | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [saveError, setSaveError] = useState<string | null>(null)
-
-  const [deleteText, setDeleteText] = useState('')
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
+  const read = useCallback(async () => {
     try {
       const p = await getProject(projectId)
       setProject(p)
-      setName(p.name ?? '')
-      setDescription(p.description ?? '')
+      setLoad('ready')
     } catch {
-      /* project stays null: the tab says it could not load */
+      setLoad((prev) => (prev === 'ready' ? 'ready' : 'error'))
     } finally {
-      setLoading(false)
+      setRetrying(false)
     }
   }, [projectId])
 
-  useEffect(() => { if (projectId) load() }, [projectId, load])
+  useEffect(() => {
+    if (projectId) void read()
+  }, [projectId, read])
 
-  const retry = () => {
-    setLoading(true)
-    void load()
+  // `?tab=access` was a tab; it is a section now.
+  useEffect(() => {
+    if (load !== 'ready' || new URLSearchParams(window.location.search).get('tab') !== 'access') return
+    document.getElementById('access')?.scrollIntoView({ block: 'start' })
+  }, [load])
+
+  let body: ReactNode
+  if (redirecting) {
+    body = null
+  } else if (load === 'error' || (load === 'ready' && !project)) {
+    body = (
+      <Panel>
+        <ErrorRow
+          things="this project’s settings"
+          onRetry={() => {
+            setRetrying(true)
+            // The role is read with the project: ask for both again, in one request.
+            void refreshProjectRole(projectId)
+            void read()
+          }}
+          retrying={retrying}
+        />
+      </Panel>
+    )
+  } else if (load === 'loading' || !project) {
+    body = (
+      <div aria-busy="true" aria-label="Loading settings" className="space-y-[36px]">
+        <div>
+          <Skeleton className="mb-[12px] h-[16px] w-[90px]" />
+          <Panel>
+            <RowSkeleton rows={3} lead="none" />
+          </Panel>
+        </div>
+      </div>
+    )
+  } else {
+    body = (
+      <div className="space-y-[36px]">
+        <General project={project} role={role} onSaved={setProject} />
+        {CLOUD_CONTROL_PLANE && <Access projectId={projectId} organizationId={role.organizationId} canAdminister={role.canAdminister} />}
+        <DeleteProject project={project} role={role} onDeleted={() => router.push('/app')} />
+      </div>
+    )
   }
 
-  const dirty = project ? name.trim() !== (project.name ?? '') || (description ?? '') !== (project.description ?? '') : false
+  return (
+    <div className="pb-16">
+      <PageHeader title="Settings" />
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER}`}>{body}</div>
+    </div>
+  )
+}
 
-  const save = async () => {
-    if (!dirty || !name.trim()) return
+// ── General ───────────────────────────────────────────────────────────────────
+
+/** A label beside its value from `sm`, above it on a phone. */
+function FieldRow({ label, htmlFor, hint, children }: { label: string; htmlFor?: string; hint?: string; children: ReactNode }) {
+  const Label = htmlFor ? 'label' : 'dt'
+  return (
+    <div className="grid grid-cols-1 gap-x-[16px] gap-y-[6px] px-[20px] py-[12px] sm:grid-cols-[160px_minmax(0,1fr)] sm:items-center">
+      <Label {...(htmlFor ? { htmlFor } : {})} className="text-[13px] leading-[20px] text-zinc-400">
+        {label}
+        {hint && <span className="ml-[8px] text-[12px] text-faint sm:ml-0 sm:block">{hint}</span>}
+      </Label>
+      {htmlFor ? <div className="min-w-0">{children}</div> : <dd className="min-w-0 text-[13px] leading-[20px] text-zinc-200">{children}</dd>}
+    </div>
+  )
+}
+
+function General({ project, role, onSaved }: { project: Project; role: ProjectRoleState; onSaved: (p: Project) => void }) {
+  const nameId = useId()
+  const descriptionId = useId()
+  const [name, setName] = useState(project.name ?? '')
+  const [description, setDescription] = useState(project.description ?? '')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const dirty = name.trim() !== (project.name ?? '') || description.trim() !== (project.description ?? '')
+  const region = findRegion(project.region) ?? findRegion(HOME_REGION)
+
+  async function save() {
+    if (!dirty || !name.trim() || saving) return
     setSaving(true)
     setSaved(false)
-    setSaveError(null)
+    setError(null)
     try {
-      const updated = await updateProject(projectId, { name: name.trim(), description: description.trim() || null })
-      setProject(updated)
+      const updated = await updateProject(project.id, { name: name.trim(), description: description.trim() || null })
+      // The top bar and the switcher read the same project: let them read it afresh.
+      forgetProjectReads(project.id)
+      onSaved({ ...project, ...updated })
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Could not save changes. Try again.')
+      setError(err instanceof Error ? err.message : 'Could not save. Try again.')
     } finally {
       setSaving(false)
     }
   }
 
-  // The live base is {origin}/api/v1/{projectId}, where origin is the API
-  // address of the project's region: this console's own origin for the home
-  // region, the region's API service elsewhere. The server works it out
-  // (apiBaseUrl); this page's origin would be wrong for a project in another
-  // region. The old read keyed off apiUrlProd/Staging/Dev, columns nothing in
-  // the product ever writes (the console creates projects with a name only),
-  // so this row promised a value on first publish, forever, and publishing
-  // never set it either. An operator-supplied override still wins when one of
-  // those columns is actually filled.
-  const apiBaseUrl =
-    project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
-
-  const confirmDelete = async () => {
-    if (!project || deleteText !== project.name) return
-    setDeleting(true)
-    setDeleteError(null)
-    try {
-      await deleteProject(projectId)
-      onDeleted()
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Could not delete the project. Try again.')
-      setDeleting(false)
-    }
-  }
-
-  if (loading) {
-    return (
-      <SettingsColumn>
-        {['h-[160px]', 'h-[180px]'].map((h) => (
-          <div key={h} className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,280px)_minmax(0,1fr)] lg:gap-10" aria-hidden>
-            <div className="hidden space-y-2 lg:block lg:pt-1">
-              <Skeleton className="h-[18px] w-28" />
-              <Skeleton className="h-[14px] w-52" />
-            </div>
-            <Skeleton className={`${h} w-full rounded-[10px]`} />
-          </div>
-        ))}
-      </SettingsColumn>
-    )
-  }
-
-  // A project that could not be loaded is not drawn as an empty one: its name
-  // field would be blank, its region the home region, and the delete check
-  // would match an empty box against the missing name.
-  if (!project) {
-    return (
-      <SettingsColumn>
-        <KitNote
-          tone="danger"
-          icon={AlertTriangle}
-          actions={<KitButton size="sm" variant="ghost" icon={RotateCw} onClick={retry}>Try again</KitButton>}
-        >
-          Couldn’t load this project’s settings.
-        </KitNote>
-      </SettingsColumn>
-    )
-  }
+  const facts = (
+    <dl className={`divide-y divide-white/[0.06] ${role.canWrite ? `border-t ${RULE}` : ''}`}>
+      <FieldRow label="Project ID">
+        <CopyField value={project.id} variant="inline" label="Copy project ID" />
+      </FieldRow>
+      <FieldRow label="Region">
+        {CLOUD_CONTROL_PLANE && region ? (
+          <span className="flex flex-wrap items-baseline gap-x-[8px]">
+            {region.city}
+            <code className="font-mono text-[11.5px] text-faint">{region.id}</code>
+          </span>
+        ) : (
+          'This server'
+        )}
+      </FieldRow>
+      <FieldRow label="Created">{formatTime(project.createdAt, 'date')}</FieldRow>
+    </dl>
+  )
 
   return (
-    <SettingsColumn>
-      {/* Identity */}
-      <SettingsCard
-        layout="split"
-        title="Project"
-        description="How this project is named across the console, the project list and every receipt."
-        onSubmit={save}
-        footer={
-          saveError ? (
-            <span role="alert" className="text-rose-300">{saveError}</span>
-          ) : saved ? (
-            <span aria-live="polite" className="inline-flex items-center gap-1.5 text-emerald-300">
-              <Check className="h-3.5 w-3.5" /> Saved
-            </span>
-          ) : (
-            'The description is optional. It shows on the project card.'
-          )
-        }
-        actions={
-          <KitButton type="submit" variant="primary" loading={saving} disabled={!dirty || !name.trim()}>
-            {saving ? 'Saving…' : 'Save'}
-          </KitButton>
-        }
-      >
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="block">
-            <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-300">Name</span>
-            <KitInput
-              name="project-name"
-              autoComplete="off"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="orbit-commerce"
-            />
-          </label>
-          <label className="block">
-            <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-300">Description</span>
-            <KitInput
-              name="project-description"
-              autoComplete="off"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="What this backend powers…"
-            />
-          </label>
-        </div>
-      </SettingsCard>
-
-      {/* Connection facts */}
-      <SettingsCard layout="split" title="Connection" description="The coordinates your agent or app uses to reach this backend.">
-        <DetailList>
-          <DetailRow label="Project ID">
-            <CopyField value={projectId} />
-          </DetailRow>
-          <DetailRow label="API base URL">
-            {apiBaseUrl ? (
-              <CopyField value={apiBaseUrl} />
-            ) : (
-              <span className="text-faint">—</span>
-            )}
-          </DetailRow>
-          <DetailRow label="Runs on">
-            {/* Honest per edition: a Cloud project's recorded region, null
-                being the home region (lib/regions.ts); a self-hosted
-                deployment runs wherever its operator put it. */}
-            {CLOUD_CONTROL_PLANE ? `Backenly Cloud, ${regionLabel(project?.region)}` : 'This self-hosted deployment'}
-          </DetailRow>
-        </DetailList>
-      </SettingsCard>
-
-      {/* Danger zone */}
-      <SettingsCard
-        layout="split"
-        danger
-        title="Delete project"
-        description={
-          <>
-            Permanently removes this project’s schema, tables, users, storage and every receipt. This cannot be
-            undone. Type <code className="font-mono text-zinc-200">{project?.name}</code> to confirm.
-          </>
-        }
-        onSubmit={confirmDelete}
-        footer={deleteError ? <span role="alert" className="text-rose-300">{deleteError}</span> : 'Deletion is immediate and final.'}
-        actions={
-          <KitButton
-            type="submit"
-            variant="danger"
-            icon={Trash2}
-            loading={deleting}
-            disabled={deleteText !== project.name}
+    <Section id="general" title="General">
+      <Panel>
+        {role.canWrite ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void save()
+            }}
           >
-            Delete project
-          </KitButton>
-        }
-      >
-        <label className="block max-w-[420px]">
-          <span className="sr-only">Project name to confirm deletion</span>
-          <KitInput
-            name="confirm-project-name"
-            autoComplete="off"
-            spellCheck={false}
-            value={deleteText}
-            onChange={(e) => setDeleteText(e.target.value)}
-            placeholder={project?.name ?? 'project name'}
-            className="focus:border-rose-400/50 focus:ring-rose-400/15"
-          />
-        </label>
-      </SettingsCard>
-    </SettingsColumn>
+            <div className="divide-y divide-white/[0.06]">
+              <FieldRow label="Name" htmlFor={nameId}>
+                <KitInput id={nameId} name="project-name" autoComplete="off" value={name} onChange={(e) => setName(e.target.value)} />
+              </FieldRow>
+              <FieldRow label="Description" htmlFor={descriptionId} hint="Optional">
+                <KitInput
+                  id={descriptionId}
+                  name="project-description"
+                  autoComplete="off"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="What this backend powers"
+                />
+              </FieldRow>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-x-[12px] gap-y-[8px] px-[20px] pb-[14px] pt-[4px]">
+              {error ? (
+                <RefusedLine className="mr-auto">{error}</RefusedLine>
+              ) : saved ? (
+                <p role="status" className="mr-auto text-[12.5px] leading-[18px] text-zinc-300">
+                  Saved
+                </p>
+              ) : null}
+              <KitButton type="submit" variant="primary" loading={saving} disabled={!dirty || !name.trim()}>
+                Save
+              </KitButton>
+            </div>
+          </form>
+        ) : (
+          <dl className="divide-y divide-white/[0.06] border-b border-white/[0.06]">
+            <FieldRow label="Name">{project.name}</FieldRow>
+            <FieldRow label="Description">{project.description || <span className="text-faint">None</span>}</FieldRow>
+          </dl>
+        )}
+        {facts}
+      </Panel>
+      {!role.canWrite && !role.loading && (
+        <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">Only developers and admins can change these.</p>
+      )}
+    </Section>
   )
 }
 
-// ── Access ───────────────────────────────────────────────────────────────────
+// ── Access ────────────────────────────────────────────────────────────────────
 // Project access is organization membership (lib/auth/project-access.ts): the
-// owner plus every org member can open this project — UNLESS a member is
-// project-scoped (Pro+), in which case they only see the projects granted to
-// them. This tab shows who can open THIS project and lets owners/admins grant or
-// revoke scoped members. Org-wide access (owner/admin/unrestricted) is managed
-// on the Members page (/app/members).
+// owner and every member open it, unless a member is project-scoped (Pro), in
+// which case they see only the projects granted to them. Granting and removing
+// a scoped member happens here; roles and invites on the team's Members page.
 
 type OrgRole = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER'
 interface AccessMember {
-  userId: string; name: string | null; email: string; role: OrgRole
-  isOwner: boolean; restricted: boolean; hasAccess: boolean
+  userId: string
+  name: string | null
+  email: string
+  role: OrgRole
+  isOwner: boolean
+  restricted: boolean
+  hasAccess: boolean
 }
 interface ProjectAccessData {
   hasOrg: boolean
@@ -365,34 +281,42 @@ interface ProjectAccessData {
   members: AccessMember[]
 }
 
-const ROLE_LABEL: Record<OrgRole, string> = { OWNER: 'Owner', ADMIN: 'Admin', DEVELOPER: 'Developer', VIEWER: 'Viewer' }
-const ROLE_TONE: Record<OrgRole, 'beta' | 'operational' | 'managed' | 'neutral'> = {
-  OWNER: 'beta',
-  ADMIN: 'operational',
-  DEVELOPER: 'managed',
-  VIEWER: 'neutral',
+const ROLE_WORD: Record<OrgRole, string> = { OWNER: 'Owner', ADMIN: 'Admin', DEVELOPER: 'Developer', VIEWER: 'Viewer' }
+
+function initials(m: AccessMember): string {
+  const words = (m.name ?? '').trim().split(/\s+/).filter(Boolean)
+  if (words.length >= 2) return `${words[0][0]}${words[words.length - 1][0]}`.toUpperCase()
+  return (words[0]?.[0] ?? m.email[0] ?? '?').toUpperCase()
 }
 
-function AccessTab({ projectId }: { projectId: string }) {
-  const router = useRouter()
+function Access({ projectId, organizationId, canAdminister }: { projectId: string; organizationId: string | null; canAdminister: boolean }) {
   const [data, setData] = useState<ProjectAccessData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<string | null>(null) // userId being granted/revoked
-  const [err, setErr] = useState<string | null>(null)
+  const [load, setLoad] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [retrying, setRetrying] = useState(false)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [refusal, setRefusal] = useState<{ userId: string; message: string } | null>(null)
 
-  const load = useCallback(async () => {
+  const read = useCallback(async () => {
     try {
       const res = await fetch(`/api/projects/${projectId}/access`, { credentials: 'include' })
-      const j = await res.json()
-      if (j?.success) setData(j.data)
-    } catch { /* handled by empty state */ } finally { setLoading(false) }
+      const j = await res.json().catch(() => null)
+      if (!res.ok || !j?.success) throw new Error('no access')
+      setData(j.data)
+      setLoad('ready')
+    } catch {
+      setLoad((prev) => (prev === 'ready' ? 'ready' : 'error'))
+    } finally {
+      setRetrying(false)
+    }
   }, [projectId])
 
-  useEffect(() => { if (projectId) load() }, [projectId, load])
+  useEffect(() => {
+    void read()
+  }, [read])
 
-  const setAccess = async (userId: string, grant: boolean) => {
+  async function setAccess(userId: string, grant: boolean) {
     setBusy(userId)
-    setErr(null)
+    setRefusal(null)
     try {
       const res = await fetch(`/api/projects/${projectId}/access`, {
         method: grant ? 'POST' : 'DELETE',
@@ -401,117 +325,170 @@ function AccessTab({ projectId }: { projectId: string }) {
         body: JSON.stringify({ userId }),
       })
       const j = await res.json().catch(() => ({}))
-      if (res.ok && j.success) await load()
-      else setErr(j.error ?? 'Could not update access.')
-    } catch {
-      setErr('Network error. Try again.')
+      if (!res.ok || !j.success) throw new Error(j.error ?? 'Could not change access.')
+      await read()
+    } catch (err) {
+      setRefusal({ userId, message: err instanceof Error ? err.message : 'Could not change access.' })
     } finally {
       setBusy(null)
     }
   }
 
-  if (loading) {
-    return (
-      <SettingsColumn>
-        <Skeleton className="h-[260px] w-full rounded-[10px]" />
-      </SettingsColumn>
-    )
-  }
+  const team = organizationId ? `/app/org/${encodeURIComponent(organizationId)}` : null
+  // The route's answer and the project role must both allow it: hidden, never offered and refused.
+  const canManage = !!data?.canManage && canAdminister
 
-  const canManage = !!data?.canManage
-  const scopedCount = data?.members.filter((m) => m.restricted).length ?? 0
+  let body: ReactNode
+  if (load === 'loading') body = <RowSkeleton rows={2} lead="actor" />
+  else if (load === 'error' || !data)
+    body = (
+      <ErrorRow
+        things="who can open this project"
+        onRetry={() => {
+          setRetrying(true)
+          void read()
+        }}
+        retrying={retrying}
+      />
+    )
+  else if (!data.hasOrg || data.members.length === 0) body = <EmptyLine>Only you can open this project.</EmptyLine>
+  else
+    body = (
+      <ul className="divide-y divide-white/[0.06]">
+        {data.members.map((m) => {
+          const orgWide = !m.restricted || m.isOwner || m.role === 'ADMIN'
+          const access = orgWide ? 'All projects' : m.hasAccess ? 'This project' : 'No access'
+          const scoped = canManage && m.restricted && !m.isOwner && m.role !== 'ADMIN'
+          return (
+            <li key={m.userId} className="px-[20px] py-[12px]">
+              <div className="flex flex-wrap items-center gap-x-[16px] gap-y-[8px]">
+                <span className="flex min-w-0 flex-[1_1_240px] items-center gap-[12px]">
+                  <span
+                    aria-hidden
+                    className="flex h-[28px] w-[28px] flex-shrink-0 items-center justify-center rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] text-[11px] font-medium text-zinc-200 ring-1 ring-inset ring-white/[0.12]"
+                  >
+                    {initials(m)}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="flex min-w-0 items-center gap-[8px]">
+                      <span className="truncate text-[13.5px] font-medium leading-[20px] text-zinc-50">{m.name || m.email}</span>
+                      {m.userId === data.me?.userId && <Tag>You</Tag>}
+                    </span>
+                    {m.name && <span className="block truncate text-[12px] leading-[16px] text-faint">{m.email}</span>}
+                  </span>
+                </span>
+                <span className="flex flex-shrink-0 flex-wrap items-center gap-x-[20px] gap-y-[6px] pl-[40px] text-[13px] leading-[20px] sm:pl-0">
+                  <span className={access === 'No access' ? 'text-faint' : 'text-zinc-300'}>{access}</span>
+                  <span className="w-[76px] text-zinc-300">{ROLE_WORD[m.role]}</span>
+                  {scoped &&
+                    (m.hasAccess ? (
+                      <KitButton size="sm" variant="ghost" loading={busy === m.userId} onClick={() => void setAccess(m.userId, false)}>
+                        Remove
+                      </KitButton>
+                    ) : data.isPaid ? (
+                      <KitButton size="sm" loading={busy === m.userId} onClick={() => void setAccess(m.userId, true)}>
+                        Add to project
+                      </KitButton>
+                    ) : null)}
+                </span>
+              </div>
+              {refusal?.userId === m.userId && <RefusedLine className="mt-[8px] pl-[40px]">{refusal.message}</RefusedLine>}
+            </li>
+          )
+        })}
+      </ul>
+    )
 
   return (
-    <SettingsColumn>
-      <SettingsCard
-        layout="split"
-        title="Who can open this project"
-        description={
-          scopedCount > 0
-            ? 'Org-wide members can open every project. Project-scoped members only see the projects granted to them. Grant or revoke this project below.'
-            : 'Everyone in your organization can open this project. To limit someone to specific projects, set them to project-scoped on the Members page (Pro).'
-        }
-        footer={err ? <span role="alert" className="text-rose-300">{err}</span> : 'Roles and invitations are managed on the Members page.'}
-        actions={
-          <KitButton variant="secondary" icon={UserPlus} onClick={() => router.push('/app/members')}>
+    <Section
+      id="access"
+      title="Access"
+      count={data?.hasOrg ? data.members.length : null}
+      aside={
+        canManage && team ? (
+          <KitButtonLink href={`${team}/members`} size="sm">
             Manage members
-          </KitButton>
-        }
-      >
-        {!data || data.members.length === 0 ? (
-          <p className="text-[13px] text-faint">
-            {data && !data.hasOrg
-              ? 'This is a solo project; only you can open it. Invite teammates from the Members page to share access.'
-              : "Couldn't load your organization roster. Manage people and roles on the Members page."}
-          </p>
-        ) : (
-          <ul className="-mx-5 divide-y divide-white/[0.06] border-y border-white/[0.06] sm:-mx-6">
-            {data.members.map((m) => {
-              const orgWide = !m.restricted || m.isOwner || m.role === 'ADMIN'
-              return (
-                <li key={m.userId} className="flex flex-col justify-between gap-2.5 px-5 py-3 sm:flex-row sm:items-center sm:px-6">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="truncate text-[13px] font-medium text-zinc-100">{m.name || m.email}</span>
-                      {m.isOwner && <Crown className="h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" aria-label="Owner" />}
-                      {m.userId === data.me?.userId && <span className="text-[12px] text-faint">(you)</span>}
-                    </div>
-                    {m.name && <p className="truncate text-[12px] text-faint">{m.email}</p>}
-                  </div>
-                  <div className="flex flex-shrink-0 flex-wrap items-center gap-2.5">
-                    {orgWide ? (
-                      <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">
-                        <Check className="h-3.5 w-3.5 text-emerald-400/80" /> Full access
-                      </span>
-                    ) : m.hasAccess ? (
-                      <span className="inline-flex items-center gap-1 text-[12px] text-violet-200">
-                        <FolderLock className="h-3.5 w-3.5" /> This project
-                      </span>
-                    ) : (
-                      <span className="text-[12px] text-faint">No access</span>
-                    )}
-
-                    {/* Grant / revoke for scoped members (owners/admins only) */}
-                    {canManage && m.restricted && !m.isOwner && m.role !== 'ADMIN' && (
-                      m.hasAccess ? (
-                        <KitButton size="sm" variant="ghost" icon={X} loading={busy === m.userId} onClick={() => setAccess(m.userId, false)}>
-                          Remove
-                        </KitButton>
-                      ) : (
-                        <KitButton
-                          size="sm"
-                          variant="secondary"
-                          icon={data.isPaid ? Plus : Lock}
-                          loading={busy === m.userId}
-                          onClick={() => (data.isPaid ? setAccess(m.userId, true) : router.push('/app/billing'))}
-                        >
-                          Add to project
-                        </KitButton>
-                      )
-                    )}
-
-                    <KitBadge tone={ROLE_TONE[m.role]}>{ROLE_LABEL[m.role]}</KitBadge>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </SettingsCard>
-
-      {data?.hasOrg && !data.isPaid && (
-        <KitNote icon={Lock}>
-          Project-scoped access, limiting a teammate to specific projects, is a Pro feature.{' '}
-          <button
-            type="button"
-            onClick={() => router.push('/app/billing')}
-            className="font-medium text-violet-300 underline underline-offset-2 hover:text-violet-200"
-          >
-            Upgrade
-          </button>{' '}
-          to enable it.
-        </KitNote>
+          </KitButtonLink>
+        ) : undefined
+      }
+    >
+      <Panel>{body}</Panel>
+      {data?.hasOrg && !data.isPaid && canManage && team && (
+        <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
+          Project-only access comes with Pro.{' '}
+          <Link href={`${team}/billing`} className={LINK}>
+            Upgrade to Pro
+          </Link>
+        </p>
       )}
-    </SettingsColumn>
+    </Section>
+  )
+}
+
+// ── Delete project ────────────────────────────────────────────────────────────
+
+function DeleteProject({ project, role, onDeleted }: { project: Project; role: ProjectRoleState; onDeleted: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function confirmDelete() {
+    setDeleting(true)
+    setError(null)
+    try {
+      await deleteProject(project.id)
+      onDeleted()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the project. Try again.')
+      setDeleting(false)
+    }
+  }
+
+  if (role.loading) return null
+  return (
+    <Section id="delete" title="Delete project">
+      <Panel>
+        <div className="flex flex-wrap items-center justify-between gap-x-[16px] gap-y-[10px] px-[20px] py-[14px]">
+          <p className="min-w-0 flex-[1_1_320px] text-[13px] leading-[20px] text-zinc-400">
+            {role.canAdminister
+              ? 'Deletes the database, users, files and history. You can’t undo this.'
+              : 'Only an owner or admin can delete this project.'}
+          </p>
+          {role.canAdminister && (
+            <KitButton
+              variant="danger"
+              onClick={() => {
+                setError(null)
+                setOpen(true)
+              }}
+            >
+              Delete project
+            </KitButton>
+          )}
+        </div>
+      </Panel>
+      <KitConfirmDialog
+        open={open}
+        onCancel={() => {
+          if (!deleting) setOpen(false)
+        }}
+        onConfirm={() => void confirmDelete()}
+        busy={deleting}
+        danger
+        title={`Delete ${project.name}?`}
+        description="Its database, users, files, functions and keys are deleted at once, and apps using its API stop working."
+        undoable={false}
+        requireText={project.name}
+        confirmLabel="Delete project"
+      >
+        <p className="text-[13px] leading-[20px] text-zinc-400">
+          <Link href={`/app/projects/${project.id}/connect?tab=postgres`} className={LINK}>
+            Download a backup
+          </Link>{' '}
+          first if you might need its data.
+        </p>
+        {error && <RefusedLine className="mt-[10px]">{error}</RefusedLine>}
+      </KitConfirmDialog>
+    </Section>
   )
 }

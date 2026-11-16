@@ -1,722 +1,430 @@
 'use client'
 
 /**
- * Realtime workbench — the event stream as an instrument surface.
+ * Realtime: the project's live changes, as they happen.
  *
- * The old page put the feed in a card sized with `calc(100vh - 380px)`, so the
- * stream got a fixed window while the page chrome above it kept its space
- * whether or not anything was streaming. A live tail should own the viewport.
+ *   Realtime  ● 2 tables streaming  4 online                              [Clear] ⟳
+ *   ┌ All events     16 ┬ All events  16 events ────────────────────────────────────┐
+ *   │ ● reviews       8 │ Time         Event    Table            Row                 │
+ *   │ ● watchlist_items │ 2:22:51 AM   insert   watchlist_items  4105a1b2            │
+ *   │ Presence        2 │ 2:22:37 AM   insert   reviews          9415c3d0 rating=3 … │
+ *   │                   │ Connected at 2:14 AM  insert 10, update 3, …  Last 100 kept│
+ *   └───────────────────┴─────────────────────────────────────────────────────────────┘
  *
- * Three panes: streaming-table rail · event stream · session inspector.
+ * The jobs, in order: is live update working (the bar's glyph), watch changes
+ * while testing the app (the feed, and a selected event's row in the shared
+ * drawer), which tables stream (the rail), who is online (the bar).
  *
- * The SSE lifecycle below (jittered backoff, fatal-vs-transient classification,
- * observable countdown) is carried over unchanged — it is the reason this page
- * survives a server restart without a reload, and none of it is presentational.
+ * One fact each, said once: the connection and the streaming tables in the
+ * bar, the counts per table in the rail, this session's numbers in one faint
+ * line under the feed. Event kinds are plain lowercase machine words with no
+ * colour: colour is for state (round 1, Realtime). Opening the page never
+ * turns realtime on; it only reports it.
+ *
+ * The stream's lifecycle lives in useRealtimeStream (ticket first, backoff,
+ * fatal vs transient), the table status in useRealtimeStatus, and what a frame
+ * says in event-format.ts.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft } from 'lucide-react'
-import { getAuthToken } from '@/lib/api/auth'
-import { getProject } from '@/lib/api/projects'
-import {
-  CommandBar, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
-  type StatusTone,
-} from '@/components/inspector/kit'
-import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
-import { FOCUS_INSET } from '@/components/console/tokens'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { AlertTriangle, Info, WifiOff } from 'lucide-react'
+import { KIT, KitButton, KitSelect, NoticeStrip, StatusGlyph } from '@/components/inspector/kit'
+import { InstrumentBar, PaneToolbar, count, type BarFact } from '@/components/console/InstrumentBar'
+import { RecordDrawer, recordNav, useRecordParam } from '@/components/console/RecordDrawer'
+import { EmptyPanel, ErrorRow } from '@/components/console/states'
+import { DayGroup, EventRowSkeleton } from '@/components/console/EventRow'
+import { groupByDay } from '@/components/console/format'
+import { EmptyLine, Fact, Facts } from '@/components/autonomy/rows'
+import { FOCUS_INSET, GRID_HEAD, RAIL, RULE } from '@/components/console/tokens'
+import { Time } from '@/components/console/Time'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
+import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { FEED_LIMIT, useRealtimeStream } from './useRealtimeStream'
+import { useRealtimeStatus } from './useRealtimeStatus'
+import { changedColumns, countsLine, eventTitle, listingOf, pretty, type LiveEvent } from './event-format'
+import { FeedRow } from './FeedRow'
+import { CopyJsonButton, EventDetail, EventTitle } from './EventDetail'
 
-interface RealtimeStatusData {
-  triggeredTables: string[]
-  onlineUsers: number
+/** Which events the feed shows: all of them, one table's, presence, or broadcasts. */
+type Filter = 'all' | 'presence' | 'broadcast' | `t:${string}`
+
+const tableOf = (f: Filter) => (f.startsWith('t:') ? f.slice(2) : null)
+
+function matches(ev: LiveEvent, f: Filter): boolean {
+  if (f === 'all') return true
+  if (f === 'presence') return ev.type === 'presence'
+  if (f === 'broadcast') return ev.type === 'broadcast'
+  return ev.table === tableOf(f)
 }
 
-interface LiveEvent {
-  id: string
-  type: string
-  table?: string
-  channel?: string
-  timestamp: number
-  truncated?: boolean
-}
-
-// `idle` is the initial paint before the first connect attempt resolves;
-// treating it separately avoids flashing "Disconnected" for the first ~50ms.
-type ConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'fatal'
-
-const DB_EVENT_TYPES = new Set(['insert', 'update', 'delete', 'presence', 'broadcast'])
-
-// Errors we will not auto-retry on — retrying just burns connection slots until
-// the user changes something (paying plan, signing in again).
-const FATAL_PATTERNS = [
-  /reached its limit/i,   // realtime concurrency cap (quota kernel)
-  /unauthor/i,            // 401-shape
-  /api key/i,             // auth failure
-]
-
-const isFatalServerError = (message: string | undefined) =>
-  !!message && FATAL_PATTERNS.some((re) => re.test(message))
-
-// Exponential backoff with ±25% jitter, capped at 30s: fast enough to feel
-// instant on a Wi-Fi flicker, slow enough not to hammer a real outage.
-function backoffMs(attempt: number): number {
-  const base = Math.min(30_000, 1_000 * Math.pow(2, attempt))
-  const jitter = base * (0.75 + Math.random() * 0.5)
-  return Math.floor(jitter)
-}
-
-const EVENT_STYLES: Record<string, string> = {
-  insert:    'text-emerald-300',
-  update:    'text-violet-300',
-  delete:    'text-rose-300',
-  presence:  'text-sky-300',
-  broadcast: 'text-sky-300',
-  connected: 'text-zinc-400',
-}
-
-const EVENT_BAR: Record<string, string> = {
-  insert:    'bg-emerald-400/70',
-  update:    'bg-violet-300/70',
-  delete:    'bg-rose-400/70',
-  presence:  'bg-sky-300/70',
-  broadcast: 'bg-sky-300/70',
-}
-
-/** Event kinds are SQL verbs and channel names: machine text, set as such. */
-function EventType({ type }: { type: string }) {
-  return (
-    <span className={`flex-shrink-0 font-mono text-[11.5px] font-medium tracking-[0.02em] ${EVENT_STYLES[type] ?? 'text-faint'}`}>
-      {type.toUpperCase()}
-    </span>
-  )
-}
-
-const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-faint'
-const TD = 'h-[36px] whitespace-nowrap border-b border-white/[0.04] px-3'
+const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`
 
 export function RealtimeWorkbench({ projectId }: { projectId: string }) {
-  const [status, setStatus] = useState<RealtimeStatusData | null>(null)
-  const [loadingStatus, setLoadingStatus] = useState(true)
-  const [statusError, setStatusError] = useState<'auth' | 'network' | null>(null)
-  const [connState, setConnState] = useState<ConnectionState>('idle')
-  const [retrySecondsLeft, setRetrySecondsLeft] = useState<number | null>(null)
-  const [fatalReason, setFatalReason] = useState<string | null>(null)
-  // True while the stream runs on the public anon key because the project could
-  // not issue a ticket: it then shows only what an anonymous visitor could read.
-  const [anonymousView, setAnonymousView] = useState(false)
-  const [events, setEvents] = useState<LiveEvent[]>([])
-  const [eventCount, setEventCount] = useState(0)
-  const [tableFilter, setTableFilter] = useState<string | null>(null)
-  const [mobilePane, setMobilePane] = useState<'tables' | 'feed'>('tables')
+  const stream = useRealtimeStream(projectId)
+  const status = useRealtimeStatus(projectId)
+  const role = useProjectRole(projectId)
+  const agent = useAgentConnection(projectId)
+  const [filter, setFilter] = useState<Filter>('all')
+  const [eventId, openEvent, closeEvent] = useRecordParam('event')
 
-  const esRef = useRef<EventSource | null>(null)
-  const counterRef = useRef(0)
-  const anonKeyRef = useRef<string | null>(null)
-  // The project's API base in its own region ({origin}/api/v1/{id}). A project
-  // outside the home region streams from its region's service, which is the
-  // only one that serves it (lib/data-plane/serving.ts).
-  const apiBaseRef = useRef<string | null>(null)
-  const retryAttemptRef = useRef(0)
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const destroyedRef = useRef(false)
+  const { events } = stream
+  const streaming = useMemo(() => status.status?.triggeredTables ?? [], [status.status])
+  const online = status.status?.onlineUsers ?? 0
 
-  const authHeaders = useCallback(() => {
-    const token = getAuthToken()
-    return token ? { Authorization: `Bearer ${token}` } : {}
-  }, [])
-
-  const fetchStatus = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/projects/${projectId}/realtime-status`, {
-        headers: authHeaders(),
-        credentials: 'include',
-      })
-      if (res.ok) {
-        setStatus(await res.json())
-        setStatusError(null)
-        return
-      }
-      setStatusError(res.status === 401 ? 'auth' : 'network')
-    } catch {
-      setStatusError('network')
-    } finally {
-      setLoadingStatus(false)
+  // Every table that streams, then any other table an event came from this session.
+  const tables = useMemo(() => {
+    const seen = new Set(streaming)
+    const extra: string[] = []
+    for (const e of events) {
+      if (!e.table || seen.has(e.table) || e.type === 'broadcast') continue
+      seen.add(e.table)
+      extra.push(e.table)
     }
-  }, [projectId, authHeaders])
+    return [...streaming, ...extra.sort()]
+  }, [streaming, events])
 
+  const perTable = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const e of events) if (e.table && e.type !== 'broadcast') m.set(e.table, (m.get(e.table) ?? 0) + 1)
+    return m
+  }, [events])
+  const presenceN = useMemo(() => events.filter((e) => e.type === 'presence').length, [events])
+  const broadcastN = useMemo(() => events.filter((e) => e.type === 'broadcast').length, [events])
+
+  const visible = useMemo(() => (filter === 'all' ? events : events.filter((e) => matches(e, filter))), [events, filter])
+  const nav = recordNav(visible, (e) => e.id, eventId, openEvent)
+
+  // An event id from another session, or one the filter now hides or the feed dropped, closes the drawer.
   useEffect(() => {
-    fetchStatus()
-    const interval = setInterval(fetchStatus, 5_000)
-    return () => clearInterval(interval)
-  }, [fetchStatus])
+    if (eventId && !visible.some((e) => e.id === eventId)) closeEvent()
+  }, [eventId, visible, closeEvent])
 
-  // ── Realtime SSE lifecycle ──────────────────────────────────────────────
-  // Self-healing: any transient failure schedules a jittered reconnect. Fatal
-  // failures (quota cap, auth) stop retrying and surface the server message.
-  useEffect(() => {
-    if (!projectId) return
-    destroyedRef.current = false
+  const statusKnown = status.status !== null
+  const nothingStreams = statusKnown && tables.length === 0 && events.length === 0
+  const showRail = !nothingStreams && (statusKnown || events.length > 0)
 
-    const clearRetryTimers = () => {
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current)
-        retryTimerRef.current = null
-      }
-      if (countdownTimerRef.current) {
-        clearInterval(countdownTimerRef.current)
-        countdownTimerRef.current = null
-      }
-      setRetrySecondsLeft(null)
-    }
+  // ── The bar ───────────────────────────────────────────────────────────────
+  const tablesFact = streaming.length > 0 ? plural(streaming.length, 'table') + ' streaming' : null
+  const facts: Array<BarFact | null> =
+    stream.state === 'connected'
+      ? [{ glyph: 'live', label: 'Connected', text: tablesFact ?? undefined }, online > 0 ? { text: `${count(online)} online` } : null]
+      : stream.state === 'reconnecting'
+        ? [
+            { glyph: 'busy', label: 'Reconnecting', text: stream.retryIn ? `Reconnecting in ${stream.retryIn} s` : 'Reconnecting', tone: 'attention' },
+            tablesFact ? { text: tablesFact } : null,
+          ]
+        : stream.state === 'fatal'
+          ? [{ glyph: 'failed', label: 'Offline', text: 'Offline', tone: 'danger' }, tablesFact ? { text: tablesFact } : null]
+          : [{ glyph: 'idle', label: 'Connecting', text: 'Connecting' }, tablesFact ? { text: tablesFact } : null]
 
-    const closeStream = () => {
-      if (esRef.current) {
-        esRef.current.close()
-        esRef.current = null
-      }
-    }
-
-    const scheduleReconnect = () => {
-      if (destroyedRef.current) return
-      closeStream()
-      const delay = backoffMs(retryAttemptRef.current)
-      retryAttemptRef.current += 1
-      setConnState('reconnecting')
-      const startedAt = Date.now()
-      setRetrySecondsLeft(Math.ceil(delay / 1000))
-      countdownTimerRef.current = setInterval(() => {
-        const left = Math.max(0, Math.ceil((delay - (Date.now() - startedAt)) / 1000))
-        setRetrySecondsLeft(left)
-        if (left <= 0 && countdownTimerRef.current) {
-          clearInterval(countdownTimerRef.current)
-          countdownTimerRef.current = null
-        }
-      }, 250)
-      retryTimerRef.current = setTimeout(() => { openStream() }, delay)
-    }
-
-    const setFatal = (reason: string) => {
-      clearRetryTimers()
-      closeStream()
-      setFatalReason(reason)
-      setConnState('fatal')
-    }
-
-    async function openStream() {
-      if (destroyedRef.current) return
-      clearRetryTimers()
-      setFatalReason(null)
-      setConnState('connecting')
-
-      // A fresh single-use ticket for every connect. It shows every change, as
-      // the console shows every row, and puts no long-lived key in a URL
-      // (app/api/projects/[id]/realtime-ticket). The public anon key used to be
-      // the credential here, so on any table behind row-level security the
-      // owner saw nothing. It remains only for a project that cannot issue a
-      // ticket yet, and the page says what that view leaves out.
-      let credential: string | null = null
-      try {
-        const res = await fetch(`/api/projects/${projectId}/realtime-ticket`, {
-          method: 'POST',
-          headers: authHeaders(),
-          credentials: 'include',
-        })
-        if (res.status === 401) {
-          setFatal('Your dashboard session expired. Reload the page to continue.')
-          return
-        }
-        if (res.ok) {
-          const data = await res.json()
-          if (data.ticket) credential = `ticket=${encodeURIComponent(data.ticket)}`
-          setAnonymousView(false)
-        } else if (res.status !== 409) {
-          scheduleReconnect()
-          return
-        }
-      } catch {
-        scheduleReconnect()
-        return
-      }
-
-      if (!credential) {
-        // Anon key is server-side auto-generated on first fetch. Cache it for
-        // the lifetime of this page so reconnects don't re-hit Prisma.
-        if (!anonKeyRef.current) {
-          try {
-            const res = await fetch(`/api/projects/${projectId}/anon-key`, {
-              headers: authHeaders(),
-              credentials: 'include',
-            })
-            if (res.status === 401) {
-              setFatal('Your dashboard session expired. Reload the page to continue.')
-              return
-            }
-            if (!res.ok) {
-              scheduleReconnect()
-              return
-            }
-            const data = await res.json()
-            anonKeyRef.current = data.anonKey ?? null
-          } catch {
-            scheduleReconnect()
-            return
-          }
-        }
-        if (destroyedRef.current) return
-        if (!anonKeyRef.current) {
-          setFatal("We couldn't generate this project's anon key. Try reloading.")
-          return
-        }
-        credential = `apiKey=${encodeURIComponent(anonKeyRef.current)}`
-        setAnonymousView(true)
-      }
-      if (!apiBaseRef.current) {
-        try {
-          apiBaseRef.current = (await getProject(projectId)).apiBaseUrl ?? null
-        } catch {
-          scheduleReconnect()
-          return
-        }
-      }
-      if (destroyedRef.current) return
-      if (!apiBaseRef.current) {
-        setFatal("This project's API address is not available from this console. Try reloading.")
-        return
-      }
-
-      const url = `${apiBaseRef.current}/realtime?${credential}`
-      const es = new EventSource(url)
-      esRef.current = es
-
-      es.onmessage = (msg) => {
-        try {
-          const data = JSON.parse(msg.data)
-
-          if (data.type === 'connected') {
-            retryAttemptRef.current = 0
-            clearRetryTimers()
-            setConnState('connected')
-            return
-          }
-
-          if (data.type === 'error') {
-            const message = typeof data.message === 'string' ? data.message : 'Realtime stream error'
-            // Server closes the stream after an error frame, so we either go
-            // fatal or reconnect — never both, never neither.
-            if (data.code === 'PLAN_LIMIT_EXCEEDED' || data.code === 'INVALID_PROJECT' || isFatalServerError(message)) {
-              setFatal(message)
-            } else {
-              scheduleReconnect()
-            }
-            return
-          }
-
-          if (DB_EVENT_TYPES.has(data.type)) setEventCount((c) => c + 1)
-          const ev: LiveEvent = {
-            id: `${Date.now()}-${counterRef.current++}`,
-            type: data.type,
-            table: data.table,
-            channel: data.channel,
-            timestamp: data.timestamp ?? Date.now() / 1000,
-            truncated: data.truncated,
-          }
-          setEvents((prev) => [ev, ...prev].slice(0, 100))
-        } catch { /* ignore malformed frames */ }
-      }
-
-      es.onerror = () => {
-        // Browser EventSource auto-retries, but its cadence is invisible. We
-        // take over so the countdown is observable and deterministic.
-        if (destroyedRef.current) return
-        scheduleReconnect()
-      }
-    }
-
-    openStream()
-
-    return () => {
-      destroyedRef.current = true
-      clearRetryTimers()
-      closeStream()
-    }
-  }, [projectId, authHeaders])
-
-  // ── Derived ─────────────────────────────────────────────────────────────
-
-  const triggeredCount = status?.triggeredTables.length ?? 0
-  const onlineUsers = status?.onlineUsers ?? 0
-
-  const visibleEvents = tableFilter
-    ? events.filter((e) => e.table === tableFilter || (!e.table && tableFilter === 'broadcast'))
-    : events
-
-  const activeTables = Array.from(
-    new Set([
-      ...(status?.triggeredTables ?? []),
-      ...events.filter((e) => e.table).map((e) => e.table as string),
-    ])
-  )
-
-  const stateText =
-    connState === 'connected'
-      ? 'Connected'
-      : connState === 'reconnecting'
-      ? retrySecondsLeft != null
-        ? `Reconnecting in ${retrySecondsLeft}s`
-        : 'Reconnecting'
-      : connState === 'fatal'
-      ? 'Offline'
-      : 'Connecting…'
-
-  const stateTone: StatusTone =
-    connState === 'connected'
-      ? 'operational'
-      : connState === 'reconnecting'
-      ? 'attention'
-      : connState === 'fatal'
-      ? 'failed'
-      : 'neutral'
-
-  // Empty-state copy never contradicts the command-bar state.
-  const emptyState = (() => {
-    if (tableFilter && events.length > 0) {
-      return {
-        icon: Radio,
-        title: `No ${tableFilter} events yet`,
-        description: `${events.length} event${events.length === 1 ? '' : 's'} on other tables this session. Choose All events to see everything.`,
-      }
-    }
-    switch (connState) {
-      case 'connected':
-        return triggeredCount === 0
-          ? {
-              icon: Radio,
-              title: 'Nothing is streaming yet',
-              description: 'Realtime is opt-in per table. Once a table streams, its inserts, updates and deletes appear here as they happen.',
-            }
-          : {
-              icon: Radio,
-              title: 'Listening for changes',
-              description: 'The stream is open. Inserts, updates, deletes and broadcasts appear here as they happen.',
-            }
-      case 'reconnecting':
-        return {
-          icon: RefreshCw,
-          title: 'Reconnecting',
-          description: retrySecondsLeft != null ? `Lost the stream. Retrying in ${retrySecondsLeft}s.` : 'Lost the stream. Retrying…',
-        }
-      case 'fatal':
-        return {
-          icon: AlertTriangle,
-          title: 'Stream offline',
-          description: fatalReason ?? "We can't open a realtime connection right now.",
-        }
-      default:
-        return { icon: Circle, title: 'Connecting', description: 'Opening the realtime stream…' }
-    }
-  })()
-
-  const breakdown = (['insert', 'update', 'delete', 'broadcast', 'presence'] as const)
-    .map((type) => ({ type, count: events.filter((e) => e.type === type).length }))
-    .filter((r) => r.count > 0)
-  // Payload size only matters when the server had to cut one short.
-  const anyTruncated = visibleEvents.some((e) => e.truncated)
-  const breakdownMax = Math.max(1, ...breakdown.map((b) => b.count))
-
-  /** Loaded, connected or not, and no table streams and nothing has arrived. */
-  const nothingStreams = !loadingStatus && activeTables.length === 0 && events.length === 0
-
-  const selectTable = (t: string | null) => {
-    setTableFilter(t)
-    setMobilePane('feed')
+  const clear = () => {
+    stream.clear()
+    setFilter('all')
+    closeEvent()
   }
 
-  // ── Render ──────────────────────────────────────────────────────────────
+  const reload = () => window.location.reload()
+
+  // ── The feed's body ───────────────────────────────────────────────────────
+  const filterTable = tableOf(filter)
+  let body: ReactNode
+  if (visible.length > 0) {
+    const days = groupByDay(visible, (e) => e.at)
+    const rows = (list: LiveEvent[]) =>
+      list.map((ev) => <FeedRow key={ev.id} event={ev} current={ev.id === eventId} onOpen={openEvent} />)
+    body = (
+      <div role="log" aria-label="Live changes">
+        {days.length > 1 ? (
+          days.map((d) => (
+            <DayGroup key={d.key} label={d.label} sticky>
+              {rows(d.items)}
+            </DayGroup>
+          ))
+        ) : (
+          <ul className="divide-y divide-white/[0.06]">{rows(visible)}</ul>
+        )}
+      </div>
+    )
+  } else if (filter !== 'all') {
+    body = (
+      <EmptyLine>
+        {filterTable ? (
+          <>
+            No <code className="font-mono text-[12px] text-zinc-200">{filterTable}</code> events yet this session.
+          </>
+        ) : filter === 'presence' ? (
+          'No presence events yet this session.'
+        ) : (
+          'No broadcasts yet this session.'
+        )}
+      </EmptyLine>
+    )
+  } else if (!statusKnown && status.error) {
+    body = null // the error row says it
+  } else if (!statusKnown) {
+    body = <EventRowSkeleton rows={6} glyph={false} />
+  } else if (streaming.length === 0) {
+    body = (
+      <EmptyPanel
+        headingLevel={2}
+        title="No table streams yet"
+        sentence="Realtime is turned on per table, and changes to those tables appear here live."
+        requests={['Turn on realtime for the tables my app shows live.']}
+        agent={role.loading ? { status: 'loading' } : { status: agent.status, client: agent.client }}
+        canConnect={role.canAdminister}
+        docs={{ label: 'Realtime docs', slug: 'realtime' }}
+      />
+    )
+  } else {
+    const names = listingOf(streaming)
+    body = (
+      <EmptyLine>
+        {stream.state === 'connected' ? (
+          <>
+            Listening on <TableNames names={streaming} text={names} />. Changes appear here as they happen.
+          </>
+        ) : stream.state === 'reconnecting' ? (
+          'The stream dropped. Changes appear here once it reconnects.'
+        ) : stream.state === 'fatal' ? (
+          'No changes arrive while the stream is offline.'
+        ) : (
+          'Opening the stream.'
+        )}
+      </EmptyLine>
+    )
+  }
+
+  const filterLabel = filter === 'all' ? 'All events' : filter === 'presence' ? 'Presence' : filter === 'broadcast' ? 'Broadcasts' : filterTable ?? ''
+  const ev = nav.item
 
   return (
     <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
-
-      {/* ── Command bar ───────────────────────────────────── */}
-      <CommandBar
+      <InstrumentBar
         title="Realtime"
-        context={
+        facts={facts}
+        controls={
           <>
-            <StatusDot tone={stateTone} label={stateText} pulse={connState === 'connected'} />
-            <span className="hidden tabular-nums sm:inline">
-              {loadingStatus ? '–' : onlineUsers} online
-              <span className="text-zinc-700"> · </span>
-              {triggeredCount} {triggeredCount === 1 ? 'table' : 'tables'} streaming
-            </span>
+            {stream.state === 'reconnecting' && (
+              <KitButton size="sm" onClick={stream.retryNow}>
+                Retry now
+              </KitButton>
+            )}
+            {events.length > 0 && (
+              <KitButton size="sm" variant="ghost" onClick={clear}>
+                Clear
+              </KitButton>
+            )}
           </>
         }
-      >
-        {events.length > 0 && (
-          <KitButton
-            size="sm"
-            variant="ghost"
-            icon={Trash2}
-            onClick={() => { setEvents([]); setEventCount(0); setTableFilter(null) }}
-          >
-            Clear feed
-          </KitButton>
-        )}
-      </CommandBar>
+        onRefresh={() => void status.refresh()}
+        refreshing={status.refreshing}
+      />
 
-      {/* Advisories */}
-      {statusError === 'auth' && (
-        <NoticeStrip
-          icon={WifiOff}
-          tone="attention"
-          action={<KitButton size="sm" onClick={() => window.location.reload()}>Reload</KitButton>}
-        >
-          <strong>Your session expired.</strong> The numbers here are the last known values, not live ones.
+      {stream.state === 'fatal' && stream.fatalReason && (
+        <NoticeStrip icon={WifiOff} tone="danger" action={<KitButton size="sm" onClick={reload}>Reload</KitButton>}>
+          {stream.fatalReason}
         </NoticeStrip>
       )}
-      {statusError === 'network' && (
-        <NoticeStrip icon={Circle}>
-          Couldn&apos;t refresh status. Showing the last known values and retrying automatically.
+      {stream.state !== 'fatal' && status.error === 'auth' && (
+        <NoticeStrip icon={AlertTriangle} tone="attention" action={<KitButton size="sm" onClick={reload}>Reload</KitButton>}>
+          Your session expired. Reload to see live numbers.
         </NoticeStrip>
       )}
-      {anonymousView && connState !== 'fatal' && (
-        <NoticeStrip icon={Circle}>
-          Showing only changes an anonymous visitor could read. This project has no signing secret yet, so this page
-          cannot open a stream that sees every change.
+      {stream.anonymousView && stream.state !== 'fatal' && (
+        <NoticeStrip icon={Info}>
+          Showing only what a signed-out visitor can read. This project can&apos;t issue a full-access stream yet.
         </NoticeStrip>
       )}
-      {connState === 'fatal' && fatalReason && (
-        <NoticeStrip
-          icon={AlertTriangle}
-          tone="danger"
-          action={<KitButton size="sm" onClick={() => window.location.reload()}>Reload</KitButton>}
-        >
-          <strong>Realtime is offline.</strong> {fatalReason}
-        </NoticeStrip>
+      {status.error === 'network' && statusKnown && (
+        <ErrorRow things="streaming tables" staleAt={status.fetchedAt} onRetry={() => void status.refresh()} retrying={status.refreshing} />
       )}
 
-      {/* ── Workbench ─────────────────────────────────────── */}
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
+          {showRail && (
+            <nav aria-label="Show events from" className={`hidden w-[232px] flex-shrink-0 overflow-y-auto overflow-x-hidden border-r ${RULE} ${RAIL} p-[8px] md:block`}>
+              <ul className="space-y-px">
+                <RailItem label="All events" n={events.length} active={filter === 'all'} onSelect={() => setFilter('all')} />
+                {tables.map((t) => {
+                  const on = streaming.includes(t)
+                  return (
+                    <RailItem
+                      key={t}
+                      label={t}
+                      mono
+                      glyph={on ? 'live' : 'idle'}
+                      glyphLabel={on ? 'Streaming' : 'Not streaming'}
+                      n={perTable.get(t) ?? 0}
+                      active={filter === `t:${t}`}
+                      onSelect={() => setFilter(filter === `t:${t}` ? 'all' : `t:${t}`)}
+                    />
+                  )
+                })}
+                {(presenceN > 0 || filter === 'presence') && (
+                  <RailItem label="Presence" n={presenceN} active={filter === 'presence'} onSelect={() => setFilter(filter === 'presence' ? 'all' : 'presence')} />
+                )}
+                {(broadcastN > 0 || filter === 'broadcast') && (
+                  <RailItem label="Broadcasts" n={broadcastN} active={filter === 'broadcast'} onSelect={() => setFilter(filter === 'broadcast' ? 'all' : 'broadcast')} />
+                )}
+              </ul>
+            </nav>
+          )}
 
-          {/* ── Streaming rail ───────────────────────────
-              No rail at any width until a table streams: the stream pane
-              carries the empty state with its request and Connect, and the bar
-              and the session panel already count the tables, so the rail said
-              it a third time (on a phone, instead of the request). */}
-          <div
-            className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[256px] ${KIT.rail} ${
-              nothingStreams ? 'hidden' : mobilePane !== 'tables' ? 'hidden md:flex' : 'flex'
-            }`}
-          >
-            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
-              <span className="text-[13px] font-medium text-zinc-200">Tables</span>
-              <IconButton
-                icon={RefreshCw}
-                label="Refresh status"
-                onClick={fetchStatus}
-                className={loadingStatus ? '[&_svg]:animate-spin' : ''}
-              />
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
-              {activeTables.length === 0 ? (
-                // Events arrived (broadcasts, presence) with no table
-                // streaming: the rail is up and says so.
-                <div className="px-4 py-4">
-                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-faint">No tables streaming</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-faint md:hidden">
-                    Realtime is opt-in. Ask your agent to turn it on for the tables your app listens to.
-                  </p>
+          <section aria-label="Events" className="flex min-w-0 flex-1 flex-col">
+            {showRail && (
+              <>
+                {/* A phone has no rail: the feed opens first, with the choice above it. */}
+                <div className={`flex flex-shrink-0 items-center gap-[12px] border-b ${RULE} px-[16px] py-[8px] md:hidden`}>
+                  <KitSelect
+                    aria-label="Show events from"
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value as Filter)}
+                    wrapperClassName="min-w-0 flex-1"
+                  >
+                    <option value="all">All events</option>
+                    {tables.map((t) => (
+                      <option key={t} value={`t:${t}`}>
+                        {t}
+                      </option>
+                    ))}
+                    {(presenceN > 0 || filter === 'presence') && <option value="presence">Presence</option>}
+                    {(broadcastN > 0 || filter === 'broadcast') && <option value="broadcast">Broadcasts</option>}
+                  </KitSelect>
+                  <span className="flex-shrink-0 whitespace-nowrap text-[12.5px] tabular-nums text-faint">{plural(visible.length, 'event')}</span>
                 </div>
-              ) : (
-                <ul className="space-y-px px-2">
-                  <li>
-                    <button
-                      type="button"
-                      aria-current={tableFilter === null ? 'true' : undefined}
-                      onClick={() => selectTable(null)}
-                      className={`flex h-[32px] w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left transition-colors ${FOCUS_INSET} ${
-                        tableFilter === null
-                          ? 'bg-white/[0.07] text-zinc-50'
-                          : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
-                      }`}
-                    >
-                      <Radio className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-                      <span className="flex-1 truncate text-[13px] font-medium">All events</span>
-                      <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{events.length}</span>
-                    </button>
-                  </li>
-
-                  {activeTables.map((t) => {
-                    const active = tableFilter === t
-                    const streaming = status?.triggeredTables.includes(t)
-                    const count = events.filter((e) => e.table === t).length
-                    return (
-                      <li key={t}>
-                        <button
-                          type="button"
-                          aria-current={active ? 'true' : undefined}
-                          onClick={() => selectTable(active ? null : t)}
-                          title={streaming ? 'Streaming: change trigger installed' : 'Seen this session'}
-                          className={`flex h-[32px] w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left transition-colors ${FOCUS_INSET} ${
-                            active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
-                          }`}
-                        >
-                          <span className="flex w-3.5 flex-shrink-0 justify-center">
-                            <StatusDot tone={streaming ? 'operational' : 'neutral'} />
-                          </span>
-                          <span className="flex-1 truncate font-mono text-[12.5px]">{t}</span>
-                          {count > 0 && (
-                            <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{count}</span>
-                          )}
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </div>
-
-            <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-faint">
-              {triggeredCount} {triggeredCount === 1 ? 'table' : 'tables'} streaming
-            </div>
-          </div>
-
-          {/* ── Event stream ───────────────────────────── */}
-          <div className={`min-w-0 flex-1 flex-col ${nothingStreams || mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
-            {!nothingStreams && (
-            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
-              <div className="flex min-w-0 items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setMobilePane('tables')}
-                  className="-ml-1 flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[7px] bg-white/[0.04] text-zinc-200 transition-colors hover:bg-white/[0.07] md:hidden"
-                  aria-label="Back to tables"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </button>
-                <h2 className={`truncate text-[13px] font-medium text-zinc-100 ${tableFilter ? 'font-mono' : ''}`}>
-                  {tableFilter ?? 'All events'}
-                </h2>
-                <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
-                  {visibleEvents.length} {visibleEvents.length === 1 ? 'event' : 'events'}
-                </span>
-              </div>
-              <span className="flex-shrink-0 text-[12px] text-faint">Newest first, last 100 kept</span>
-            </div>
+                <div className="hidden md:block">
+                  <PaneToolbar title={filterLabel} mono={!!filterTable} count={plural(visible.length, 'event')} />
+                </div>
+              </>
             )}
 
-            <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-relevant="additions">
-              {visibleEvents.length === 0 ? (
-                <div className="flex min-h-full flex-col items-center justify-center px-6">
-                  {connState === 'connected' && triggeredCount === 0 && !tableFilter ? (
-                    <AgentEmptyState
-                      projectId={projectId}
-                      icon={emptyState.icon}
-                      title={emptyState.title}
-                      description={emptyState.description}
-                      prompt="Turn on realtime for the orders table so the app gets live updates."
-                      docs="realtime"
-                      preview="events"
-                    />
-                  ) : (
-                    <EmptyState icon={emptyState.icon} title={emptyState.title} description={emptyState.description} />
-                  )}
-                </div>
-              ) : (
-                <div className="min-w-full overflow-x-auto">
-                  <table className="w-full min-w-[440px] border-collapse">
-                    <thead className="sticky top-0 z-10">
-                      <tr className={KIT.gridHead}>
-                        <th className={`${TH} w-28`}>Time</th>
-                        <th className={`${TH} w-28`}>Event</th>
-                        <th className={TH}>Source</th>
-                        {anyTruncated && <th className={`${TH} w-28`}>Payload</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleEvents.map((ev) => (
-                        <tr key={ev.id} className={`transition-colors ${KIT.rowHoverOn}`}>
-                          <td className={`${TD} text-[12.5px] tabular-nums text-faint`}>
-                            {new Date(ev.timestamp * 1000).toLocaleTimeString([], {
-                              hour12: false,
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              second: '2-digit',
-                            })}
-                          </td>
-                          <td className={TD}>
-                            <EventType type={ev.type} />
-                          </td>
-                          <td className={`${TD} font-mono text-[12.5px]`}>
-                            {ev.table ? (
-                              <span className="text-zinc-200">{ev.table}</span>
-                            ) : ev.channel ? (
-                              <span className="text-sky-300/90">#{ev.channel}</span>
-                            ) : (
-                              <span className="text-faint">none</span>
-                            )}
-                          </td>
-                          {anyTruncated && (
-                            <td className={`${TD} text-[12.5px]`}>
-                              {ev.truncated && <span className="text-amber-200/90">Truncated</span>}
-                            </td>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              {!statusKnown && status.error && (
+                <ErrorRow
+                  things="streaming tables"
+                  stillWorks={stream.state === 'connected' ? 'The live feed still works.' : undefined}
+                  onRetry={() => void status.refresh()}
+                  retrying={status.refreshing}
+                  className={`border-b ${RULE}`}
+                />
               )}
+              <div
+                aria-hidden
+                className={`sticky top-0 z-[3] hidden h-[34px] items-center gap-x-[16px] border-b ${RULE} ${GRID_HEAD} px-[20px] text-[12px] font-medium text-faint md:flex`}
+              >
+                <span className="w-[88px] flex-shrink-0">Time</span>
+                <span className="w-[72px] flex-shrink-0">Event</span>
+                <span className="w-[168px] flex-shrink-0">Table</span>
+                <span className="min-w-0 flex-1">Row</span>
+              </div>
+              {body}
             </div>
-          </div>
 
-          {/* ── Session inspector ──────────────────────── */}
-          <div className={`hidden w-[288px] flex-shrink-0 flex-col border-l border-white/[0.06] lg:flex ${KIT.rail}`}>
-            <div className="flex h-[44px] flex-shrink-0 items-center border-b border-white/[0.06] px-4">
-              <span className="text-[13px] font-medium text-zinc-200">This session</span>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <dl className="divide-y divide-white/[0.05]">
-                {([
-                  ['Connection', <StatusDot key="c" tone={stateTone} label={stateText} />],
-                  ['Online now', loadingStatus ? '–' : onlineUsers.toLocaleString()],
-                  ['Tables streaming', loadingStatus ? '–' : triggeredCount.toLocaleString()],
-                  ['Events received', eventCount.toLocaleString()],
-                ] as Array<[string, React.ReactNode]>).map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-3 px-4 py-2.5">
-                    <dt className="flex-shrink-0 text-[13px] text-faint">{label}</dt>
-                    <dd className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200">{value}</dd>
-                  </div>
-                ))}
-              </dl>
-
-              {breakdown.length > 0 && (
-                <section className="border-t border-white/[0.06] px-4 py-4">
-                  <h3 className="mb-3 text-[13px] font-medium text-zinc-200">By event</h3>
-                  <ul className="space-y-2.5">
-                    {breakdown.map(({ type, count }) => (
-                      <li key={type}>
-                        <div className="mb-1 flex items-center justify-between">
-                          <EventType type={type} />
-                          <span className="text-[12.5px] tabular-nums text-zinc-300">{count}</span>
-                        </div>
-                        <div className="h-[3px] overflow-hidden rounded-full bg-white/[0.05]">
-                          <div
-                            className={`h-full rounded-full ${EVENT_BAR[type] ?? 'bg-zinc-500'}`}
-                            style={{ width: `${(count / breakdownMax) * 100}%` }}
-                          />
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
-
-            </div>
-          </div>
+            {events.length > 0 && (
+              <div
+                className={`flex min-h-[36px] flex-shrink-0 flex-wrap items-center gap-x-[16px] gap-y-[2px] border-t ${RULE} px-[16px] py-[8px] text-[12px] leading-[16px] tabular-nums text-faint md:px-[20px]`}
+              >
+                {stream.connectedAt && (
+                  <span>
+                    Connected at <SessionClock at={stream.connectedAt} />
+                  </span>
+                )}
+                <span>{countsLine(stream.counts)}</span>
+                <span className="ml-auto">Last {FEED_LIMIT} kept</span>
+              </div>
+            )}
+          </section>
         </div>
       </div>
+
+      <RecordDrawer
+        open={!!ev}
+        onClose={closeEvent}
+        title={ev ? <EventTitle event={ev} /> : ''}
+        label={ev ? eventTitle(ev) : undefined}
+        subtitle={ev ? <SessionClock at={ev.at} seconds /> : null}
+        facts={
+          ev && changedColumns(ev).length > 0 ? (
+            <Facts className="!mt-[8px]">
+              <Fact>
+                Changed{' '}
+                {changedColumns(ev).map((c, i) => (
+                  <span key={c}>
+                    {i > 0 && ', '}
+                    <code className="font-mono text-[12px] text-zinc-300">{c}</code>
+                  </span>
+                ))}
+              </Fact>
+            </Facts>
+          ) : null
+        }
+        onPrev={nav.onPrev}
+        onNext={nav.onNext}
+        position={nav.position}
+        footer={ev ? <CopyJsonButton value={pretty(ev.frame)} /> : null}
+      >
+        {ev && <EventDetail event={ev} projectId={projectId} />}
+      </RecordDrawer>
     </div>
+  )
+}
+
+/** "reviews and watchlist_items", the names in mono. */
+function TableNames({ names, text }: { names: readonly string[]; text: string }) {
+  // Split the sentence the listing built back into names and joining words.
+  const parts: ReactNode[] = []
+  let rest = text
+  names.forEach((n, i) => {
+    const at = rest.indexOf(n)
+    if (at > 0) parts.push(rest.slice(0, at))
+    parts.push(
+      <code key={`${n}-${i}`} className="font-mono text-[12px] text-zinc-200">
+        {n}
+      </code>,
+    )
+    rest = rest.slice(at + n.length)
+  })
+  if (rest) parts.push(rest)
+  return <>{parts}</>
+}
+
+/** A moment of this session: "2:22 AM", or "2:22:51 AM" with seconds; the full date on hover. */
+function SessionClock({ at, seconds = false }: { at: number; seconds?: boolean }) {
+  return <Time iso={at} mode={seconds ? 'clockSeconds' : 'clock'} />
+}
+
+/** One filter in the rail: All events, a table, Presence, Broadcasts. */
+function RailItem({
+  label,
+  n,
+  active,
+  onSelect,
+  mono = false,
+  glyph,
+  glyphLabel,
+}: {
+  label: string
+  n: number
+  active: boolean
+  onSelect: () => void
+  mono?: boolean
+  glyph?: 'live' | 'idle'
+  glyphLabel?: string
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        aria-current={active ? 'true' : undefined}
+        onClick={onSelect}
+        className={`flex h-[32px] w-full items-center gap-[10px] rounded-[7px] px-[10px] text-left transition-colors duration-150 ${FOCUS_INSET} ${
+          active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
+        }`}
+      >
+        <span className="flex w-[12px] flex-shrink-0 justify-center">{glyph && <StatusGlyph state={glyph} label={glyphLabel ?? glyph} />}</span>
+        <span className={`min-w-0 flex-1 truncate ${mono ? 'font-mono text-[12.5px]' : 'text-[13px] font-medium'}`}>{label}</span>
+        {n > 0 && <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{count(n)}</span>}
+      </button>
+    </li>
   )
 }

@@ -8,11 +8,20 @@
  * `triggerWebhooks()` had no caller anywhere in the tree. The register called
  * it BACKEND_ONLY on the strength of a route existing.
  *
- * So this panel is not a UI wrapped around a working feature. It ships with the
+ * So this page is not a UI wrapped around a working feature. It ships with the
  * event capture that makes the feature exist, and it reports that capture's
  * real state rather than assuming it.
  *
- * ── What this panel refuses to fake ─────────────────────────────────────────
+ * ── The page (project console rebuild, 2026-11-16) ──────────────────────────
+ *
+ * A document page, list then detail, each with its own URL (decision 6):
+ *
+ *   Webhooks                 the endpoints, the agent's triggers, how to verify
+ *   ?endpoint=<id>           one endpoint: its deliveries by day, All | Failed,
+ *                            the receiver's own answer, Send test, Send again
+ *   ?trigger=<id>            one agent trigger: the same delivery view
+ *
+ * ── What this page refuses to fake ──────────────────────────────────────────
  *
  * Delivery history is the log rows the deliverer wrote. There is no seeded
  * example, no "last delivered 2 minutes ago" placeholder, and an endpoint that
@@ -22,215 +31,243 @@
  * status code. It is not a simulation, and it does not report success because a
  * request was dispatched — a restore step in the recovery tranche returned a
  * cheerful string having restored nothing, and that class of answer is banned.
+ * "Send again" is the same: one real attempt, its own log row, its answer.
  *
  * Capture health is read from information_schema on every load. When a webhook
- * subscribes to row events and the database is not capturing them, the panel
- * says the webhook will not fire. A green row over a dead trigger is precisely
+ * subscribes to row events and the database is not capturing them, the page
+ * says the webhook will not fire. A healthy row over a dead trigger is precisely
  * the defect this surface was built to end.
+ *
+ * Nothing on the screen changes before the server agrees: turning an endpoint
+ * off, deleting it and rotating its secret wait for the answer, and a refusal
+ * is said on the endpoint's row (or under its header) in the server's words.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { Plus, Send } from 'lucide-react'
 import {
-  Webhook, Plus, Trash2, Send, KeyRound, Power,
-  CheckCircle2, AlertTriangle, ChevronRight, Pencil, Lock,
-} from 'lucide-react'
-import {
-  CopyButton, EmptyState, GhostPreview, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
-  OverflowMenu, PageHeader, Skeleton, Tag,
+  Breadcrumbs,
+  CopyButton,
+  CopyField,
+  KitButton,
+  KitButtonLink,
+  KitConfirmDialog,
+  KitNote,
+  OverflowMenu,
+  PageHeader,
+  Segmented,
+  StatusGlyph,
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { when } from '@/components/changes/present'
-import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, isRowEventType, type WebhookEventType } from '@/lib/webhooks/events'
+import { CodeWell } from '@/components/console/EventRow'
+import { EmptyPanel, ErrorRow, RefusedLine } from '@/components/console/states'
+import { RefreshButton, count, type MenuItems } from '@/components/console/InstrumentBar'
+import { SecretOnceDialog } from '@/components/console/SecretOnceDialog'
+import { Time } from '@/components/console/Time'
+import { Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, RowSkeleton, Section } from '@/components/autonomy/rows'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import Link from 'next/link'
+import type { WebhookEventType } from '@/lib/webhooks/events'
+import { WebhookForm } from './WebhookForm'
+import { AnswerLine, EndpointDeliveries, TriggerDeliveries } from './WebhookDeliveries'
+import {
+  answerLine,
+  canSendAgain,
+  hostAndPath,
+  recentDeliveries,
+  shortEndpoint,
+  tablesWords,
+  triggerEventWords,
+  VERIFY_SNIPPET,
+  type CaptureState,
+  type DeliveryLog,
+  type TriggerDeliveryRow,
+  type TriggerWebhookRow,
+  type WebhookPlanState,
+  type WebhookRow,
+} from './webhooks-present'
 
-interface WebhookRow {
-  id: string
-  eventType: string
-  targetUrl: string
-  active: boolean
-  /** Row events only: the tables it receives; empty means every table. */
-  tables?: string[]
-  createdAt: string
-  updatedAt: string
-  logCount: number
+interface ListData {
+  webhooks: WebhookRow[]
+  availableTables: string[]
+  plan: WebhookPlanState | null
+  capture: CaptureState | null
 }
 
-interface CaptureState {
-  tables: string[]
-  required: boolean
-  healthy: boolean
-  readable: boolean
+interface TriggerData {
+  triggers: TriggerWebhookRow[]
+  deliveries: TriggerDeliveryRow[]
 }
 
-/** A webhook wired by the agent over MCP (`webhooks { action: "create_trigger" }`). */
-interface TriggerWebhookRow {
-  id: string
-  name: string
-  sourceTable: string
-  event: string
-  webhookUrl: string | null
-  enabled: boolean
-  createdAt: string
+/** A line about what just happened, shown under the header of the view it belongs to. */
+interface Notice {
+  view: string
+  ok: boolean
+  text: string
 }
 
-interface TriggerDeliveryRow {
-  id: string
-  triggerId: string
-  eventType: string
-  table: string | null
-  status: string
-  attemptCount: number
-  statusCode: number | null
-  error: string | null
-  deliveredAt: string | null
-  createdAt: string
-  trigger: { name: string; webhookUrl: string | null }
-}
+/** The endpoints whose recent deliveries the list reads for its facts. More are listed without them. */
+const RECENT_FOR = 20
+/** Deliveries per read on an endpoint's page, and the route's own ceiling (lib/webhooks/index.ts). */
+const PAGE = 50
+const MAX_LOGS = 200
 
-const TRIGGER_STATUS_TONE: Record<string, 'operational' | 'failed' | 'attention' | 'neutral'> = {
-  SUCCESS: 'operational',
-  FAILED: 'attention',
-  DEAD: 'failed',
-}
-
-const TRIGGER_STATUS_LABEL: Record<string, string> = {
-  SUCCESS: 'Delivered',
-  FAILED: 'Failed',
-  DEAD: 'Gave up',
-}
-
-interface DeliveryLog {
-  id: string
-  eventType: string
-  status: string
-  statusCode: number | null
-  attemptCount: number
-  error: string | null
-  responseBody: string | null
-  deliveredAt: string | null
-  createdAt: string
-  nextRetryAt: string | null
-}
-
-const STATUS_TONE: Record<string, 'operational' | 'failed' | 'attention' | 'neutral'> = {
-  SUCCESS: 'operational',
-  FAILED: 'failed',
-  DEAD_LETTER: 'failed',
-  RETRYING: 'attention',
-  PENDING: 'neutral',
-  // Withdrawn because the project was paused. Not a receiver failure, so it is
-  // not drawn as one.
-  CANCELLED: 'neutral',
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  SUCCESS: 'Delivered',
-  FAILED: 'Failed',
-  DEAD_LETTER: 'Gave up',
-  RETRYING: 'Retrying',
-  PENDING: 'Pending',
-  CANCELLED: 'Cancelled',
+async function readJson(res: Response): Promise<any> {
+  return res.json().catch(() => ({}))
 }
 
 export function WebhooksPanel({ projectId }: { projectId: string }) {
-  const [webhooks, setWebhooks] = useState<WebhookRow[]>([])
-  const [capture, setCapture] = useState<CaptureState | null>(null)
-  // The tables an endpoint can name for its row events.
-  const [availableTables, setAvailableTables] = useState<string[]>([])
-  // Whether the project's plan includes webhooks, from the list route. On a
-  // plan without them the page says so and offers no form: it used to show
-  // "Add endpoint" and refuse what was filled in (production QA, 2026-11-09).
-  const [plan, setPlan] = useState<{ allowed: boolean; currentPlan?: string } | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [message, setMessage] = useState<{ tone: 'danger' | 'success' | 'warn'; text: string } | null>(null)
+  const router = useRouter()
+  const pathname = usePathname() ?? `/app/projects/${projectId}/webhooks`
+  const search = useSearchParams()
+  const endpointId = search?.get('endpoint') ?? null
+  const triggerId = endpointId ? null : search?.get('trigger') ?? null
+  const viewKey = endpointId ? `endpoint:${endpointId}` : triggerId ? `trigger:${triggerId}` : 'list'
 
+  const { role, canWrite, canAdminister, organizationId } = useProjectRole(projectId)
+  const readOnly = role !== null && !canWrite
+
+  // ── The list ──────────────────────────────────────────────────────────────
+  const [list, setList] = useState<ListData | null>(null)
+  const [listFailed, setListFailed] = useState(false)
+  const [listStaleAt, setListStaleAt] = useState<string | null>(null)
+  const [listRetrying, setListRetrying] = useState(false)
+  const loadedAt = useRef<string | null>(null)
+  const [triggers, setTriggers] = useState<TriggerData | null>(null)
+  const [triggersFailed, setTriggersFailed] = useState(false)
+  // Each endpoint's newest deliveries, for "Last delivery" and "1 retrying" on its row.
+  const [recent, setRecent] = useState<Record<string, DeliveryLog[]>>({})
+
+  const loadRecent = useCallback(
+    async (webhooks: WebhookRow[]) => {
+      const pairs = await Promise.all(
+        webhooks.slice(0, RECENT_FOR).map(async (w) => {
+          if (w.logCount === 0) return [w.id, [] as DeliveryLog[]] as const
+          try {
+            const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}/logs?limit=25`)
+            if (!res.ok) return null
+            return [w.id, ((await readJson(res)).logs ?? []) as DeliveryLog[]] as const
+          } catch {
+            return null
+          }
+        }),
+      )
+      const next: Record<string, DeliveryLog[]> = {}
+      for (const p of pairs) if (p) next[p[0]] = [...p[1]]
+      setRecent(next)
+    },
+    [projectId],
+  )
+
+  const loadTriggers = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}/trigger-webhooks`)
+      if (!res.ok) throw new Error()
+      const data = await readJson(res)
+      setTriggers({ triggers: data.triggers ?? [], deliveries: data.deliveries ?? [] })
+      setTriggersFailed(false)
+    } catch {
+      setTriggersFailed(true)
+    }
+  }, [projectId])
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}/webhooks`)
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(data.error ?? 'Webhooks could not be loaded.')
+      const next: ListData = {
+        webhooks: data.webhooks ?? [],
+        availableTables: data.availableTables ?? [],
+        plan: data.plan ?? null,
+        capture: data.capture ?? null,
+      }
+      setList(next)
+      setListFailed(false)
+      setListStaleAt(null)
+      loadedAt.current = new Date().toISOString()
+      void loadRecent(next.webhooks)
+    } catch {
+      // Reported, never an empty list: "No endpoints yet" over a failed read
+      // is a different and false claim. A failed refresh keeps what was read.
+      if (loadedAt.current) setListStaleAt(loadedAt.current)
+      else {
+        setList(null)
+        setListFailed(true)
+      }
+    }
+  }, [projectId, loadRecent])
+
+  useEffect(() => {
+    void load()
+    void loadTriggers()
+  }, [load, loadTriggers])
+
+  const retryList = async () => {
+    setListRetrying(true)
+    await Promise.all([load(), loadTriggers()])
+    setListRetrying(false)
+  }
+
+  // ── One endpoint's deliveries ─────────────────────────────────────────────
+  const [detail, setDetail] = useState<{ id: string; logs: DeliveryLog[] | null; limit: number; failed: boolean; staleAt: string | null; at: string | null }>({
+    id: '',
+    logs: null,
+    limit: PAGE,
+    failed: false,
+    staleAt: null,
+    at: null,
+  })
+  const [detailBusy, setDetailBusy] = useState<'refresh' | 'more' | null>(null)
+  const [filter, setFilter] = useState<'all' | 'failed'>('all')
+  const [highlight, setHighlight] = useState<string | null>(null)
+
+  const loadDetail = useCallback(
+    async (id: string, limit: number) => {
+      try {
+        const res = await fetch(`/api/projects/${projectId}/webhooks/${id}/logs?limit=${limit}`)
+        const data = await readJson(res)
+        if (!res.ok) throw new Error(data.error ?? 'Deliveries could not be loaded.')
+        setDetail({ id, logs: data.logs ?? [], limit, failed: false, staleAt: null, at: new Date().toISOString() })
+      } catch {
+        setDetail((d) =>
+          d.id === id && d.logs ? { ...d, staleAt: d.at } : { id, logs: null, limit, failed: true, staleAt: null, at: null },
+        )
+      }
+    },
+    [projectId],
+  )
+
+  useEffect(() => {
+    if (!endpointId) return
+    setDetail({ id: endpointId, logs: null, limit: PAGE, failed: false, staleAt: null, at: null })
+    setFilter('all')
+    setHighlight(null)
+    void loadDetail(endpointId, PAGE)
+  }, [endpointId, loadDetail])
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [rowNotice, setRowNotice] = useState<Record<string, { ok: boolean; text: string }>>({})
+  const [busy, setBusy] = useState<{ id: string; what: string } | null>(null)
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<WebhookRow | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<WebhookRow | null>(null)
   const [confirmRotate, setConfirmRotate] = useState<WebhookRow | null>(null)
-  const [busyId, setBusyId] = useState<string | null>(null)
-  const [revealedSecret, setRevealedSecret] = useState<{ url: string; secret: string } | null>(null)
+  const [secret, setSecret] = useState<{ url: string; value: string } | null>(null)
+  const [captureError, setCaptureError] = useState<string | null>(null)
 
-  const [openLogs, setOpenLogs] = useState<string | null>(null)
-  const [logs, setLogs] = useState<Record<string, DeliveryLog[]>>({})
-  const [logsLoading, setLogsLoading] = useState<string | null>(null)
-
-  // Agent-wired trigger webhooks. The MCP tool creates, replays and rotates
-  // these rows; a page titled "Webhooks" that rendered none of them left the
-  // owner blind to deliveries the agent set up.
-  const [triggerWebhooks, setTriggerWebhooks] = useState<TriggerWebhookRow[]>([])
-  const [triggerDeliveries, setTriggerDeliveries] = useState<TriggerDeliveryRow[]>([])
-  const [replayingId, setReplayingId] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    setLoadError(null)
-    try {
-      const [res, trigRes] = await Promise.all([
-        fetch(`/api/projects/${projectId}/webhooks`),
-        fetch(`/api/projects/${projectId}/trigger-webhooks`),
-      ])
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Webhooks could not be loaded.')
-      setWebhooks(data.webhooks ?? [])
-      setAvailableTables(data.availableTables ?? [])
-      setCapture(data.capture ?? null)
-      setPlan(data.plan ?? null)
-      if (trigRes.ok) {
-        const trig = await trigRes.json()
-        setTriggerWebhooks(trig.triggers ?? [])
-        setTriggerDeliveries(trig.deliveries ?? [])
-      }
-    } catch (err) {
-      // Reported, not swallowed. An empty list rendered over a failed request
-      // reads as "you have no webhooks", which is a different and false claim.
-      setLoadError(err instanceof Error ? err.message : 'Webhooks could not be loaded.')
-    } finally {
-      setLoading(false)
-    }
-  }, [projectId])
-
-  async function replayTriggerDelivery(log: TriggerDeliveryRow) {
-    setReplayingId(log.id)
-    try {
-      const res = await fetch(`/api/projects/${projectId}/trigger-webhooks/replay`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deliveryLogId: log.id }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error ?? 'Replay failed')
-      setMessage({ tone: 'success', text: `Replayed the dead delivery to ${log.trigger.webhookUrl ?? 'its receiver'}, and it answered this time.` })
-      await load()
-    } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'Replay failed' })
-    } finally {
-      setReplayingId(null)
-    }
+  /** Says what happened where it was asked from: on the endpoint's row in the list, or under the page's header. */
+  const tell = (w: WebhookRow, ok: boolean, text: string) => {
+    if (viewKey === 'list') setRowNotice((prev) => ({ ...prev, [w.id]: { ok, text } }))
+    else setNotice({ view: viewKey, ok, text })
   }
-
-  useEffect(() => { load() }, [load])
-
-  async function loadLogs(webhookId: string) {
-    setLogsLoading(webhookId)
-    try {
-      const res = await fetch(`/api/projects/${projectId}/webhooks/${webhookId}/logs?limit=25`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Delivery history could not be loaded.')
-      setLogs(prev => ({ ...prev, [webhookId]: data.logs ?? [] }))
-    } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'Delivery history could not be loaded.' })
-    } finally {
-      setLogsLoading(null)
-    }
-  }
-
-  function toggleLogs(webhookId: string) {
-    if (openLogs === webhookId) { setOpenLogs(null); return }
-    setOpenLogs(webhookId)
-    loadLogs(webhookId)
+  const clearTold = (w: WebhookRow) => {
+    setRowNotice(({ [w.id]: _gone, ...rest }) => rest)
+    setNotice(null)
   }
 
   async function create(eventType: WebhookEventType, targetUrl: string, tables: string[]) {
@@ -239,462 +276,188 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventType, targetUrl, tables }),
     })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? 'The webhook could not be created.')
-
+    const data = await readJson(res)
+    if (!res.ok) throw new Error(data.error ?? 'The endpoint could not be added.')
     setCreating(false)
-    setRevealedSecret({ url: targetUrl, secret: data.webhook.secret })
-    if (data.captureError) {
-      setMessage({
-        tone: 'warn',
-        text: `The webhook was created, but event capture could not be installed: ${data.captureError}. It will not fire until this is resolved.`,
-      })
-    }
+    setSecret({ url: targetUrl, value: data.webhook.secret })
+    setCaptureError(data.captureError ?? null)
     await load()
   }
 
-  async function saveEdit(webhook: WebhookRow, eventType: WebhookEventType, targetUrl: string, tables: string[]) {
-    const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}`, {
+  async function saveEdit(w: WebhookRow, eventType: WebhookEventType, targetUrl: string, tables: string[]) {
+    const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventType, targetUrl, tables }),
     })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? 'The webhook could not be updated.')
+    const data = await readJson(res)
+    if (!res.ok) throw new Error(data.error ?? 'The endpoint could not be saved.')
     setEditing(null)
-    setMessage({ tone: 'success', text: 'Webhook updated.' })
+    setCaptureError(data.captureError ?? null)
     await load()
   }
 
-  async function setActive(webhook: WebhookRow, active: boolean) {
-    setBusyId(webhook.id)
-    setMessage(null)
+  async function setActive(w: WebhookRow, active: boolean) {
+    setBusy({ id: w.id, what: 'toggle' })
+    clearTold(w)
     try {
-      const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}`, {
+      const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'The webhook could not be updated.')
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(data.error ?? `The endpoint could not be turned ${active ? 'on' : 'off'}.`)
+      setCaptureError(data.captureError ?? null)
       await load()
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The webhook could not be updated.' })
+      tell(w, false, err instanceof Error ? err.message : `The endpoint could not be turned ${active ? 'on' : 'off'}.`)
     } finally {
-      setBusyId(null)
+      setBusy(null)
     }
   }
 
-  async function sendTest(webhook: WebhookRow) {
-    setBusyId(webhook.id)
-    setMessage(null)
+  async function sendTest(w: WebhookRow) {
+    setBusy({ id: w.id, what: 'test' })
+    clearTold(w)
     try {
-      const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}/test`, { method: 'POST' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'The test delivery failed.')
-
+      const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}/test`, { method: 'POST' })
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(data.error ?? 'The test could not be sent.')
       // The receiver's answer, verbatim. "Test sent" would be true and useless.
-      if (data.success) {
-        setMessage({ tone: 'success', text: `Delivered. ${webhook.targetUrl} answered ${data.statusCode}.` })
-      } else if (data.blocked) {
-        setMessage({ tone: 'danger', text: `Not sent. ${data.error}` })
-      } else {
-        setMessage({
-          tone: 'danger',
-          text: `Not delivered. ${data.statusCode ? `${webhook.targetUrl} answered ${data.statusCode}.` : ''} ${data.error ?? ''}`.trim(),
-        })
+      const said = answerLine(data, 'test')
+      tell(w, said.ok, said.text)
+      if (viewKey === `endpoint:${w.id}`) {
+        setFilter('all')
+        setHighlight(data.logId ?? null)
+        await loadDetail(w.id, detail.limit)
       }
-      if (openLogs === webhook.id) await loadLogs(webhook.id)
       await load()
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The test delivery failed.' })
+      tell(w, false, err instanceof Error ? err.message : 'The test could not be sent.')
     } finally {
-      setBusyId(null)
+      setBusy(null)
     }
   }
 
-  async function rotate(webhook: WebhookRow) {
-    setBusyId(webhook.id)
+  async function sendAgain(w: WebhookRow, log: DeliveryLog) {
+    setBusy({ id: log.id, what: 'again' })
+    setNotice(null)
     try {
-      const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}/secret`, { method: 'POST' })
-      const data = await res.json()
+      const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}/logs/${log.id}/redeliver`, { method: 'POST' })
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(data.error ?? 'The delivery could not be sent again.')
+      const said = answerLine(data, 'again')
+      setNotice({ view: viewKey, ...said })
+      setHighlight(data.logId ?? null)
+      setFilter('all')
+      await loadDetail(w.id, detail.limit)
+      void load()
+    } catch (err) {
+      setNotice({ view: viewKey, ok: false, text: err instanceof Error ? err.message : 'The delivery could not be sent again.' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function rotate(w: WebhookRow) {
+    setBusy({ id: w.id, what: 'rotate' })
+    clearTold(w)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}/secret`, { method: 'POST' })
+      const data = await readJson(res)
       if (!res.ok) throw new Error(data.error ?? 'The secret could not be rotated.')
-      setRevealedSecret({ url: webhook.targetUrl, secret: data.secret })
-    } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The secret could not be rotated.' })
-    } finally {
-      setBusyId(null)
       setConfirmRotate(null)
+      setSecret({ url: w.targetUrl, value: data.secret })
+    } catch (err) {
+      setConfirmRotate(null)
+      tell(w, false, err instanceof Error ? err.message : 'The secret could not be rotated.')
+    } finally {
+      setBusy(null)
     }
   }
 
-  async function remove(webhook: WebhookRow) {
-    setBusyId(webhook.id)
+  async function remove(w: WebhookRow) {
+    setBusy({ id: w.id, what: 'delete' })
+    clearTold(w)
     try {
-      const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}`, { method: 'DELETE' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'The webhook could not be deleted.')
-      setMessage({ tone: 'success', text: 'Webhook deleted.' })
+      const res = await fetch(`/api/projects/${projectId}/webhooks/${w.id}`, { method: 'DELETE' })
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(data.error ?? 'The endpoint could not be deleted.')
+      setConfirmDelete(null)
+      setCaptureError(data.captureError ?? null)
+      setNotice({ view: 'list', ok: true, text: `Deleted ${shortEndpoint(w.targetUrl)} (${w.eventType}).` })
+      if (viewKey !== 'list') router.push(pathname)
       await load()
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The webhook could not be deleted.' })
-    } finally {
-      setBusyId(null)
       setConfirmDelete(null)
+      tell(w, false, err instanceof Error ? err.message : 'The endpoint could not be deleted.')
+    } finally {
+      setBusy(null)
     }
   }
 
-  const locked = plan?.allowed === false
+  // Agent-wired trigger webhooks. The MCP tool creates, replays and rotates
+  // these rows; a page titled "Webhooks" that rendered none of them left the
+  // owner blind to deliveries the agent set up.
+  async function replayTriggerDelivery(log: TriggerDeliveryRow) {
+    setBusy({ id: log.id, what: 'again' })
+    setNotice(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/trigger-webhooks/replay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deliveryLogId: log.id }),
+      })
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(data.error ?? 'The delivery could not be sent again.')
+      setNotice({ view: viewKey, ok: true, text: 'Sent again. It was delivered this time.' })
+      setHighlight(log.id)
+      await loadTriggers()
+    } catch (err) {
+      setNotice({ view: viewKey, ok: false, text: err instanceof Error ? err.message : 'The delivery could not be sent again.' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // ── What this person may do here ──────────────────────────────────────────
+  const plan = list?.plan ?? null
+  // A plan without webhooks still stops what it has (lib/webhooks/plan.ts).
+  const planAllows = plan?.allowed !== false
   const planName = plan?.currentPlan ? planDisplayName(plan.currentPlan) : 'a plan without webhooks'
-  // Plans and billing live in the Cloud console; a self-hosted build has none.
-  const plansLink = CLOUD_CONTROL_PLANE ? (
-    <Link
-      href="/app/billing"
-      className="text-[13px] font-medium text-zinc-100 underline decoration-white/25 underline-offset-4 hover:decoration-white/60"
-    >
-      See plans
-    </Link>
-  ) : undefined
+  const billingHref = organizationId ? `/app/org/${organizationId}/billing` : '/app/billing'
+  const canChange = canWrite && planAllows
 
-  return (
-    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
-      <PageHeader
-        className="!px-0"
-        title="Webhooks"
-        description="Signed events to your own services when rows change or an end user signs up. Row events are captured in Postgres, so every writer triggers them: the REST API, functions and the table editor."
-        meta={
-          !loading && webhooks.length > 0 ? (
-            <span className="text-[13px] tabular-nums text-faint">
-              {webhooks.length} {webhooks.length === 1 ? 'endpoint' : 'endpoints'}
-            </span>
-          ) : undefined
-        }
-        actions={
-          // The empty state carries this action itself; one button per intent.
-          // A plan without webhooks offers no form at all.
-          !locked && (loading || webhooks.length > 0) ? (
-            <KitButton variant="primary" icon={Plus} onClick={() => setCreating(true)}>
-              Add endpoint
-            </KitButton>
-          ) : undefined
-        }
-      />
+  const menuFor = (w: WebhookRow, opts: { withTest: boolean }): MenuItems => {
+    const items: MenuItems = []
+    if (canChange && opts.withTest && w.active) items.push({ label: 'Send test', onClick: () => void sendTest(w) })
+    if (canChange) items.push({ label: 'Edit endpoint…', onClick: () => setEditing(w) })
+    // Turning one off never needs the plan; turning it back on does.
+    if (canWrite && w.active) items.push({ label: 'Turn off', onClick: () => void setActive(w, false) })
+    if (canChange && !w.active) items.push({ label: 'Turn on', onClick: () => void setActive(w, true) })
+    if (canAdminister && planAllows) items.push({ label: 'Rotate secret…', onClick: () => setConfirmRotate(w) })
+    if (canAdminister) {
+      if (items.length > 0) items.push({ separator: true })
+      items.push({ label: 'Delete endpoint…', danger: true, onClick: () => setConfirmDelete(w) })
+    }
+    return items
+  }
 
-      <div className="space-y-3">
-        {loadError && <KitNote icon={AlertTriangle} tone="danger">{loadError}</KitNote>}
+  const shownNotice = notice && notice.view === viewKey ? notice : null
+  const webhooks = list?.webhooks ?? []
+  const endpoint = endpointId ? webhooks.find((w) => w.id === endpointId) ?? null : null
+  const trigger = triggerId ? triggers?.triggers.find((t) => t.id === triggerId) ?? null : null
 
-        {locked && webhooks.length > 0 && (
-          <KitNote icon={Lock} tone="info" actions={plansLink}>
-            Webhooks are part of the Pro plan, and this project is on {planName}. The endpoints below still receive events. You can disable or delete them, but not add or change one.
-          </KitNote>
-        )}
-
-        {message && (
-          <KitNote icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle} tone={message.tone}>
-            {message.text}
-          </KitNote>
-        )}
-
-        {/* Ground truth from information_schema, not a stored flag. */}
-        {capture?.required && !capture.healthy && (
-          <KitNote icon={AlertTriangle} tone="warn" title="Row events are not being captured">
-            {capture.readable
-              ? 'This project subscribes to row events, but no table in its schema carries a capture trigger. Those webhooks will not fire. Re-saving an endpoint reinstalls capture.'
-              : 'This project’s workspace schema could not be read, so whether row events are captured is unknown. Treat these endpoints as not firing until this resolves.'}
-          </KitNote>
-        )}
-      </div>
-
-      <div className={loadError || message || (capture?.required && !capture.healthy) ? 'mt-5' : ''}>
-        {loading ? (
-          <div className="space-y-2">
-            <Skeleton className="h-[64px] w-full rounded-[10px]" />
-            <Skeleton className="h-[64px] w-full rounded-[10px]" />
-          </div>
-        ) : webhooks.length === 0 && locked ? (
-          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-            <EmptyState
-              icon={Lock}
-              title="Webhooks are part of the Pro plan"
-              description={`This project is on ${planName}. On Pro, Backenly POSTs a signed JSON body to your URL when a row changes or an end user signs up, with retries and a delivery log.`}
-              action={plansLink}
-            />
-          </div>
-        ) : webhooks.length === 0 ? (
-          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-            <EmptyState
-              icon={Webhook}
-              preview={<GhostPreview kind="list" />}
-              title="No endpoints yet"
-              description="Add a URL and Backenly POSTs a signed JSON body to it when the event happens, with retries and a delivery log."
-              action={
-                <KitButton variant="primary" icon={Plus} onClick={() => setCreating(true)}>
-                  Add endpoint
-                </KitButton>
-              }
-            />
-          </div>
-        ) : (
-          <ul className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012] divide-y divide-white/[0.06]">
-            {webhooks.map(webhook => {
-              const expanded = openLogs === webhook.id
-              return (
-                <li key={webhook.id}>
-                  <div className="flex items-center gap-3 px-4 py-3">
-                    <button
-                      type="button"
-                      onClick={() => toggleLogs(webhook.id)}
-                      className={`flex min-w-0 flex-1 items-center gap-3 rounded-[6px] text-left ${FOCUS}`}
-                      aria-expanded={expanded}
-                    >
-                      <ChevronRight
-                        className={`h-4 w-4 flex-shrink-0 text-zinc-600 transition-transform duration-150 ${expanded ? 'rotate-90 text-zinc-300' : ''}`}
-                      />
-                      <span
-                        className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${webhook.active ? 'bg-emerald-400' : 'bg-zinc-600'}`}
-                        aria-hidden
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate font-mono text-[12.5px] text-zinc-100">{webhook.targetUrl}</span>
-                        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
-                          <Tag mono>{webhook.eventType}</Tag>
-                          {isRowEventType(webhook.eventType) && (
-                            <span className="truncate">
-                              {webhook.tables && webhook.tables.length > 0 ? webhook.tables.join(', ') : 'Every table'}
-                            </span>
-                          )}
-                          <span>{webhook.active ? 'Enabled' : 'Disabled'}</span>
-                          <span className="tabular-nums">
-                            {webhook.logCount === 0
-                              ? 'Never delivered'
-                              : `${webhook.logCount.toLocaleString()} ${webhook.logCount === 1 ? 'delivery' : 'deliveries'}`}
-                          </span>
-                        </span>
-                      </span>
-                    </button>
-
-                    <div className="flex flex-shrink-0 items-center gap-1">
-                      {!locked && (
-                        <KitButton
-                          variant="secondary"
-                          size="sm"
-                          icon={Send}
-                          loading={busyId === webhook.id}
-                          disabled={busyId !== null}
-                          onClick={() => sendTest(webhook)}
-                        >
-                          <span className="hidden sm:inline">Send test</span>
-                          <span className="sm:hidden">Test</span>
-                        </KitButton>
-                      )}
-                      <OverflowMenu
-                        label={`More actions for ${webhook.targetUrl}`}
-                        disabled={busyId !== null}
-                        items={
-                          // On a plan without webhooks an endpoint can only be stopped.
-                          locked
-                            ? [
-                                ...(webhook.active
-                                  ? [{ label: 'Disable', icon: Power, onClick: () => setActive(webhook, false) }]
-                                  : []),
-                                { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
-                              ]
-                            : [
-                                { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
-                                { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
-                                { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
-                                { separator: true },
-                                { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
-                              ]
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  {expanded && (
-                    <div className="border-t border-white/[0.06] bg-[#0a0b0d] px-4 py-3">
-                      {logsLoading === webhook.id ? (
-                        <div className="space-y-2 py-1">
-                          <Skeleton className="h-[16px] w-3/4" />
-                          <Skeleton className="h-[16px] w-2/3" />
-                        </div>
-                      ) : (logs[webhook.id] ?? []).length === 0 ? (
-                        <p className="py-1 text-[13px] text-faint">
-                          No deliveries recorded. This endpoint has not fired yet.
-                        </p>
-                      ) : (
-                        <div className="overflow-x-auto">
-                          <table className="w-full min-w-[620px] text-left text-[12.5px]">
-                            <thead>
-                              <tr className="text-[12px] text-faint">
-                                <th scope="col" className="pb-2 pr-4 font-medium">Status</th>
-                                <th scope="col" className="pb-2 pr-4 font-medium">Time</th>
-                                <th scope="col" className="pb-2 pr-4 font-medium">Response</th>
-                                <th scope="col" className="pb-2 pr-4 font-medium">Attempts</th>
-                                <th scope="col" className="pb-2 font-medium">Detail</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-white/[0.05]">
-                              {(logs[webhook.id] ?? []).map(log => (
-                                <tr key={log.id}>
-                                  <td className="py-2 pr-4 align-top">
-                                    <KitBadge tone={STATUS_TONE[log.status] ?? 'neutral'}>{STATUS_LABEL[log.status] ?? log.status}</KitBadge>
-                                  </td>
-                                  <td className="whitespace-nowrap py-2 pr-4 align-top tabular-nums text-zinc-400">
-                                    {when(log.createdAt)}
-                                  </td>
-                                  <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
-                                  <td className="py-2 pr-4 align-top tabular-nums text-faint">{log.attemptCount}</td>
-                                  <td className={`py-2 align-top ${log.status === 'CANCELLED' ? 'text-faint' : 'text-rose-300/90'}`}>
-                                    {log.status === 'CANCELLED' && log.error === 'project_paused'
-                                      ? 'Not sent: the project was paused'
-                                      : log.error ?? ''}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </div>
-
-      {/* Trigger webhooks — rows the agent wires over MCP (`webhooks
-          { action: "create_trigger" }`). Rendered here because this is the
-          page titled Webhooks: before this section, those triggers delivered
-          (and dead-lettered) invisibly to the console. Rotating a trigger's
-          secret stays agent-side: `webhooks { action: "rotate_trigger_secret" }`
-          returns the new secret once and the console never sees it. */}
-      {(triggerWebhooks.length > 0 || triggerDeliveries.length > 0) && (
-        <section aria-labelledby="trigger-webhooks-heading" className="mt-12">
-          <h2 id="trigger-webhooks-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">
-            Trigger webhooks
-          </h2>
-          <p className="mt-1 text-[13px] leading-[21px] text-zinc-400">
-            Wired by your agent over MCP with <code className="font-mono text-[12px] text-zinc-300">create_trigger</code>.
-            They post a signed body to their URL when the row event fires.
-          </p>
-
-          {triggerWebhooks.length > 0 && (
-            <ul className="mt-4 overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012] divide-y divide-white/[0.06]">
-              {triggerWebhooks.map((t) => (
-                <li key={t.id} className="flex items-center gap-3 px-4 py-3">
-                  <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${t.enabled ? 'bg-emerald-400' : 'bg-zinc-600'}`} aria-hidden />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium text-zinc-100">{t.name}</span>
-                    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
-                      <Tag mono>{t.event} → {t.sourceTable}</Tag>
-                      <span className="truncate font-mono text-[12px]">{t.webhookUrl ?? '—'}</span>
-                      <span>{t.enabled ? 'Enabled' : 'Disabled'}</span>
-                    </span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {triggerDeliveries.length > 0 && (
-            <div className="mt-4 overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3">
-              <table className="w-full min-w-[680px] text-left text-[12.5px]">
-                <thead>
-                  <tr className="text-[12px] text-faint">
-                    <th scope="col" className="pb-2 pr-4 font-medium">Status</th>
-                    <th scope="col" className="pb-2 pr-4 font-medium">Trigger</th>
-                    <th scope="col" className="pb-2 pr-4 font-medium">Event</th>
-                    <th scope="col" className="pb-2 pr-4 font-medium">Time</th>
-                    <th scope="col" className="pb-2 pr-4 font-medium">Response</th>
-                    <th scope="col" className="pb-2 pr-4 font-medium">Attempts</th>
-                    <th scope="col" className="pb-2 font-medium" aria-label="Actions" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/[0.05]">
-                  {triggerDeliveries.map((log) => (
-                    <tr key={log.id}>
-                      <td className="py-2 pr-4 align-top">
-                        <KitBadge tone={TRIGGER_STATUS_TONE[log.status] ?? 'neutral'}>
-                          {TRIGGER_STATUS_LABEL[log.status] ?? log.status}
-                        </KitBadge>
-                      </td>
-                      <td className="py-2 pr-4 align-top text-zinc-300">{log.trigger.name}</td>
-                      <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">
-                        {log.eventType}{log.table ? ` → ${log.table}` : ''}
-                      </td>
-                      <td className="whitespace-nowrap py-2 pr-4 align-top tabular-nums text-zinc-400">
-                        {when(log.createdAt)}
-                      </td>
-                      <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
-                      <td className="py-2 pr-4 align-top tabular-nums text-faint">{log.attemptCount}</td>
-                      <td className="py-2 align-top">
-                        {log.status === 'DEAD' && (
-                          <KitButton
-                            variant="secondary"
-                            size="sm"
-                            icon={Send}
-                            loading={replayingId === log.id}
-                            disabled={replayingId !== null}
-                            onClick={() => replayTriggerDelivery(log)}
-                          >
-                            Replay
-                          </KitButton>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* How a receiver verifies what it got: the contract, and a snippet
-          that implements it exactly (lib/webhooks/index.ts signs
-          'sha256=' + hex HMAC-SHA256 of the raw body). */}
-      <section aria-labelledby="verify-heading" className="mt-12 grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-10">
-        <div>
-          <h2 id="verify-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">
-            Verifying a delivery
-          </h2>
-          <div className="mt-2 space-y-3 text-[13px] leading-[21px] text-zinc-400">
-            <p>
-              Each request carries <code className="font-mono text-[12px] text-zinc-200">X-Webhook-Signature</code> as{' '}
-              <code className="font-mono text-[12px] text-zinc-200">sha256=&lt;hex&gt;</code>, the HMAC-SHA256 of the raw
-              request body keyed with the endpoint’s signing secret. Compute the same HMAC over the bytes you received
-              and compare in constant time. Reject anything that does not match: the signature is what tells you the
-              request came from Backenly.
-            </p>
-            <p>
-              <code className="font-mono text-[12px] text-zinc-200">X-Webhook-Delivery</code> is unique per delivery and
-              repeats when a retry re-sends the same event. Delivery is at-least-once, so use it to discard duplicates
-              rather than assuming each request is new.
-            </p>
-          </div>
-        </div>
-        <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#08090a]">
-          <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2">
-            <span className="text-[12px] text-faint">verify.js</span>
-            <CopyButton value={VERIFY_SNIPPET} label="Copy snippet" />
-          </div>
-          <pre className="overflow-x-auto px-4 py-3.5 font-mono text-[12px] leading-[20px] text-zinc-300">
-            <code>{VERIFY_SNIPPET}</code>
-          </pre>
-        </div>
-      </section>
-
+  const dialogs = (
+    <>
       <WebhookForm
         open={creating}
         title="Add endpoint"
-        availableTables={availableTables}
+        availableTables={list?.availableTables ?? []}
         onClose={() => setCreating(false)}
         onSubmit={create}
       />
-
       {editing && (
         <WebhookForm
           open
@@ -702,255 +465,583 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
           initialUrl={editing.targetUrl}
           initialEvent={editing.eventType as WebhookEventType}
           initialTables={editing.tables}
-          availableTables={availableTables}
+          availableTables={list?.availableTables ?? []}
           onClose={() => setEditing(null)}
           onSubmit={(eventType, targetUrl, tables) => saveEdit(editing, eventType, targetUrl, tables)}
         />
       )}
-
       {/* Shown once. No route returns a stored secret, so this is the only
           moment it exists outside the database. */}
-      {revealedSecret && (
-        <KitModal
-          open
-          title="Signing secret"
-          description="Shown once and cannot be retrieved later. Store it with your receiver now."
-          onClose={() => setRevealedSecret(null)}
-          footer={
-            <KitButton variant="primary" onClick={() => setRevealedSecret(null)}>
-              Done
-            </KitButton>
+      <SecretOnceDialog
+        open={!!secret}
+        onClose={() => setSecret(null)}
+        title={secret ? `Signing secret for ${shortEndpoint(secret.url)}` : 'Signing secret'}
+        value={secret?.value ?? ''}
+        copyLabel="Copy secret"
+      >
+        <p>Your receiver checks each delivery’s signature with it.</p>
+        <CopyButton value={VERIFY_SNIPPET} label="Copy verify.js" showLabel className="-ml-[8px] mt-[6px]" />
+      </SecretOnceDialog>
+      <KitConfirmDialog
+        open={!!confirmRotate}
+        danger
+        busy={busy?.what === 'rotate'}
+        title="Rotate the signing secret?"
+        description={
+          confirmRotate
+            ? `Deliveries to ${shortEndpoint(confirmRotate.targetUrl)} are signed with a new secret right away, and your receiver rejects them until it has the new one. It is shown once.`
+            : undefined
+        }
+        undoable={false}
+        lost="The old secret stops working."
+        confirmLabel="Rotate secret"
+        onConfirm={() => confirmRotate && void rotate(confirmRotate)}
+        onCancel={() => setConfirmRotate(null)}
+      />
+      <KitConfirmDialog
+        open={!!confirmDelete}
+        danger
+        busy={busy?.what === 'delete'}
+        title="Delete this endpoint?"
+        description={
+          confirmDelete
+            ? `${shortEndpoint(confirmDelete.targetUrl)} stops receiving ${confirmDelete.eventType} now, and retries waiting for it are dropped.`
+            : undefined
+        }
+        undoable={false}
+        lost="Its signing secret and delivery history go with it."
+        confirmLabel="Delete endpoint"
+        onConfirm={() => confirmDelete && void remove(confirmDelete)}
+        onCancel={() => setConfirmDelete(null)}
+      />
+    </>
+  )
+
+  const listHref = pathname
+  const upgrade =
+    CLOUD_CONTROL_PLANE && !planAllows ? (
+      <Link
+        href={billingHref}
+        className={`rounded-[3px] font-medium text-zinc-100 underline decoration-white/25 underline-offset-[3px] hover:decoration-white/60 ${FOCUS}`}
+      >
+        Upgrade to Pro
+      </Link>
+    ) : null
+
+  // ── An endpoint's page ────────────────────────────────────────────────────
+  if (endpointId) {
+    const crumbs = (label: string) => <Breadcrumbs items={[{ label: 'Webhooks', href: listHref }, { label }]} />
+    if (!list) {
+      return (
+        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+          <PageHeader flush breadcrumb={crumbs('Endpoint')} title="Endpoint" />
+          <Panel>{listFailed ? <ErrorRow things="this endpoint" onRetry={retryList} retrying={listRetrying} /> : <RowSkeleton rows={2} />}</Panel>
+        </div>
+      )
+    }
+    if (!endpoint) {
+      return (
+        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+          <PageHeader flush breadcrumb={crumbs('Endpoint not found')} title="Endpoint not found" />
+          <Panel>
+            <EmptyLine>This endpoint was deleted, or the link is wrong.</EmptyLine>
+          </Panel>
+          {dialogs}
+        </div>
+      )
+    }
+    const w = endpoint
+    const name = shortEndpoint(w.targetUrl)
+    const menu = menuFor(w, { withTest: false })
+    const tables = tablesWords(w.eventType, w.tables)
+    const deliveries = detail.id === w.id ? detail : null
+    return (
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+        <PageHeader
+          flush
+          breadcrumb={crumbs(name)}
+          title={<span className="[overflow-wrap:anywhere]">{name}</span>}
+          meta={!w.active ? <StatusGlyph state="paused" label="Off" showLabel /> : undefined}
+          description={
+            <span className="flex flex-wrap items-center gap-x-[18px] gap-y-[6px] text-[13px]">
+              <code className="font-mono text-[12.5px] text-zinc-300">{w.eventType}</code>
+              {tables && <span>{tables}</span>}
+              <span>
+                Added <Time iso={w.createdAt} mode="date" />
+              </span>
+              <span className="tabular-nums">{w.logCount === 0 ? 'No deliveries yet' : `${count(w.logCount)} ${w.logCount === 1 ? 'delivery' : 'deliveries'}`}</span>
+              <CopyField variant="inline" value={w.targetUrl} label="Copy endpoint URL" className="max-w-full" />
+            </span>
+          }
+          actions={
+            canWrite && (canChange || menu.length > 0) ? (
+              <>
+                {canChange && w.active && (
+                  <KitButton icon={Send} loading={busy?.id === w.id && busy.what === 'test'} disabled={!!busy} onClick={() => void sendTest(w)}>
+                    Send test
+                  </KitButton>
+                )}
+                {menu.length > 0 && <OverflowMenu label={`Actions for ${name}`} items={menu} disabled={!!busy} width="w-[220px]" />}
+              </>
+            ) : undefined
+          }
+        />
+        <div className="-mt-[8px] mb-[24px] space-y-[8px] empty:hidden">
+          {readOnly && <p className="text-[13px] leading-[20px] text-faint">Only developers and admins can change endpoints.</p>}
+          {!planAllows && (
+            <p className="text-[13px] leading-[20px] text-faint">
+              This project is on {planName}. It keeps receiving; you can turn it off or delete it. {upgrade}
+            </p>
+          )}
+          {list.capture?.required && !list.capture.healthy && w.active && w.eventType.startsWith('row.') && <CaptureWarning capture={list.capture} />}
+          {captureError && <CaptureFailed error={captureError} />}
+          {shownNotice && <AnswerLine ok={shownNotice.ok} text={shownNotice.text} />}
+        </div>
+        <Section
+          id="webhook-deliveries"
+          title="Deliveries"
+          aside={
+            <>
+              <Segmented
+                size="sm"
+                label="Show deliveries"
+                value={filter}
+                onChange={(v) => setFilter(v === 'failed' ? 'failed' : 'all')}
+                options={[
+                  { value: 'all', label: 'All' },
+                  { value: 'failed', label: 'Failed' },
+                ]}
+              />
+              <RefreshButton
+                label="Refresh deliveries"
+                refreshing={detailBusy === 'refresh'}
+                onRefresh={async () => {
+                  setDetailBusy('refresh')
+                  await loadDetail(w.id, deliveries?.limit ?? PAGE)
+                  setDetailBusy(null)
+                }}
+              />
+            </>
           }
         >
-          <p className="mb-2 truncate font-mono text-[12px] text-faint">{revealedSecret.url}</p>
-          <div className="flex items-start gap-2 rounded-[8px] border border-white/[0.08] bg-[#08090a] p-3">
-            <code className="min-w-0 flex-1 select-all break-all font-mono text-[12.5px] leading-[20px] text-zinc-100">
-              {revealedSecret.secret}
-            </code>
-            <CopyButton value={revealedSecret.secret} label="Copy secret" showLabel />
-          </div>
-        </KitModal>
+          <Panel>
+            <EndpointDeliveries
+              logs={deliveries?.logs ?? null}
+              failed={!!deliveries?.failed}
+              staleAt={deliveries?.staleAt ?? null}
+              retrying={detailBusy === 'refresh'}
+              onRetry={async () => {
+                setDetailBusy('refresh')
+                await loadDetail(w.id, deliveries?.limit ?? PAGE)
+                setDetailBusy(null)
+              }}
+              filter={filter}
+              limit={deliveries?.limit ?? PAGE}
+              onLoadMore={
+                (deliveries?.limit ?? PAGE) < MAX_LOGS
+                  ? async () => {
+                      setDetailBusy('more')
+                      await loadDetail(w.id, Math.min((deliveries?.limit ?? PAGE) * 2, MAX_LOGS))
+                      setDetailBusy(null)
+                    }
+                  : undefined
+              }
+              loadingMore={detailBusy === 'more'}
+              highlight={highlight}
+              emptyLine={canChange && w.active ? 'No deliveries yet. Send a test to see what it answers.' : 'No deliveries yet.'}
+              sendAgain={(log) =>
+                canChange && canSendAgain(log, w.active) ? (
+                  <KitButton
+                    size="sm"
+                    loading={busy?.id === log.id}
+                    disabled={!!busy}
+                    onClick={() => void sendAgain(w, log)}
+                  >
+                    Send again
+                  </KitButton>
+                ) : null
+              }
+            />
+          </Panel>
+        </Section>
+        {dialogs}
+      </div>
+    )
+  }
+
+  // ── An agent trigger's page ───────────────────────────────────────────────
+  if (triggerId) {
+    const crumbs = (label: string) => <Breadcrumbs items={[{ label: 'Webhooks', href: listHref }, { label }]} />
+    if (!triggers) {
+      return (
+        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+          <PageHeader flush breadcrumb={crumbs('Agent trigger')} title="Agent trigger" />
+          <Panel>{triggersFailed ? <ErrorRow things="this trigger" onRetry={retryList} retrying={listRetrying} /> : <RowSkeleton rows={2} />}</Panel>
+        </div>
+      )
+    }
+    if (!trigger) {
+      return (
+        <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+          <PageHeader flush breadcrumb={crumbs('Trigger not found')} title="Trigger not found" />
+          <Panel>
+            <EmptyLine>This trigger was removed, or the link is wrong.</EmptyLine>
+          </Panel>
+        </div>
+      )
+    }
+    const t = trigger
+    const mine = triggers.deliveries.filter((d) => d.triggerId === t.id)
+    return (
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+        <PageHeader
+          flush
+          breadcrumb={crumbs(t.name)}
+          title={t.name}
+          meta={!t.enabled ? <StatusGlyph state="paused" label="Off" showLabel /> : undefined}
+          description={
+            <span className="flex flex-wrap items-center gap-x-[18px] gap-y-[6px] text-[13px]">
+              <span>{triggerEventWords(t.event, t.sourceTable)}</span>
+              <span>
+                Added <Time iso={t.createdAt} mode="date" />
+              </span>
+              {t.webhookUrl && <CopyField variant="inline" value={t.webhookUrl} label="Copy URL" className="max-w-full" />}
+            </span>
+          }
+        />
+        <div className="-mt-[8px] mb-[24px] space-y-[8px]">
+          <p className="text-[13px] leading-[20px] text-faint">Your agent set this up. Ask it to change or remove it.</p>
+          {shownNotice && <AnswerLine ok={shownNotice.ok} text={shownNotice.text} />}
+        </div>
+        <Section id="trigger-deliveries" title="Recent deliveries" aside={<RefreshButton label="Refresh deliveries" onRefresh={() => void loadTriggers()} />}>
+          <Panel>
+            <TriggerDeliveries
+              deliveries={mine}
+              highlight={highlight}
+              sendAgain={(log) =>
+                canWrite && log.status === 'DEAD' ? (
+                  <KitButton size="sm" loading={busy?.id === log.id} disabled={!!busy} onClick={() => void replayTriggerDelivery(log)}>
+                    Send again
+                  </KitButton>
+                ) : null
+              }
+            />
+          </Panel>
+        </Section>
+      </div>
+    )
+  }
+
+  // ── The list ──────────────────────────────────────────────────────────────
+  const loaded = !!list
+  const triggerRows = triggers?.triggers ?? []
+  const showAdd = loaded && canChange
+  const lockedEmpty = loaded && !planAllows && webhooks.length === 0
+  const captureBroken = !!list?.capture?.required && !list.capture.healthy
+
+  return (
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-[64px]`}>
+      <PageHeader
+        flush
+        title="Webhooks"
+        meta={
+          webhooks.length > 0 ? (
+            <span className="text-[13px] tabular-nums text-faint">
+              {count(webhooks.length)} {webhooks.length === 1 ? 'endpoint' : 'endpoints'}
+            </span>
+          ) : undefined
+        }
+        description={readOnly ? 'Only developers and admins can change endpoints.' : undefined}
+        actions={
+          showAdd ? (
+            <KitButton size="lg" variant="primary" icon={Plus} onClick={() => setCreating(true)}>
+              Add endpoint
+            </KitButton>
+          ) : undefined
+        }
+      />
+
+      {(captureBroken || captureError || shownNotice) && (
+        <div className="-mt-[4px] mb-[24px] space-y-[10px]">
+          {captureBroken && list?.capture && <CaptureWarning capture={list.capture} />}
+          {captureError && <CaptureFailed error={captureError} />}
+          {shownNotice && <AnswerLine ok={shownNotice.ok} text={shownNotice.text} />}
+        </div>
       )}
 
-      {confirmRotate && (
-        <KitConfirmDialog
-          open
-          danger
-          busy={busyId !== null}
-          title="Rotate this signing secret?"
+      <div className="space-y-[40px]">
+        <Section
+          id="webhooks-endpoints"
+          title="Endpoints"
           description={
-            `Deliveries to ${confirmRotate.targetUrl} will be signed with a new secret immediately. ` +
-            `Any receiver still verifying with the old one will reject them until you update its ` +
-            `configuration. The new secret is shown once.`
+            loaded && !planAllows && webhooks.length > 0 ? (
+              <>
+                This project is on {planName}. Endpoints keep receiving; you can turn them off or delete them. {upgrade}
+              </>
+            ) : undefined
           }
-          confirmLabel={busyId ? 'Rotating…' : 'Rotate secret'}
-          onConfirm={() => rotate(confirmRotate)}
-          onCancel={() => setConfirmRotate(null)}
-        />
-      )}
+        >
+          <Panel>
+            {listFailed ? (
+              <ErrorRow things="endpoints" onRetry={retryList} retrying={listRetrying} />
+            ) : !list ? (
+              <RowSkeleton rows={3} />
+            ) : (
+              <>
+                {listStaleAt && <ErrorRow things="endpoints" onRetry={retryList} retrying={listRetrying} staleAt={listStaleAt} />}
+                {lockedEmpty ? (
+                  <EmptyPanel title="Webhooks come with Pro" sentence="Add a URL and Backenly sends it a signed POST when a row changes or someone signs up.">
+                    {CLOUD_CONTROL_PLANE && canWrite && (
+                      <KitButtonLink href={billingHref} variant="primary">
+                        Upgrade to Pro
+                      </KitButtonLink>
+                    )}
+                  </EmptyPanel>
+                ) : webhooks.length === 0 ? (
+                  <EmptyPanel title="No endpoints yet" sentence="Add a URL and Backenly sends it a signed POST when a row changes or someone signs up." />
+                ) : (
+                  <RowList>
+                    {webhooks.map((w) => (
+                      <EndpointRow
+                        key={w.id}
+                        webhook={w}
+                        href={`${listHref}?endpoint=${encodeURIComponent(w.id)}`}
+                        recent={recent[w.id]}
+                        menu={menuFor(w, { withTest: true })}
+                        busy={busy?.id === w.id}
+                        told={rowNotice[w.id]}
+                      />
+                    ))}
+                  </RowList>
+                )}
+              </>
+            )}
+          </Panel>
+        </Section>
 
-      {confirmDelete && (
-        <KitConfirmDialog
-          open
-          danger
-          busy={busyId !== null}
-          title="Delete this endpoint?"
-          description={
-            `${confirmDelete.targetUrl} stops receiving events immediately, and its delivery ` +
-            `history is removed with it. Undelivered retries for this endpoint are abandoned.`
-          }
-          confirmLabel={busyId ? 'Deleting…' : 'Delete endpoint'}
-          onConfirm={() => remove(confirmDelete)}
-          onCancel={() => setConfirmDelete(null)}
-        />
-      )}
+        {(triggerRows.length > 0 || (triggersFailed && loaded)) && (
+          <Section id="webhooks-triggers" title="Agent triggers">
+            <Panel>
+              {triggersFailed && !triggers ? (
+                <ErrorRow things="agent triggers" onRetry={() => void loadTriggers()} />
+              ) : (
+                <RowList>
+                  {triggerRows.map((t) => (
+                    <TriggerRow
+                      key={t.id}
+                      trigger={t}
+                      href={`${listHref}?trigger=${encodeURIComponent(t.id)}`}
+                      deliveries={(triggers?.deliveries ?? []).filter((d) => d.triggerId === t.id)}
+                    />
+                  ))}
+                </RowList>
+              )}
+            </Panel>
+          </Section>
+        )}
+
+        {webhooks.length > 0 && <VerifySection />}
+      </div>
+
+      {dialogs}
     </div>
   )
 }
 
-const VERIFY_SNIPPET = `import crypto from 'node:crypto'
+// ─── Rows ────────────────────────────────────────────────────────────────────
 
-// rawBody: the exact bytes received, before any JSON parsing.
-export function isFromBackenly(rawBody, signatureHeader, secret) {
-  const expected =
-    'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex')
-  const a = Buffer.from(expected)
-  const b = Buffer.from(signatureHeader ?? '')
-  return a.length === b.length && crypto.timingSafeEqual(a, b)
-}`
-
-/**
- * The create/edit form.
- *
- * The event list is rendered from WEBHOOK_EVENT_TYPES rather than written out
- * here. The old route validated against a hand-written array that omitted
- * `row.updated` while the type union included it, so a picker built from the
- * type would have offered an option the API rejects. One list, one answer.
- */
-const NO_TABLES: string[] = []
-
-function WebhookForm({
-  open,
-  title,
-  initialUrl = '',
-  initialEvent = 'row.inserted',
-  initialTables = NO_TABLES,
-  availableTables,
-  onClose,
-  onSubmit,
-}: {
-  open: boolean
-  title: string
-  initialUrl?: string
-  initialEvent?: WebhookEventType
-  /** Row events only: the tables it receives; empty means every table. */
-  initialTables?: string[]
-  availableTables: string[]
-  onClose: () => void
-  onSubmit: (eventType: WebhookEventType, targetUrl: string, tables: string[]) => Promise<void>
-}) {
-  const [url, setUrl] = useState(initialUrl)
-  const [event, setEvent] = useState<WebhookEventType>(initialEvent)
-  const [someTables, setSomeTables] = useState(initialTables.length > 0)
-  const [picked, setPicked] = useState<string[]>(initialTables)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (open) {
-      setUrl(initialUrl)
-      setEvent(initialEvent)
-      setSomeTables(initialTables.length > 0)
-      setPicked(initialTables)
-      setError(null)
-    }
-  }, [open, initialUrl, initialEvent, initialTables])
-
-  const rowEvent = isRowEventType(event)
-  // A sign-up comes from no table; "every table" sends none.
-  const tables = rowEvent && someTables ? picked : []
-  const missingTables = rowEvent && someTables && picked.length === 0
-  const togglePicked = (table: string) =>
-    setPicked((prev) => (prev.includes(table) ? prev.filter((t) => t !== table) : [...prev, table]))
-
-  async function submit() {
-    setBusy(true)
-    setError(null)
-    try {
-      await onSubmit(event, url.trim(), tables)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'The endpoint could not be saved.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
+/** Host and path, breaking only at the path's slashes, never inside the host. */
+function EndpointName({ url }: { url: string }) {
+  const { host, path } = hostAndPath(url)
+  const parts = path.split(/(?=\/)/)
   return (
-    <KitModal
-      open={open}
-      title={title}
-      onClose={onClose}
-      footer={
-        <>
-          <KitButton variant="ghost" onClick={onClose}>Cancel</KitButton>
-          <KitButton variant="primary" loading={busy} disabled={url.trim() === '' || missingTables} onClick={submit}>
-            {busy ? 'Saving…' : 'Save endpoint'}
-          </KitButton>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        <KitField
-          label="Endpoint URL"
-          hint="Must be https:// or http:// and reachable from this deployment. Private and loopback addresses are refused unless the operator has enabled them."
-        >
-          <KitInput
-            type="url"
-            inputMode="url"
-            name="webhook-url"
-            autoComplete="off"
-            spellCheck={false}
-            value={url}
-            onChange={e => setUrl(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && url.trim()) submit() }}
-            placeholder="https://example.com/hooks/backenly…"
-          />
-        </KitField>
-
-        <KitField label="Event">
-          <div className="space-y-1.5">
-            {WEBHOOK_EVENT_TYPES.map(type => (
-              <label
-                key={type}
-                className={`flex cursor-pointer items-start gap-2.5 rounded-[8px] border px-3 py-2.5 transition-colors focus-within:ring-2 focus-within:ring-violet-300/60 ${
-                  event === type
-                    ? 'border-violet-300/40 bg-violet-400/[0.06]'
-                    : 'border-white/[0.08] hover:border-white/[0.14]'
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="webhook-event"
-                  value={type}
-                  checked={event === type}
-                  onChange={() => setEvent(type)}
-                  className="mt-0.5 accent-violet-400"
-                />
-                <span className="min-w-0">
-                  <span className="block font-mono text-[12px] text-zinc-100">{type}</span>
-                  <span className="mt-0.5 block text-[12px] leading-[17px] text-faint">
-                    {EVENT_DESCRIPTIONS[type]}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </KitField>
-
-        {rowEvent && (
-          <KitField label="Tables" hint="Row events from other tables are not sent to this endpoint.">
-            <div className="space-y-1.5">
-              {[
-                { value: false, label: 'Every table' },
-                { value: true, label: 'Only the tables I pick' },
-              ].map((option) => (
-                <label key={option.label} className="flex cursor-pointer items-center gap-2.5 text-[13px] text-zinc-200">
-                  <input
-                    type="radio"
-                    name="webhook-tables"
-                    checked={someTables === option.value}
-                    onChange={() => setSomeTables(option.value)}
-                    className="accent-violet-400"
-                  />
-                  {option.label}
-                </label>
-              ))}
-              {someTables &&
-                (availableTables.length === 0 ? (
-                  <p className="pl-6 text-[12px] text-faint">This project has no tables yet.</p>
-                ) : (
-                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 pl-6 pt-1">
-                    {availableTables.map((table) => (
-                      <label key={table} className="flex cursor-pointer items-center gap-2 font-mono text-[12px] text-zinc-200">
-                        <input
-                          type="checkbox"
-                          name="webhook-table"
-                          value={table}
-                          checked={picked.includes(table)}
-                          onChange={() => togglePicked(table)}
-                          className="accent-violet-400"
-                        />
-                        {table}
-                      </label>
-                    ))}
-                  </div>
-                ))}
-            </div>
-          </KitField>
-        )}
-
-        {error && <KitNote icon={AlertTriangle} tone="danger">{error}</KitNote>}
-      </div>
-    </KitModal>
+    <>
+      <span className="whitespace-nowrap">{host}</span>
+      {parts.map((p, i) => (
+        <span key={i}>
+          <wbr />
+          {p}
+        </span>
+      ))}
+    </>
   )
 }
+
+/** The whole row opens the endpoint; its ⋯ stays its own control above the link. */
+const ROW_LINK = `min-w-0 rounded-[3px] after:absolute after:inset-0 after:content-[''] focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-white/70`
+
+function EndpointRow({
+  webhook: w,
+  href,
+  recent,
+  menu,
+  busy,
+  told,
+}: {
+  webhook: WebhookRow
+  href: string
+  recent: DeliveryLog[] | undefined
+  menu: MenuItems
+  busy: boolean
+  told?: { ok: boolean; text: string }
+}) {
+  const r = recent ? recentDeliveries(recent) : null
+  const tables = tablesWords(w.eventType, w.tables)
+  const name = shortEndpoint(w.targetUrl)
+  return (
+    <Row
+      lead="glyph"
+      glyph={w.active ? 'live' : 'paused'}
+      glyphLabel={w.active ? 'On' : 'Off'}
+      busy={busy}
+      className="relative transition-colors duration-150 hover:bg-[#121316]"
+      title={
+        <div className="flex flex-wrap items-baseline gap-x-[14px] gap-y-[2px] leading-[21px]">
+          <Link href={href} className={`${ROW_LINK} font-mono text-[12.5px] font-medium text-zinc-50 [overflow-wrap:anywhere]`}>
+            <EndpointName url={w.targetUrl} />
+          </Link>
+          <code className="font-mono text-[12px] text-zinc-400">{w.eventType}</code>
+          {tables && <span className="text-[12.5px] text-faint">{tables}</span>}
+        </div>
+      }
+      actions={
+        menu.length > 0 ? (
+          <div className="relative z-[1] -my-[4px]">
+            <OverflowMenu label={`Actions for ${name} (${w.eventType})`} items={menu} disabled={busy} width="w-[220px]" />
+          </div>
+        ) : undefined
+      }
+    >
+      <Facts className="!mt-[6px]">
+        {!w.active && <span className="font-medium text-zinc-300">Off</span>}
+        {r && r.retrying > 0 && (
+          <span className="inline-flex items-center gap-[6px] font-medium text-zinc-50">
+            <StatusGlyph state="busy" label="" />
+            {r.retrying} retrying
+          </span>
+        )}
+        {r && r.retrying === 0 && r.lastFailed && (
+          <span className="inline-flex items-center gap-[6px] font-medium text-zinc-50">
+            <StatusGlyph state="failed" label="" />
+            Last delivery failed
+          </span>
+        )}
+        {r?.lastAt && (
+          <Fact>
+            <Time iso={r.lastAt} prefix="Last delivery" />
+          </Fact>
+        )}
+        <Fact>
+          <span className="tabular-nums">{w.logCount === 0 ? 'No deliveries yet' : `${count(w.logCount)} ${w.logCount === 1 ? 'delivery' : 'deliveries'}`}</span>
+        </Fact>
+      </Facts>
+      {told && (told.ok ? <AnswerLine ok text={told.text} className="relative z-[1] mt-[8px] !text-[12.5px]" /> : <RefusedLine className="relative z-[1] mt-[8px]">{told.text}</RefusedLine>)}
+    </Row>
+  )
+}
+
+function TriggerRow({ trigger: t, href, deliveries }: { trigger: TriggerWebhookRow; href: string; deliveries: TriggerDeliveryRow[] }) {
+  const last = deliveries[0]?.createdAt ?? null
+  const gaveUp = deliveries.filter((d) => d.status === 'DEAD').length
+  const url = t.webhookUrl ? hostAndPath(t.webhookUrl) : null
+  return (
+    <Row
+      lead="glyph"
+      glyph={t.enabled ? 'live' : 'paused'}
+      glyphLabel={t.enabled ? 'On' : 'Off'}
+      className="relative transition-colors duration-150 hover:bg-[#121316]"
+      title={
+        <div className="flex flex-wrap items-baseline gap-x-[14px] gap-y-[2px] leading-[21px]">
+          <Link href={href} className={`${ROW_LINK} text-[13.5px] font-medium text-zinc-50`}>
+            {t.name}
+          </Link>
+          <span className="text-[12.5px] text-zinc-400">{triggerEventWords(t.event, t.sourceTable)}</span>
+          {url && (
+            <span className="font-mono text-[12px] text-faint [overflow-wrap:anywhere]">
+              {url.host}
+              {url.path}
+            </span>
+          )}
+        </div>
+      }
+    >
+      <Facts className="!mt-[6px]">
+        {!t.enabled && <span className="font-medium text-zinc-300">Off</span>}
+        {gaveUp > 0 && (
+          <span className="inline-flex items-center gap-[6px] font-medium text-zinc-50">
+            <StatusGlyph state="failed" label="" />
+            {gaveUp} gave up
+          </span>
+        )}
+        {last ? (
+          <Fact>
+            <Time iso={last} prefix="Last delivery" />
+          </Fact>
+        ) : (
+          <Fact>No deliveries yet</Fact>
+        )}
+        {deliveries.length > 0 && (
+          <Fact>
+            <span className="tabular-nums">
+              {count(deliveries.length)} recent {deliveries.length === 1 ? 'delivery' : 'deliveries'}
+            </span>
+          </Fact>
+        )}
+      </Facts>
+    </Row>
+  )
+}
+
+// ─── Notes ───────────────────────────────────────────────────────────────────
+
+/** Ground truth from information_schema, not a stored flag. */
+function CaptureWarning({ capture }: { capture: CaptureState }) {
+  return (
+    <KitNote tone="warn">
+      {capture.readable
+        ? 'Row events aren’t being captured. These endpoints won’t fire. Saving any endpoint again reinstalls capture.'
+        : 'Whether row events are captured couldn’t be read. Treat row endpoints as not firing until it can.'}
+    </KitNote>
+  )
+}
+
+function CaptureFailed({ error }: { error: string }) {
+  return <KitNote tone="warn">Saved, but row events could not be captured: {error}. It won’t fire until this is fixed.</KitNote>
+}
+
+/**
+ * How a receiver verifies what it got: the contract in two lines, and a
+ * snippet that implements it exactly (lib/webhooks/index.ts signs
+ * 'sha256=' + hex HMAC-SHA256 of the raw body).
+ */
+function VerifySection() {
+  const [open, setOpen] = useState(false)
+  return (
+    <Section id="webhooks-verify" title="Verify deliveries">
+      <Panel>
+        <div className="px-[20px] py-[14px]">
+          <p className="text-[13px] leading-[20px] text-zinc-400 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-200">
+            Each delivery is signed with <code>X-Webhook-Signature</code>, an HMAC-SHA256 of the raw body under the endpoint’s secret.
+          </p>
+          <p className="mt-[4px] text-[13px] leading-[20px] text-zinc-400 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-200">
+            Retries repeat <code>X-Webhook-Delivery</code>, so drop the ones you’ve handled.
+          </p>
+          <div className="mt-[10px] flex flex-wrap items-center gap-x-[14px] gap-y-[4px]">
+            <CopyButton value={VERIFY_SNIPPET} label="Copy verify.js" showLabel className="-ml-[8px]" />
+            <Disclosure open={open} onToggle={() => setOpen((o) => !o)}>
+              {open ? 'Hide code' : 'Show code'}
+            </Disclosure>
+          </div>
+        </div>
+        {open && (
+          <CodeWell label="verify.js" copy={VERIFY_SNIPPET} maxHeight={420}>
+            {VERIFY_SNIPPET}
+          </CodeWell>
+        )}
+      </Panel>
+    </Section>
+  )
+}
+
+/** Kept for readers of the old name: the panel renders the whole page. */
+export default WebhooksPanel

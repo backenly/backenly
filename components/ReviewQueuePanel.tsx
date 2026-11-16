@@ -1,64 +1,50 @@
 'use client'
 
 /**
- * ReviewQueuePanel — the actionable half of what used to be AutonomyPanel.
+ * ReviewQueuePanel: Autonomy's "Waiting on you", the one working queue.
  *
- * Autonomy's dial + guardrail config moved to Settings → Autonomy & Guardrails
- * (components/AutonomyGuardrailsSettings.tsx) — that's configuration, not
- * daily workflow. This panel is the daily workflow: changes waiting on you,
- * why each one needs your call, and one-click approve/dismiss.
+ * Everything that waits on a person's decision is a row here: what the coding
+ * agent asked for over MCP (GET /agent-approvals), findings Backenly holds for
+ * approval (the trust report's pendingApprovals), architecture changes Backenly
+ * prepared (each its own EvolutionRequestRow), and a structural migration when
+ * one is pending (MaintenanceLadderRow). Overview's "Waiting on you" and the
+ * top bar's inbox link to these rows by anchor (#approval-<id>,
+ * #finding-<groupKey>), and the heading's count is the inbox's own
+ * (useWaitingCount), so the three can never disagree.
  *
- * Visual language: a single self-headed inspector card (kit surface #16171d,
- * hairline borders, one soft shadow, hairline-divided rows) so it reads as one
- * product with Monitoring / Connect / the rest of the inspector — not the
- * free-floating green-button cards it used to be. It owns the ONE "Waiting on
- * you" header; the parent no longer prints a second title above it. Primary
- * action is violet everywhere (matching the Overview hero and the agent-request
- * row below it) — green is reserved for a settled, healthy result.
+ * Rows are ROOT-CAUSE GROUPS (lib/core/finding-groups), not findings: the loop
+ * writes one finding per affected table, so one wrong policy across nine
+ * tables is one row, one decision, one "Approve & fix all".
  *
- * Same data source as before (GET /api/projects/[id]/autonomy's
- * pendingApprovals) and the same approve/dismiss endpoints
- * (/health/approve, /health) — only the surface it lives on changed.
+ * ARCHITECTURE CHANGES are the one exception to grouping: each is bound to its
+ * own plan version, so they are taken out BEFORE grouping and approved through
+ * POST /api/projects/[id]/architecture only.
  *
- * SINCE 2026-07-21 this is the ONLY working queue in the product. Overview's
- * Backend health block used to render the same findings with its own set of
- * buttons; it is now a read-only summary that links here. One inbox, shown
- * once — so a count can't drift between two pages and an approval can't leave
- * a stale twin behind.
- *
- * Rows are ROOT-CAUSE GROUPS (lib/core/finding-groups), not findings. The loop
- * writes one finding per affected table because that is the unit it fixes; a
- * single wrong policy dialect therefore arrived as nine near-identical rows
- * needing nine identical approvals. A group is one row, one decision, and one
- * "Approve & fix all" that walks every member — the storage unit stays per
- * table, the decision unit becomes per cause.
- *
- * ARCHITECTURE CHANGES are the one exception to grouping. A prepared change
- * (type `architecture_evolution`, lib/evolution-engine/request.ts) arrives in
- * the same pendingApprovals, but each one is its own decision bound to its own
- * plan version, so they are taken out BEFORE grouping: folded together they
- * would share one title and one dismiss, and an approval could not say which
- * version it consents to. Each renders as an EvolutionRequestRow, which
- * approves through POST /api/projects/[id]/architecture only. They still count
- * in the header, because they are still waiting on you.
+ * Rebuilt in place 2026-11-16 (the Nov 3 structure stays): every row leads
+ * with its state (◆ waiting, ◐ running, ✓ done) instead of a 32px tile; facts
+ * carry no icons; a decision's result REPLACES the row's buttons, in the
+ * server's full words, instead of a banner cut at 120 characters; the queue
+ * re-reads with the page (every 30 s and on focus) instead of a refresh icon;
+ * people who cannot decide read one sentence where the buttons were.
  */
 
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { IconButton, KitButton, MetaCode, OverflowMenu, Skeleton, StatusDot, TextWithCode } from '@/components/inspector/kit'
-import {
-  AlertTriangle, RefreshCw, CheckCircle2, Loader2, XCircle, Inbox, ClipboardCopy, Check,
-  Bot, Database, GitMerge, Gauge, History as HistoryIcon, Rows, ShieldAlert, ShieldCheck, Sparkles, Trash2, Activity,
-  Undo2, Wrench, Lock,
-} from 'lucide-react'
-import { groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type FindingGroup } from '@/lib/core/finding-groups'
+import { KitButton, MetaCode, OverflowMenu, StatusGlyph, TextWithCode } from '@/components/inspector/kit'
+import { ClipboardCopy } from 'lucide-react'
+import { groupFindings, CATEGORY_LABEL, type FindingGroup, type GroupableFinding } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { decisionLabels } from '@/lib/core/finding-summaries'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
 import { approvalTitle } from '@/lib/mcp/approval-title'
 import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
+import { MaintenanceLadderRow, useMaintenanceLadder } from '@/components/MaintenanceLadderPanel'
+import { Time } from '@/components/console/Time'
+import { approvalIcon, findingIcon } from '@/components/autonomy/row-icons'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { refreshWaitingCount, useWaitingCount } from '@/lib/hooks/useWaitingCount'
 import {
-  CodeBlock, Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section, rows,
+  CodeBlock, Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TEXT, ROW_TITLE, Section, rows,
 } from '@/components/autonomy/rows'
 
 interface PendingApproval {
@@ -127,34 +113,37 @@ interface AgentApproval {
   shownDigest?: string | null
 }
 
-/** Per-row trust state machine — identical to the one AutonomyPanel used. */
+/** Per-row state while a decision is made. */
 type RowState =
   | { phase: 'idle' }
   | { phase: 'applying' }
   | { phase: 'dismissing' }
-  | { phase: 'verified' }
   | { phase: 'error'; message: string }
+
+/**
+ * A decision that went through. The row stays, with the outcome in place of
+ * its buttons and the server's own words under the title, until the page is
+ * left: the result is read where the question was asked.
+ */
+interface Settled {
+  /** "Ran", "Restored", "Rejected", "Fixed". */
+  word: string
+  /** The server's account of what happened, when it gave one. */
+  text?: string
+  glyph: 'done' | 'idle'
+}
 
 // Fallback only — types the fix-classifier genuinely gates on approval (its
 // NEEDS_APPROVAL set), for responses that predate the server-computed
 // `heldBecause`. Deliberately NOT "anything auth-flavoured": types like
 // rls_expression_invalid are AUTO-class — Autopilot heals them silently and
-// they only appear here when a fix was tried and did not verify. Claiming
-// "always requires approval" for those was false, and made Autopilot read
-// like a debug agent that asks permission for everything.
+// they only appear here when a fix was tried and did not verify.
 const GUARDRAIL_GATED_TYPES = new Set([
   'broken_webhook', 'broken_auth', 'integration_key_invalid',
   'integration_webhook_failing', 'integration_smtp_unreachable',
   'oauth_config_invalid', 'oauth_redirect_uri_missing', 'dead_api_endpoint',
   'deploy_failure', 'auth_spike', 'auth_jwt_missing', 'auth_users_table_missing',
 ])
-
-/** What a finding is about, as the row's tile. */
-const CATEGORY_ICON: Record<FindingCategory, typeof Gauge> = {
-  security: ShieldAlert,
-  performance: Gauge,
-  reliability: Activity,
-}
 
 /**
  * Why this specific item needs a human. Deliberately distinct from p.reason
@@ -177,15 +166,14 @@ function reasonForApproval(p: PendingApproval): string {
 }
 
 /**
- * Label chip for the hold reason — "Escalated by Autopilot" is the story that
- * separates an autonomous loop from a debug agent: it TRIED, verified, and
- * stopped honestly. Null when there's nothing more specific than "waiting".
+ * The hold reason, when it says more than "waiting": "Escalated by Autopilot"
+ * is the story that separates an autonomous loop from a debug agent. It TRIED,
+ * verified, and stopped honestly.
  */
 function heldKindLabel(p: PendingApproval): string | null {
   switch (p.heldBecause?.kind) {
     case 'escalated':  return 'Escalated by Autopilot after a verified fix attempt'
     case 'recurrence': return 'Fix applied but kept recurring, so retries stopped'
-    case 'guardrail':  return null // the text itself already says "requires approval"
     default:           return null
   }
 }
@@ -204,24 +192,41 @@ function diagnosisOf(p: PendingApproval): FindingDiagnosis | null {
   return { rootCause, recommendation, provenance, observations }
 }
 
-function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 5) return 'just now'
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
+/** A server result written for agents ("✅ Column `x` dropped…"), without the emoji; backticks stay for TextWithCode. */
+function resultWords(s: string | null | undefined): string | undefined {
+  if (!s) return undefined
+  const t = s
+    .replace(/[☀-➿⬀-⯿️]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return t || undefined
 }
 
-export function ReviewQueuePanel({ projectId }: { projectId: string }) {
-
+export function ReviewQueuePanel({
+  projectId,
+  refreshKey = 0,
+  canDecideAgent = true,
+  canFix = true,
+}: {
+  projectId: string
+  /** Bumped by the page every 30 s and on focus: the queue re-reads quietly. */
+  refreshKey?: number
+  /** Deciding an agent's request, an architecture change or a migration takes an owner or admin. */
+  canDecideAgent?: boolean
+  /** Approving or dismissing a held finding takes a developer or above. */
+  canFix?: boolean
+}) {
   const [data, setData] = useState<TrustReportShape | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [refreshing, setRefreshing] = useState(false)
   const [rowState, setRowState] = useState<Record<string, RowState>>({})
-  const [banner, setBanner] = useState<{ title: string; detail?: string } | null>(null)
+  const [settled, setSettled] = useState<Record<string, Settled>>({})
+  // What a settled row looked like, so it can stay after the queue no longer lists it.
+  const [settledAgents, setSettledAgents] = useState<Record<string, AgentApproval>>({})
+  const [settledGroups, setSettledGroups] = useState<Record<string, FindingGroup<PendingApproval>>>({})
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
+  const waiting = useWaitingCount(projectId)
+  const maintenance = useMaintenanceLadder(projectId, refreshKey)
 
   useEffect(() => () => { timers.current.forEach(clearTimeout) }, [])
 
@@ -230,9 +235,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
   const [agentApprovals, setAgentApprovals] = useState<AgentApproval[]>([])
 
-  const fetchReport = useCallback(async (silent = false) => {
-    if (silent) setRefreshing(true)
-    setError(false)
+  const fetchReport = useCallback(async () => {
     try {
       const [autonomyRes, agentRes] = await Promise.all([
         fetch(`/api/projects/${projectId}/autonomy`, { credentials: 'include' }),
@@ -240,6 +243,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       ])
       if (!autonomyRes.ok) throw new Error('fetch failed')
       setData(await autonomyRes.json())
+      setError(false)
       // Agent requests are additive — their failure must not blank the queue.
       if (agentRes.ok) {
         const j = await agentRes.json().catch(() => null)
@@ -249,13 +253,18 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       setError(true)
     } finally {
       setLoading(false)
-      setRefreshing(false)
     }
   }, [projectId])
 
-  useEffect(() => { fetchReport() }, [fetchReport])
+  useEffect(() => { void fetchReport() }, [fetchReport, refreshKey])
   // A change decided on the Architecture changes card leaves or joins this queue.
-  useEffect(() => onArchitectureChange('queue', () => { void fetchReport(true) }), [fetchReport])
+  useEffect(() => onArchitectureChange('queue', () => { void fetchReport() }), [fetchReport])
+
+  /** After a decision: the queue, and every surface that counts it (the inbox, Overview). */
+  const afterDecision = useCallback(() => {
+    void fetchReport()
+    void refreshWaitingCount(projectId, { fresh: true })
+  }, [fetchReport, projectId])
 
   // Architecture changes leave before grouping: each is its own decision on its
   // own plan version, and the grouper would fold several into one row.
@@ -266,12 +275,6 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       evolutionRequests: all.filter(p => isEvolutionApprovalFinding(p.type)),
     }
   }, [data])
-
-  const flashBanner = (title: string, detail?: string) => {
-    setBanner({ title, detail })
-    const t = setTimeout(() => setBanner(null), 6000)
-    timers.current.push(t)
-  }
 
   /**
    * Apply one finding's fix. Returns the outcome instead of touching row state
@@ -306,6 +309,8 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
     }
   }
 
+  const settle = (id: string, s: Settled) => setSettled(prev => ({ ...prev, [id]: s }))
+
   /**
    * Approve every member of a root-cause group.
    *
@@ -316,10 +321,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
    * "6 of 9 applied" means the first six really are applied.
    */
   const approveGroup = async (g: FindingGroup<PendingApproval>) => {
-    // Only walk members the executor can actually repair. Sending the rest would
-    // spend a round trip to be told there is no fix mapping, and — worse — a
-    // group that is mostly unfixable would report a partial failure for work
-    // that was never going to run. The button is labelled with this same count.
+    // Only walk members the executor can actually repair. The button is labelled with this same count.
     const targets = g.members.filter(m => hasExecutableFix(m.type, m.details))
     if (targets.length === 0) return
 
@@ -334,32 +336,22 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
     }
 
     if (applied === 0) {
-      setRow(g.key, {
-        phase: 'error',
-        message: firstError ?? 'The fix could not be applied. Try again in a moment.',
-      })
+      setRow(g.key, { phase: 'error', message: firstError ?? 'The fix could not be applied. Try again in a moment.' })
       return
     }
 
-    setRow(g.key, { phase: 'verified' })
-    flashBanner(
-      applied === targets.length
-        ? `Fix applied${targets.length > 1 ? ` to ${applied} tables` : ''}`
-        : `Applied to ${applied} of ${targets.length}`,
+    setRow(g.key, { phase: 'idle' })
+    setSettledGroups(prev => ({ ...prev, [g.key]: g }))
+    settle(g.key, {
+      glyph: 'done',
+      word: applied === targets.length ? 'Fixed' : `Fixed ${applied} of ${targets.length}`,
       // What the server said the fix did, when there is one fix to speak for:
       // not every fix is verified, and not every fix keeps a restore point.
-      applied === targets.length
-        ? (targets.length === 1 && lastMessage ? lastMessage.slice(0, 160) : undefined)
-        : `${targets.length - applied} left in the queue: ${firstError ?? 'see details'}`,
-    )
-    const t = setTimeout(async () => {
-      await fetchReport(true)
-      setRowState(prev => {
-        const { [g.key]: _gone, ...rest } = prev
-        return rest
-      })
-    }, 2400)
-    timers.current.push(t)
+      text: applied === targets.length
+        ? (targets.length === 1 ? resultWords(lastMessage) : `Applied to ${applied} tables.`)
+        : `${targets.length - applied} still waiting: ${firstError ?? 'see the row'}`,
+    })
+    afterDecision()
   }
 
   /**
@@ -378,20 +370,18 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       })
       const j = await res.json().catch(() => ({} as any))
       if (res.ok && j?.fixed) {
-        setRow(g.key, { phase: 'verified' })
-        flashBanner('Fixed · verified', 'the change is in the catalog, the issue is gone on re-check, nothing else broke · Undo is in Applied changes')
-        const t = setTimeout(async () => {
-          await fetchReport(true)
-          setRowState(prev => {
-            const { [g.key]: _gone, ...rest } = prev
-            return rest
-          })
-        }, 2400)
-        timers.current.push(t)
+        setRow(g.key, { phase: 'idle' })
+        setSettledGroups(prev => ({ ...prev, [g.key]: g }))
+        settle(g.key, {
+          glyph: 'done',
+          word: 'Fixed',
+          text: 'In the catalog, gone on re-check, nothing else broke. Undo is under Changes Backenly made.',
+        })
+        afterDecision()
         return
       }
       setRow(g.key, { phase: 'error', message: j?.message || j?.error || 'The repair could not be applied. Try again in a moment.' })
-      if (res.status === 409 || res.ok) fetchReport(true)
+      if (res.status === 409 || res.ok) void fetchReport()
     } catch {
       setRow(g.key, { phase: 'error', message: 'Network error. Check your connection and try again.' })
     }
@@ -421,28 +411,23 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       const j = await res.json().catch(() => ({} as any))
 
       if (res.ok && j?.success) {
-        setRow(approvalId, { phase: 'verified' })
-        if (opts.quiet) return { ok: true }
         const request = agentApprovals.find(a => a.id === approvalId)
-        const restore = request?.tool === 'revert_schema_change'
-        const versionRestore = request?.tool === 'rollback_deploy'
+        const restore = request?.tool === 'revert_schema_change' || request?.tool === 'rollback_deploy'
         const fromBackenly = request?.requestedBy === 'backenly'
-        flashBanner(
-          decision === 'approve'
-            ? (restore ? 'Previous state restored' : versionRestore ? 'Restore ran' : 'Agent request executed')
-            : (restore || versionRestore ? 'Restore declined' : 'Agent request rejected'),
-          decision === 'approve'
-            ? (j?.resultSummary ? clip(String(j.resultSummary), 120) : 'the agent sees the result on its next poll')
-            : fromBackenly ? 'the change stays as it is' : 'the agent is told not to retry',
-        )
-        const t = setTimeout(async () => {
-          await fetchReport(true)
-          setRowState(prev => {
-            const { [approvalId]: _gone, ...rest } = prev
-            return rest
-          })
-        }, 2400)
-        timers.current.push(t)
+        if (request) setSettledAgents(prev => ({ ...prev, [approvalId]: request }))
+        setRow(approvalId, { phase: 'idle' })
+        settle(approvalId, decision === 'approve'
+          ? {
+              glyph: 'done',
+              word: restore ? 'Restored' : 'Ran',
+              text: resultWords(j?.resultSummary) ?? 'Your agent sees the result on its next check.',
+            }
+          : {
+              glyph: 'idle',
+              word: restore ? 'Declined' : 'Rejected',
+              text: fromBackenly ? 'The change stays as it is.' : 'Your agent is told not to retry.',
+            })
+        if (!opts.quiet) afterDecision()
         return { ok: true }
       }
 
@@ -456,7 +441,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           : 'Could not reject. Try again.'),
       })
       // The request changed under this card, or was decided elsewhere: show it as it is now.
-      if (res.status === 409 && !opts.quiet) fetchReport(true)
+      if (res.status === 409 && !opts.quiet) void fetchReport()
       return { ok: false }
     } catch {
       setRow(approvalId, { phase: 'error', message: 'Network error. Check your connection and try again.' })
@@ -471,10 +456,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   // with that card's digest, one after another; the person approves the list
   // they were shown, taken when they asked. Restores, and requests Backenly
   // raised itself, are decided one at a time.
-  const [bulk, setBulk] = useState<
-    | { phase: 'idle' }
-    | { phase: 'confirming' | 'running'; requests: Array<{ id: string; shownDigest?: string | null; title: string }>; done: number }
-  >({ phase: 'idle' })
+  const [bulk, setBulk] = useState<BulkState>({ phase: 'idle' })
 
   const approveAll = async (requests: Array<{ id: string; shownDigest?: string | null; title: string }>) => {
     setBulk({ phase: 'running', requests, done: 0 })
@@ -484,21 +466,8 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       if (outcome.ok) ran += 1
       setBulk({ phase: 'running', requests, done: i + 1 })
     }
-    setBulk({ phase: 'idle' })
-    const missed = requests.length - ran
-    flashBanner(
-      `Ran ${ran} of ${requests.length}`,
-      missed > 0 ? `${missed} did not run; ${missed === 1 ? 'its card says' : 'their cards say'} why` : 'your agent sees each result on its next poll',
-    )
-    const t = setTimeout(async () => {
-      await fetchReport(true)
-      setRowState(prev => {
-        const rest = { ...prev }
-        for (const r of requests) if (rest[r.id]?.phase === 'verified') delete rest[r.id]
-        return rest
-      })
-    }, 2400)
-    timers.current.push(t)
+    setBulk({ phase: 'finished', requests, ran })
+    afterDecision()
   }
 
   /** Dismiss every member of a group — the inverse of approveGroup. */
@@ -517,11 +486,10 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           return
         }
       }
-      await fetchReport(true)
-      setRowState(prev => {
-        const { [g.key]: _gone, ...rest } = prev
-        return rest
-      })
+      setRow(g.key, { phase: 'idle' })
+      setSettledGroups(prev => ({ ...prev, [g.key]: g }))
+      settle(g.key, { glyph: 'idle', word: 'Dismissed' })
+      afterDecision()
     } catch {
       setRow(g.key, { phase: 'error', message: 'Network error. Try again.' })
     }
@@ -529,12 +497,9 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
   if (loading) {
     return (
-      <QueueSection count={null} refreshing={false} onRefresh={() => {}} disabled>
+      <QueueSection count={waiting.total}>
         <Panel>
-          <div className="space-y-3 px-5 py-5" aria-hidden>
-            <Skeleton className="h-[14px] w-2/5" />
-            <Skeleton className="h-[12px] w-3/5" />
-          </div>
+          <RowSkeleton rows={2} />
         </Panel>
       </QueueSection>
     )
@@ -542,21 +507,23 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
   if (error || !data) {
     return (
-      <QueueSection count={null} refreshing={refreshing} onRefresh={() => fetchReport()}>
+      <QueueSection count={waiting.total}>
         <Panel>
-          <div className="flex flex-wrap items-center gap-3.5 px-5 py-4">
-            <AlertTriangle className="h-4 w-4 flex-shrink-0 text-amber-300" strokeWidth={1.75} />
-            <p className="min-w-0 flex-1 text-[13px] text-zinc-300">The queue is unavailable right now.</p>
-            <KitButton variant="secondary" icon={RefreshCw} onClick={() => fetchReport()}>
-              Retry
-            </KitButton>
-          </div>
+          <ErrorRow
+            things="what is waiting on you"
+            stillWorks="Your guardrails still apply."
+            onRetry={() => {
+              setLoading(true)
+              void fetchReport()
+            }}
+          />
         </Panel>
       </QueueSection>
     )
   }
 
-  const pendingAgents = agentApprovals.filter(a => a.status === 'pending')
+  // The heading's count is the inbox's (useWaitingCount, from /health) once it has one.
+  const pendingAgents = agentApprovals.filter(a => a.status === 'pending' && !settled[a.id])
   const bulkable = pendingAgents.filter(a =>
     a.readable !== false &&
     a.requestedBy !== 'backenly' &&
@@ -567,91 +534,111 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   // while it runs — and if its execution died (server reports failed with no
   // executedAt: the terminal update never ran), the unknown outcome is the
   // human's to look at, not something to hide.
-  const runningAgents = agentApprovals.filter(a => a.status === 'approved')
+  const runningAgents = agentApprovals.filter(a => a.status === 'approved' && !settled[a.id])
   const stuckAgents = agentApprovals.filter(a => a.status === 'failed' && !a.executedAt)
-  // The header counts FINDINGS (what the user must clear), the list renders
-  // GROUPS (what they must decide). Both numbers are shown, so folding nine
-  // rows into one never looks like eight findings quietly disappearing.
-  // Architecture changes are in pendingApprovals, so they are in `total`; each
-  // is one row of its own.
-  const total = data.pendingApprovals.length + pendingAgents.length + stuckAgents.length
+  const openGroups = groups.filter(g => !settled[g.key])
+  // Rows decided on this visit stay, with their outcome, until the page is left.
+  const decidedAgents = Object.values(settledAgents).filter(a => settled[a.id])
+  const decidedGroups = Object.values(settledGroups).filter(g => settled[g.key])
+  const ladder = maintenance.ladder
+  // The heading counts FINDINGS (what the user must clear), the list renders
+  // GROUPS (what they must decide); both are said when the fold is doing work.
+  const localTotal = data.pendingApprovals.length + pendingAgents.length + stuckAgents.length
+  const rowCount = openGroups.length + evolutionRequests.length + pendingAgents.length + stuckAgents.length
+  const nothing =
+    localTotal === 0 && runningAgents.length === 0 && !ladder &&
+    decidedAgents.length === 0 && decidedGroups.length === 0 && bulk.phase === 'idle'
 
   return (
-    <QueueSection
-      count={total}
-      groupCount={groups.length + evolutionRequests.length + pendingAgents.length + stuckAgents.length}
-      refreshing={refreshing}
-      onRefresh={() => fetchReport(true)}
-    >
+    <QueueSection count={waiting.total ?? localTotal} groupCount={rowCount}>
       <Panel>
-      {banner && (
-        <div role="status" className="flex items-center gap-2.5 border-b border-white/[0.06] bg-emerald-400/[0.04] px-5 py-3 animate-slide-up">
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" strokeWidth={1.75} />
-          <p className="min-w-0 text-[13px] font-medium text-zinc-100">
-            {banner.title}
-            {banner.detail && (
-              <span className="ml-2 font-normal text-zinc-400">{banner.detail}</span>
+        {nothing ? (
+          <EmptyLine>Nothing waiting. Risky changes stop here before they run.</EmptyLine>
+        ) : (
+          <RowList>
+            {decidedAgents.map(a => (
+              <AgentRequestRow
+                key={a.id}
+                projectId={projectId}
+                request={a}
+                state={{ phase: 'idle' }}
+                settled={settled[a.id]}
+                canDecide={canDecideAgent}
+                onApprove={() => {}}
+                onReject={() => {}}
+                onResetError={() => {}}
+              />
+            ))}
+            {decidedGroups.map(g => (
+              <ApprovalRow
+                key={g.key}
+                group={g}
+                state={{ phase: 'idle' }}
+                settled={settled[g.key]}
+                canDecide={canFix}
+                onApprove={() => {}}
+                onApproveProposal={() => {}}
+                onDismiss={() => {}}
+                onResetError={() => {}}
+              />
+            ))}
+            {openGroups.map(g => (
+              <ApprovalRow
+                key={g.key}
+                group={g}
+                state={rowState[g.key] ?? { phase: 'idle' }}
+                canDecide={canFix}
+                onApprove={() => approveGroup(g)}
+                onApproveProposal={(pr) => approveProposal(g, pr)}
+                onDismiss={() => dismissGroup(g)}
+                onResetError={() => setRow(g.key, { phase: 'idle' })}
+              />
+            ))}
+            {canDecideAgent && (bulkable.length >= 2 || bulk.phase !== 'idle') && (
+              <BulkApproveRow
+                count={bulkable.length}
+                state={bulk}
+                onAsk={() => setBulk({
+                  phase: 'confirming',
+                  requests: bulkable.map(a => ({ id: a.id, shownDigest: a.shownDigest, title: approvalTitle(a.tool, a.target) })),
+                  done: 0,
+                })}
+                onCancel={() => setBulk({ phase: 'idle' })}
+                onConfirm={() => bulk.phase === 'confirming' && approveAll(bulk.requests)}
+              />
             )}
-          </p>
-        </div>
-      )}
-
-      {total === 0 && runningAgents.length === 0 ? (
-        <EmptyLine icon={Inbox}>Nothing is waiting on you. Risk-flagged changes show up here before they apply.</EmptyLine>
-      ) : (
-        <RowList>
-          {groups.map(g => (
-            <ApprovalRow
-              key={g.key}
-              group={g}
-              state={rowState[g.key] ?? { phase: 'idle' }}
-              onApprove={() => approveGroup(g)}
-              onApproveProposal={(pr) => approveProposal(g, pr)}
-              onDismiss={() => dismissGroup(g)}
-              onResetError={() => setRow(g.key, { phase: 'idle' })}
-            />
-          ))}
-          {(bulkable.length >= 2 || bulk.phase !== 'idle') && (
-            <BulkApproveRow
-              count={bulkable.length}
-              state={bulk}
-              onAsk={() => setBulk({
-                phase: 'confirming',
-                requests: bulkable.map(a => ({ id: a.id, shownDigest: a.shownDigest, title: approvalTitle(a.tool, a.target) })),
-                done: 0,
-              })}
-              onCancel={() => setBulk({ phase: 'idle' })}
-              onConfirm={() => bulk.phase === 'confirming' && approveAll(bulk.requests)}
-            />
-          )}
-          {pendingAgents.map(a => (
-            <AgentRequestRow
-              key={a.id}
-              projectId={projectId}
-              request={a}
-              state={rowState[a.id] ?? { phase: 'idle' }}
-              onApprove={() => decideAgentRequest(a.id, 'approve', a.shownDigest)}
-              onReject={() => decideAgentRequest(a.id, 'reject')}
-              onResetError={() => setRow(a.id, { phase: 'idle' })}
-            />
-          ))}
-          {evolutionRequests.map(r => (
-            <EvolutionRequestRow
-              key={r.id}
-              projectId={projectId}
-              request={r}
-              onRefresh={() => fetchReport(true)}
-              onDecided={message => flashBanner(message)}
-            />
-          ))}
-          {runningAgents.map(a => (
-            <AgentOutcomeRow key={a.id} request={a} running />
-          ))}
-          {stuckAgents.map(a => (
-            <AgentOutcomeRow key={a.id} request={a} />
-          ))}
-        </RowList>
-      )}
+            {pendingAgents.map(a => (
+              <AgentRequestRow
+                key={a.id}
+                projectId={projectId}
+                request={a}
+                state={rowState[a.id] ?? { phase: 'idle' }}
+                canDecide={canDecideAgent}
+                onApprove={() => decideAgentRequest(a.id, 'approve', a.shownDigest)}
+                onReject={() => decideAgentRequest(a.id, 'reject')}
+                onResetError={() => setRow(a.id, { phase: 'idle' })}
+              />
+            ))}
+            {evolutionRequests.map(r => (
+              <EvolutionRequestRow
+                key={r.id}
+                projectId={projectId}
+                request={r}
+                onRefresh={() => fetchReport()}
+                onDecided={() => { void refreshWaitingCount(projectId, { fresh: true }) }}
+              />
+            ))}
+            {ladder && (
+              <MaintenanceLadderRow projectId={projectId} ladder={ladder} reload={maintenance.reload} canDecide={canDecideAgent} />
+            )}
+            {runningAgents.map(a => (
+              <AgentOutcomeRow key={a.id} request={a} running />
+            ))}
+            {stuckAgents.map(a => (
+              <AgentOutcomeRow key={a.id} request={a} />
+            ))}
+          </RowList>
+        )}
       </Panel>
     </QueueSection>
   )
@@ -665,18 +652,12 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 function QueueSection({
   count,
   groupCount,
-  refreshing,
-  onRefresh,
-  disabled,
   children,
 }: {
   count: number | null
   /** Rows actually rendered. Shown alongside `count` whenever the fold is
    *  doing work, so the grouping never reads as findings going missing. */
   groupCount?: number
-  refreshing: boolean
-  onRefresh: () => void
-  disabled?: boolean
   children: React.ReactNode
 }) {
   return (
@@ -685,20 +666,11 @@ function QueueSection({
       title="Waiting on you"
       count={count}
       aside={
-        <>
-          {typeof count === 'number' && typeof groupCount === 'number' && groupCount < count && (
-            <span className="text-[12.5px] tabular-nums text-faint">
-              in {groupCount} {groupCount === 1 ? 'issue' : 'issues'}
-            </span>
-          )}
-          <IconButton
-            icon={RefreshCw}
-            label="Refresh the queue"
-            onClick={onRefresh}
-            disabled={disabled || refreshing}
-            className={refreshing ? '[&_svg]:animate-spin' : ''}
-          />
-        </>
+        typeof count === 'number' && typeof groupCount === 'number' && groupCount > 0 && groupCount < count ? (
+          <span className="text-[12.5px] tabular-nums text-faint">
+            in {groupCount} {groupCount === 1 ? 'issue' : 'issues'}
+          </span>
+        ) : undefined
       }
     >
       {children}
@@ -706,9 +678,15 @@ function QueueSection({
   )
 }
 
+type BulkState =
+  | { phase: 'idle' }
+  | { phase: 'confirming' | 'running'; requests: Array<{ id: string; shownDigest?: string | null; title: string }>; done: number }
+  | { phase: 'finished'; requests: Array<{ id: string; title: string }>; ran: number }
+
 /**
  * The row offering to approve the agent's waiting requests together: first
- * the count, then the list it would approve, then progress through it.
+ * the count, then the list it would approve, then progress through it, then
+ * how many ran. Each request's own result stays on its own row.
  */
 function BulkApproveRow({
   count,
@@ -718,88 +696,67 @@ function BulkApproveRow({
   onConfirm,
 }: {
   count: number
-  state:
-    | { phase: 'idle' }
-    | { phase: 'confirming' | 'running'; requests: Array<{ id: string; title: string }>; done: number }
+  state: BulkState
   onAsk: () => void
   onCancel: () => void
   onConfirm: () => void
 }) {
   if (state.phase === 'idle') {
     return (
-      <li className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
-        <p className="text-[13px] text-zinc-300">{count} requests from your agent are waiting.</p>
-        <GhostAction onClick={onAsk}>
-          <CheckCircle2 className="size-3.5" /> Approve all {count}
-        </GhostAction>
-      </li>
+      <Row
+        lead="none"
+        title={<p className="text-[13px] leading-[21px] text-zinc-300">{count} requests from your agent are waiting.</p>}
+        actions={<KitButton variant="secondary" onClick={onAsk}>Approve all {count}</KitButton>}
+      />
     )
   }
   const n = state.requests.length
+  if (state.phase === 'finished') {
+    const missed = n - state.ran
+    return (
+      <Row lead="glyph" glyph={missed > 0 ? 'failed' : 'done'} glyphLabel={missed > 0 ? 'Some did not run' : 'All ran'} title={<p className={ROW_TITLE}>Ran {state.ran} of {n}</p>}>
+        <p className={ROW_TEXT}>
+          {missed > 0 ? `${missed} did not run; ${missed === 1 ? 'its card says' : 'their cards say'} why.` : 'Your agent sees each result on its next check.'}
+        </p>
+      </Row>
+    )
+  }
   return (
-    <li className="space-y-3 px-5 py-4">
-      <p className="text-[13px] font-medium text-zinc-100">
-        {state.phase === 'running'
-          ? `Running ${Math.min(state.done + 1, n)} of ${n}…`
-          : `Approve these ${n}? Each runs exactly as its card shows, one after another.`}
-      </p>
-      <ul className="space-y-1">
-        {state.requests.map((r, i) => (
-          <li key={r.id} className="flex gap-2 text-[12.5px] text-zinc-400">
-            <span className="tabular-nums text-zinc-500">{i + 1}.</span>
+    <Row
+      lead="none"
+      title={
+        <p className={ROW_TITLE}>
+          {state.phase === 'running'
+            ? `Running ${Math.min(state.done + 1, n)} of ${n}…`
+            : `Approve these ${n}? Each runs exactly as its card shows, one after another.`}
+        </p>
+      }
+    >
+      <ul className="mt-2 space-y-1">
+        {state.requests.map(r => (
+          <li key={r.id} className="text-[12.5px] leading-[18px] text-zinc-400">
             <TextWithCode text={r.title} codeClassName="text-zinc-300" />
           </li>
         ))}
       </ul>
       {state.phase === 'confirming' && (
-        <div className="flex flex-wrap gap-2">
-          <PrimaryAction onClick={onConfirm} busy={false} busyLabel="Running…">
-            <CheckCircle2 className="size-3.5" /> Approve and run {n}
-          </PrimaryAction>
-          <GhostAction onClick={onCancel}>Cancel</GhostAction>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <KitButton variant="primary" onClick={onConfirm}>Approve and run {n}</KitButton>
+          <KitButton variant="secondary" onClick={onCancel}>Cancel</KitButton>
         </div>
       )}
-    </li>
+    </Row>
   )
 }
 
-// ── Shared row action buttons (kit voice: violet primary, ghost secondary) ────
-
-function PrimaryAction({
-  onClick,
-  busy,
-  busyLabel,
-  disabled,
-  children,
-}: {
-  onClick: () => void
-  busy: boolean
-  busyLabel: string
-  disabled?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <KitButton variant="primary" onClick={onClick} disabled={busy || disabled}>
-      {busy ? <><Loader2 className="size-3.5 animate-spin" /> {busyLabel}</> : children}
-    </KitButton>
-  )
+/** "Ran", "Rejected", "Fixed": what a settled row says where its buttons were. */
+function SettledWord({ settled }: { settled: Settled }) {
+  return <StatusGlyph state={settled.glyph} label={settled.word} showLabel className="pt-[2px]" />
 }
 
-function GhostAction({
-  onClick,
-  disabled,
-  children,
-}: {
-  onClick: () => void
-  disabled?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <KitButton variant="secondary" onClick={onClick} disabled={disabled}>
-      {children}
-    </KitButton>
-  )
-}
+/** The sentence a person who may not decide reads where the buttons were. */
+const ADMINS_DECIDE = 'Only admins can approve. Ask an owner or admin.'
+const DEVELOPERS_DECIDE = 'Only developers and admins can approve fixes.'
 
 /**
  * A destructive op requested by the user's own coding agent over MCP.
@@ -810,6 +767,8 @@ function AgentRequestRow({
   projectId,
   request: a,
   state,
+  settled,
+  canDecide,
   onApprove,
   onReject,
   onResetError,
@@ -817,6 +776,8 @@ function AgentRequestRow({
   projectId: string
   request: AgentApproval
   state: RowState
+  settled?: Settled
+  canDecide: boolean
   onApprove: () => void
   onReject: () => void
   onResetError: () => void
@@ -824,24 +785,20 @@ function AgentRequestRow({
   const busy = state.phase === 'applying' || state.phase === 'dismissing'
   // Restoring a change reads as what it does, whoever asked for it: Backenly
   // raises one when a change fails its checks and recovering it would affect
-  // data written since. The details are on the change itself.
-  // A rollback is a restore too: of the backend to a published version, with
-  // Backenly's list of the changes it would undo as the card's text.
+  // data written since. A rollback is a restore too: of the backend to a
+  // published version, with Backenly's list of the changes it would undo.
   const restore = a.tool === 'revert_schema_change' || a.tool === 'rollback_deploy'
   const fromBackenly = a.requestedBy === 'backenly'
-  const destructive = DESTRUCTIVE_TOOL.test(a.tool)
   // The card is the ONLY thing the human reads before approving — a merge
-  // message carries the exact statements that reach production, and cutting
-  // it at 180 characters asked them to approve what they could not see. The
-  // statements are machine text, so they are set as code, in full up to
-  // MAX_STATEMENTS and behind "Show the full request" past that.
+  // message carries the exact statements that reach production. They are
+  // machine text, so they are set as code, in full up to MAX_STATEMENTS and
+  // behind "Show the full request" past that.
   const [showFull, setShowFull] = useState(false)
   const [showAgentWords, setShowAgentWords] = useState(false)
   const { prose, statements } = splitRequest(a.message, a.target)
   // What an agent wrote is its case for the call, not a description of it: the
   // title is Backenly's description, and the agent's words stay closed until
-  // asked for, marked as unchecked. A drop card used to lead with the agent's
-  // "the user has decided to remove the reviews feature and will approve".
+  // asked for, marked as unchecked.
   const agentWords = !restore && !fromBackenly && statements.length === 0 && prose && prose !== a.target ? prose : ''
   const backenlyProse = agentWords ? '' : prose
   const long = statements.length > 0 ? statements.length > MAX_STATEMENTS : backenlyProse.length > 180
@@ -852,38 +809,40 @@ function AgentRequestRow({
   const unreadable = a.readable === false
   return (
     <Row
-      icon={restore ? HistoryIcon : a.tool === 'merge_branch' ? GitMerge : destructive ? Trash2 : Database}
-      tone={restore ? 'attention' : destructive ? 'danger' : 'neutral'}
+      lead="well"
+      icon={approvalIcon(a.tool)}
+      tone={settled ? 'done' : 'neutral'}
       busy={state.phase === 'applying'}
+      id={`approval-${a.id}`}
       title={
         <p className={ROW_TITLE}>
-          {restore ? (
-            <TextWithCode text={a.target} codeClassName="text-zinc-100" />
-          ) : (
-            <TextWithCode text={approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
-          )}
+          <TextWithCode text={restore ? a.target : approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
         </p>
       }
       actions={
-        state.phase === 'verified' ? (
-          <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-emerald-300">
-            <CheckCircle2 className="h-4 w-4" strokeWidth={1.75} /> Done
-          </span>
-        ) : (
+        settled ? (
+          <SettledWord settled={settled} />
+        ) : state.phase === 'error' ? (
+          <KitButton variant="secondary" onClick={onResetError}>Try again</KitButton>
+        ) : canDecide ? (
           <>
-            <GhostAction onClick={onReject} disabled={busy}>
-              {state.phase === 'dismissing' ? <Loader2 className="size-3.5 animate-spin" /> : <XCircle className="size-3.5" />}
+            <KitButton variant="secondary" onClick={onReject} disabled={busy} loading={state.phase === 'dismissing'}>
               Reject
-            </GhostAction>
-            <PrimaryAction onClick={onApprove} busy={state.phase === 'applying'} busyLabel={restore ? 'Restoring…' : 'Running…'} disabled={unreadable}>
-              <CheckCircle2 className="size-3.5" /> {restore ? 'Approve restore' : <>Approve &amp; run</>}
-            </PrimaryAction>
+            </KitButton>
+            <KitButton variant="primary" onClick={onApprove} disabled={busy || unreadable} loading={state.phase === 'applying'}>
+              {state.phase === 'applying' ? (restore ? 'Restoring…' : 'Running…') : restore ? 'Approve restore' : <>Approve &amp; run</>}
+            </KitButton>
           </>
-        )
+        ) : undefined
       }
     >
-      {shownProse && <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>}
-      {agentWords && (
+      {settled?.text && (
+        <p role="status" className={`${ROW_TEXT} !text-zinc-300`}>
+          <TextWithCode text={settled.text} codeClassName="text-zinc-200" />
+        </p>
+      )}
+      {!settled && shownProse && <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>}
+      {!settled && agentWords && (
         <>
           <Disclosure open={showAgentWords} onToggle={() => setShowAgentWords(v => !v)}>
             {showAgentWords ? 'Hide what the agent wrote' : 'What the agent wrote'}
@@ -891,28 +850,26 @@ function AgentRequestRow({
           {showAgentWords && (
             // Quoted, and said to be unchecked, so it never reads as Backenly's.
             <p className={`${ROW_TEXT} whitespace-pre-wrap border-l-2 border-white/[0.10] pl-3`}>
-              “{agentWords}” <span className="text-zinc-500">Backenly has not checked this.</span>
+              “{agentWords}” <span className="text-faint">Backenly has not checked this.</span>
             </p>
           )}
         </>
       )}
-      {shownStatements.length > 0 && <CodeBlock>{shownStatements.join('\n')}</CodeBlock>}
-      {long && (
+      {!settled && shownStatements.length > 0 && <CodeBlock>{shownStatements.join('\n')}</CodeBlock>}
+      {!settled && long && (
         <Disclosure open={showFull} onToggle={() => setShowFull(v => !v)}>
           {showFull ? 'Show less' : 'Show the full request'}
         </Disclosure>
       )}
       <Facts>
-        <Fact icon={fromBackenly ? Sparkles : Bot}>{fromBackenly ? 'From Backenly' : 'From your agent'}</Fact>
+        <Fact>{fromBackenly ? 'From Backenly' : 'From your agent'}</Fact>
         {a.rowCount !== null && a.rowCount > 0 && (
-          <Fact icon={Rows} strong>
-            <span className="tabular-nums">{rows(a.rowCount)} affected</span>
+          <Fact strong>
+            <span className="tabular-nums">{rows(a.rowCount)}</span>
           </Fact>
         )}
-        <Fact icon={restore || a.reversible ? ShieldCheck : Lock}>
-          {restore ? 'Current state protected first' : a.reversible ? 'Restore point available' : 'Not auto-reversible'}
-        </Fact>
-        <Fact><span className="tabular-nums">{timeAgo(a.createdAt)}</span></Fact>
+        <Fact>{restore ? 'Current state protected first' : a.reversible ? 'Restore point available' : 'Not auto-reversible'}</Fact>
+        <Fact><Time iso={a.createdAt} /></Fact>
         {restore && a.changeId && (
           <a
             href={`/app/projects/${projectId}/changes?change=${encodeURIComponent(a.changeId)}`}
@@ -930,23 +887,20 @@ function AgentRequestRow({
           </a>
         )}
       </Facts>
-      {unreadable && (
-        <RowNote tone="attention" icon={AlertTriangle}>
+      {!settled && a.tool === 'rollback_deploy' && (
+        <p className="mt-2 text-[12.5px] leading-[18px] text-faint">Stops at the first change that can’t be restored.</p>
+      )}
+      {!settled && unreadable && (
+        <p className="mt-2.5 text-[12.5px] leading-[18px] text-zinc-50">
           The exact call is kept in the project’s region and could not be read just now. Refresh to try again.
-        </RowNote>
+        </p>
       )}
-      {state.phase === 'error' && (
-        <RowNote tone="danger" icon={XCircle} role="alert">
-          {state.message}{' '}
-          <button onClick={onResetError} className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200">retry</button>
-        </RowNote>
-      )}
+      {!settled && !canDecide && <p className="mt-2.5 text-[12.5px] leading-[18px] text-faint">{ADMINS_DECIDE}</p>}
+      {state.phase === 'error' && <RefusedLine className="mt-2.5">{state.message}</RefusedLine>}
     </Row>
   )
 }
 
-/** A request whose approval removes data. */
-const DESTRUCTIVE_TOOL = /^(drop|delete|truncate|remove|purge)_/
 /** Statements shown before "Show the full request". */
 const MAX_STATEMENTS = 6
 
@@ -977,32 +931,32 @@ function splitRequest(message: string, target: string): { prose: string; stateme
 function AgentOutcomeRow({ request: a, running }: { request: AgentApproval; running?: boolean }) {
   return (
     <Row
-      icon={running ? Loader2 : AlertTriangle}
-      tone={running ? 'neutral' : 'attention'}
+      lead="well"
+      icon={approvalIcon(a.tool)}
+      busy={running}
+      id={`approval-${a.id}`}
       title={
         <p className={ROW_TITLE}>
           {running ? 'Approved, running now: ' : 'Approved, but the outcome is unknown: '}
           <TextWithCode text={approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
         </p>
       }
-      actions={running ? <Loader2 className="h-4 w-4 animate-spin text-zinc-500" strokeWidth={1.75} /> : undefined}
     >
-      {!running && a.resultSummary && <p className={`${ROW_TEXT} text-amber-200/90`}>{a.resultSummary}</p>}
+      {!running && a.resultSummary && <p className={`${ROW_TEXT} !text-zinc-50`}>{resultWords(a.resultSummary)}</p>}
       <Facts>
-        <Fact icon={Bot}>From your agent</Fact>
-        <Fact><span className="tabular-nums">{timeAgo(a.createdAt)}</span></Fact>
+        <Fact>From your agent</Fact>
+        <Fact><Time iso={a.createdAt} /></Fact>
       </Facts>
     </Row>
   )
 }
 
 /**
- * The prompt handed to the user's coding agent. Inherited from the Overview
- * advisor block when Autonomy became the single queue — some fixes genuinely
- * belong in the user's frontend code, and losing that door would have made the
- * consolidation a net loss of capability rather than a removal of duplication.
+ * The request handed to the user's coding agent. Some fixes genuinely belong
+ * in the user's frontend code, and losing that door would have made the
+ * single queue a net loss of capability.
  */
-function agentPrompt(g: FindingGroup<PendingApproval>): string {
+export function agentPrompt<T extends GroupableFinding>(g: FindingGroup<T>): string {
   const head = g.members[0]
   return [
     `My Backenly backend flagged a ${g.severity} ${CATEGORY_LABEL[g.category]} issue I want addressed in my app:`,
@@ -1016,9 +970,35 @@ function agentPrompt(g: FindingGroup<PendingApproval>): string {
   ].filter(Boolean).join('\n')
 }
 
+/** "Copy for agent", with the copy confirmed in place. */
+export function CopyForAgent({ prompt, label = 'Copy for agent' }: { prompt: string; label?: string }) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => () => clearTimeout(timer.current), [])
+  return (
+    <KitButton
+      variant="secondary"
+      onClick={() => {
+        navigator.clipboard?.writeText(prompt).then(
+          () => {
+            setCopied(true)
+            clearTimeout(timer.current)
+            timer.current = setTimeout(() => setCopied(false), 1800)
+          },
+          () => {},
+        )
+      }}
+    >
+      <span aria-live="polite">{copied ? 'Copied' : label}</span>
+    </KitButton>
+  )
+}
+
 function ApprovalRow({
   group: g,
   state,
+  settled,
+  canDecide,
   onApprove,
   onApproveProposal,
   onDismiss,
@@ -1026,13 +1006,14 @@ function ApprovalRow({
 }: {
   group: FindingGroup<PendingApproval>
   state: RowState
+  settled?: Settled
+  canDecide: boolean
   onApprove: () => void
   onApproveProposal: (proposal: NonNullable<PendingApproval['proposal']>) => void
   onDismiss: () => void
   onResetError: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const [copied, setCopied] = useState(false)
   const head = g.members[0]
   const critical = g.severity === 'critical'
   const many = g.members.length > 1
@@ -1041,27 +1022,8 @@ function ApprovalRow({
   // A row whose approval removes a rule says so on its buttons.
   const labels = !many ? decisionLabels(head.type) : null
   const title = <p className={ROW_TITLE}><TextWithCode text={g.title} codeClassName="text-zinc-100" /></p>
-
-  if (state.phase === 'verified') {
-    return (
-      <Row icon={CheckCircle2} tone="done" title={title} className="animate-fade-in">
-        {/* Only what is true of every fix: not every fix is verified, nor keeps a restore point. */}
-        <Facts>
-          <Fact>Fixed{many ? ` on ${g.members.length} tables` : ''}</Fact>
-        </Facts>
-      </Row>
-    )
-  }
-
   const busy = state.phase === 'applying' || state.phase === 'dismissing'
-
-  const handToAgent = async () => {
-    try {
-      await navigator.clipboard.writeText(agentPrompt(g))
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1800)
-    } catch { /* clipboard blocked — no-op */ }
-  }
+  const fixable = !!proposal || g.actionable
 
   // "Waiting for your review" under a heading that already says so says
   // nothing; every other reason (a guardrail, an escalation) is the point.
@@ -1070,54 +1032,59 @@ function ApprovalRow({
 
   return (
     <Row
-      icon={CATEGORY_ICON[g.category] ?? Activity}
-      tone={critical ? 'danger' : 'attention'}
+      lead="well"
+      icon={findingIcon(g.category)}
+      tone={settled ? 'done' : 'neutral'}
       busy={state.phase === 'applying'}
-      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      id={`finding-${g.key}`}
       title={title}
       actions={
-        state.phase === 'error' ? (
-          <PrimaryAction onClick={onResetError} busy={false} busyLabel="">
-            Try again
-          </PrimaryAction>
-        ) : (
+        settled ? (
+          <SettledWord settled={settled} />
+        ) : state.phase === 'error' ? (
+          <KitButton variant="secondary" onClick={onResetError}>Try again</KitButton>
+        ) : canDecide ? (
           <>
-            <GhostAction onClick={onDismiss} disabled={busy}>
-              {state.phase === 'dismissing' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            {!fixable && <CopyForAgent prompt={agentPrompt(g)} />}
+            <KitButton variant="secondary" onClick={onDismiss} disabled={busy} loading={state.phase === 'dismissing'}>
               {labels?.dismiss ?? 'Dismiss'}
-            </GhostAction>
-            {/* The fix button exists only when a fix does. `fixableCount` is
-                computed from the executor's own action mapping, so this can
-                never promise a repair the engine does not have. */}
+            </KitButton>
+            {/* The fix button exists only when a fix does: `fixableCount` is
+                computed from the executor's own action mapping. */}
             {proposal && (
-              <PrimaryAction onClick={() => onApproveProposal(proposal)} busy={state.phase === 'applying'} busyLabel="Applying…">
-                Approve & fix
-              </PrimaryAction>
+              <KitButton variant="primary" onClick={() => onApproveProposal(proposal)} disabled={busy} loading={state.phase === 'applying'}>
+                {state.phase === 'applying' ? 'Applying…' : 'Approve & fix'}
+              </KitButton>
             )}
             {!proposal && g.actionable && (
-              <PrimaryAction
-                onClick={onApprove}
-                busy={state.phase === 'applying'}
-                busyLabel={g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : labels?.busy ?? 'Applying…'}
-              >
-                {g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : labels?.approve ?? 'Approve & fix'}
-              </PrimaryAction>
+              <KitButton variant="primary" onClick={onApprove} disabled={busy} loading={state.phase === 'applying'}>
+                {state.phase === 'applying'
+                  ? (g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : labels?.busy ?? 'Applying…')
+                  : (g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : labels?.approve ?? 'Approve & fix')}
+              </KitButton>
             )}
-            <OverflowMenu
-              label={`More actions for: ${g.title}`}
-              disabled={busy}
-              width="w-[230px]"
-              items={[{ label: 'Hand to my agent', icon: ClipboardCopy, onClick: () => { void handToAgent() } }]}
-            />
+            {fixable && (
+              <OverflowMenu
+                label={`More actions for: ${g.title}`}
+                disabled={busy}
+                width="w-[230px]"
+                items={[{ label: 'Copy for agent', icon: ClipboardCopy, onClick: () => { void navigator.clipboard?.writeText(agentPrompt(g)) } }]}
+              />
+            )}
           </>
-        )
+        ) : undefined
       }
     >
-      {heldKindLabel(head) && (
-        <p className="mt-1 text-[12.5px] font-medium leading-[18px] text-amber-200">{heldKindLabel(head)}</p>
+      {settled?.text && (
+        <p role="status" className={`${ROW_TEXT} !text-zinc-300`}>
+          <TextWithCode text={settled.text} codeClassName="text-zinc-200" />
+        </p>
       )}
-      {reason !== WAITING_FOR_REVIEW && <p className={ROW_TEXT}>{reason}</p>}
-      {diag && (
+      {!settled && heldKindLabel(head) && (
+        <p className="mt-1 text-[12.5px] font-medium leading-[18px] text-zinc-50">{heldKindLabel(head)}</p>
+      )}
+      {!settled && reason !== WAITING_FOR_REVIEW && <p className={ROW_TEXT}>{reason}</p>}
+      {!settled && diag && (
         <div className="mt-2.5 border-l-2 border-white/[0.08] pl-3">
           <p className="text-[12px] font-medium leading-[16px] text-faint">
             {diag.provenance === 'investigation'
@@ -1132,18 +1099,31 @@ function ApprovalRow({
           )}
         </div>
       )}
+      {/* An AI-proposed repair: what it does, in one line; the rest is the facts. */}
+      {!settled && proposal && state.phase !== 'error' && (
+        <p className={ROW_TEXT}>
+          <span className="text-zinc-300">Proposed repair:</span> {proposal.summary}
+        </p>
+      )}
       <Facts>
-        <StatusDot tone={critical ? 'failed' : 'attention'} label={severityWord(g.severity)} />
+        {critical && <Fact strong><span className="font-medium text-zinc-50">Critical</span></Fact>}
         <Fact>{CATEGORY_LABEL[g.category]}</Fact>
         {!many && head.resource && <Fact><MetaCode>{head.resource}</MetaCode></Fact>}
         {head.source && head.source !== 'autonomy' && (
-          <Fact icon={head.source === 'brain-risk' ? Bot : Wrench}>
-            {head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}
-          </Fact>
+          <Fact>{head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}</Fact>
         )}
-        <Fact><span className="tabular-nums">{timeAgo(head.detectedAt)}</span></Fact>
-        {copied && <Fact icon={Check} strong>Copied for your agent</Fact>}
+        {proposal && <Fact>AI-proposed, recorded as fixed only if a re-check confirms it</Fact>}
+        {!fixable && <Fact>No automatic fix</Fact>}
+        <Fact><Time iso={head.detectedAt} /></Fact>
       </Facts>
+
+      {/* No auto-repair exists for this row. Say so HERE, before the user
+          spends a click discovering it, and say what to do instead. The
+          hint is the same sentence the approve route would have returned,
+          read from the one fix mapping (lib/core/fix-actions.ts). */}
+      {!settled && !fixable && state.phase !== 'error' && g.manualHint && (
+        <p className={ROW_TEXT}>{g.manualHint}</p>
+      )}
 
       {/* The fold is never a hiding place: every member is one click away,
           and the count is stated before you click. */}
@@ -1164,27 +1144,8 @@ function ApprovalRow({
         </>
       )}
 
-      {proposal && state.phase !== 'error' && (
-        <div className="mt-2.5 rounded-[7px] border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5">
-          <p className="text-[12px] font-medium leading-[16px] text-zinc-300">AI-proposed repair, needs your approval</p>
-          <p className="mt-1 text-[13px] leading-[19px] text-zinc-200">{proposal.summary}</p>
-          <p className="mt-1 text-[12.5px] leading-[18px] text-faint">
-            Recorded as fixed only if it is in the catalog, the issue is gone on re-check and nothing else broke. Undo restores the state before it.
-          </p>
-        </div>
-      )}
-
-      {/* No auto-repair exists for this row. Say so HERE, before the user
-          spends a click discovering it — and say what to do instead. The
-          hint is the same sentence the approve route would have returned,
-          read from the one fix mapping (lib/core/fix-actions.ts). */}
-      {!g.actionable && !proposal && state.phase !== 'error' && g.manualHint && (
-        <p className="mt-2.5 border-l-2 border-white/[0.08] pl-3 text-[13px] leading-[19px] text-zinc-400">{g.manualHint}</p>
-      )}
-
-      {state.phase === 'error' && (
-        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
-      )}
+      {!settled && !canDecide && <p className="mt-2.5 text-[12.5px] leading-[18px] text-faint">{DEVELOPERS_DECIDE}</p>}
+      {state.phase === 'error' && <RefusedLine className="mt-2.5">{state.message}</RefusedLine>}
     </Row>
   )
 }

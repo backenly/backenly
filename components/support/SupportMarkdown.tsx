@@ -99,7 +99,7 @@ export function SupportMarkdown({ children }: { children: string }) {
               <a
                 href={href}
                 {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
-                className="rounded-[3px] text-violet-300 underline decoration-violet-300/40 underline-offset-[3px] transition-colors duration-150 hover:text-violet-200 hover:decoration-violet-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60"
+                className="rounded-[3px] text-zinc-50 underline decoration-white/30 underline-offset-[3px] transition-colors duration-150 hover:decoration-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
               >
                 {children}
               </a>
@@ -107,7 +107,7 @@ export function SupportMarkdown({ children }: { children: string }) {
           },
           img: ({ src, alt }) =>
             typeof src === 'string' ? (
-              <a href={src} target="_blank" rel="noopener noreferrer" className="text-violet-300 underline underline-offset-[3px]">
+              <a href={src} target="_blank" rel="noopener noreferrer" className="text-zinc-50 underline decoration-white/30 underline-offset-[3px]">
                 {alt || src}
               </a>
             ) : null,

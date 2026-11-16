@@ -3,8 +3,8 @@ export const dynamic = 'force-dynamic'
 /**
  * GET /api/projects/[id]/connection-health
  * ─────────────────────────────────────────
- * Powers the frontend Activity card on Connect → Direct and the
- * FrontendConnectionPill (sidebar + Deploy page).
+ * Powers Connect → API's browser requests and Overview's "Needs a look"
+ * line (lib/hooks/useConnectionHealth.ts, components/connect/FrontendRuntimePanel.tsx).
  *
  * Aggregates the last 24h of `auth_failure` and `bootstrap` SecurityEvents,
  * and of the requests frontends made (api_request_logs by origin), for this

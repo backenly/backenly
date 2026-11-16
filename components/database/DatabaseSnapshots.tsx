@@ -3,29 +3,28 @@
 /**
  * PROJECT DATABASE SNAPSHOTS
  *
- * One project's schema and rows, and deliberately not more. The panel says what
- * a snapshot excludes before it offers to take one, because the failure this
- * product family is most prone to is an operator seeing something called
- * "Backup", concluding their server is safe, and finding out otherwise on the
- * only day it matters.
+ * One project's schema and rows, and deliberately not more. The panel says
+ * what a snapshot leaves out before it offers to take one, because the failure
+ * this product family is most prone to is someone seeing "Backup", concluding
+ * the server is safe, and learning otherwise on the only day it matters.
+ * So it is never labelled "Backup" alone. Self-hosted, it names its sibling:
+ * deployment recovery lives in account Settings, under Recovery, and covers
+ * the machine. Backenly Cloud has no Recovery page, so there it does not.
  *
- * That is why this is never labelled "Backup" on its own. On a self-hosted
- * deployment it names its sibling: deployment recovery lives in account
- * Settings and covers the machine. A snapshot covers a project. Backenly Cloud
- * has no Recovery page, so there the panel does not point at one.
- *
- * ── Restore states what it replaces, in the dialog ──────────────────────────
- *
- * Restoring replaces every table in the project, and the confirmation says so
- * along with the snapshot's own timestamp - a dialog that asked "are you sure?"
- * over an unnamed snapshot would be a worse guard than none, because it looks
- * like one.
+ * Restoring replaces every table, and the confirm says so with the snapshot's
+ * own time: a dialog asking "are you sure?" about an unnamed snapshot would be
+ * a worse guard than none, because it looks like one.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Camera, CheckCircle2, Clock, Info, RotateCcw } from 'lucide-react'
-import { EmptyState, KitButton, KitConfirmDialog, KitNote, Skeleton, StatusDot } from '@/components/inspector/kit'
-import { EDGE, RULE, R_PANEL } from '@/components/console/tokens'
+import Link from 'next/link'
+import { Camera, RotateCcw } from 'lucide-react'
+import { KitButton, KitConfirmDialog } from '@/components/inspector/kit'
+import { EmptyLine, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { Time } from '@/components/console/Time'
+import { formatTime } from '@/components/console/format'
+import { FOCUS } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { regionLabel } from '@/lib/regions'
 
@@ -38,11 +37,7 @@ interface Snapshot {
   createdAt: string
 }
 
-/**
- * A snapshot or restore of a project kept in another region, which runs in
- * that region (lib/services/workspace-backup.ts requestBackup): the console
- * waits on it here.
- */
+/** A snapshot or restore of a project kept in another region, which runs there; the panel waits on it. */
 interface RegionalJob {
   id: string
   type: 'workspace_backup' | 'workspace_restore'
@@ -57,96 +52,80 @@ const POLL_MS = 5_000
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
 }
 
-function formatWhen(iso: string): string {
-  return new Date(iso).toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-}
-
-export function DatabaseSnapshots({ projectId }: { projectId: string }) {
+export function DatabaseSnapshots({ projectId, canWrite = false, canAdminister = false }: { projectId: string; canWrite?: boolean; canAdminister?: boolean }) {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
-  const [loading, setLoading] = useState(true)
+  const [jobs, setJobs] = useState<RegionalJob[]>([])
+  const [state, setState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [taking, setTaking] = useState(false)
   const [restoring, setRestoring] = useState<string | null>(null)
-  const [message, setMessage] = useState<{ tone: 'danger' | 'success'; text: string } | null>(null)
+  const [notice, setNotice] = useState<{ tone: 'done' | 'refused'; text: string } | null>(null)
   const [confirmRestore, setConfirmRestore] = useState<Snapshot | null>(null)
-  const [jobs, setJobs] = useState<RegionalJob[]>([])
-  // The jobs this panel queued, so their outcome is announced once they finish.
+  // The jobs this panel queued, so their outcome is said once they finish.
   const watching = useRef(new Set<string>())
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`/api/projects/${projectId}/backup`)
-      const data = await res.json()
-      if (res.ok) {
-        setSnapshots(data.data ?? [])
-        const current: RegionalJob[] = data.jobs ?? []
-        setJobs(current)
-        for (const job of current) {
-          if (!watching.current.has(job.id) || OPEN.has(job.status)) continue
-          watching.current.delete(job.id)
-          const where = job.region ? ` in ${regionLabel(job.region)}` : ''
-          setMessage(
-            job.status === 'completed'
-              ? { tone: 'success', text: job.type === 'workspace_restore' ? `Restored${where}. Reload to see the current tables.` : `Snapshot taken${where}.` }
-              : { tone: 'danger', text: job.error ?? (job.type === 'workspace_restore' ? 'The restore did not complete.' : 'The snapshot was not taken.') },
-          )
-        }
+      const res = await fetch(`/api/projects/${projectId}/backup`, { credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error)
+      setSnapshots(data.data ?? [])
+      const current: RegionalJob[] = data.jobs ?? []
+      setJobs(current)
+      setState('ready')
+      for (const job of current) {
+        if (!watching.current.has(job.id) || OPEN.has(job.status)) continue
+        watching.current.delete(job.id)
+        const where = job.region ? ` in ${regionLabel(job.region)}` : ''
+        setNotice(
+          job.status === 'completed'
+            ? { tone: 'done', text: job.type === 'workspace_restore' ? `Restored${where}. Reload to see the current tables.` : `Snapshot taken${where}.` }
+            : { tone: 'refused', text: job.error ?? (job.type === 'workspace_restore' ? 'The restore did not finish.' : 'The snapshot was not taken.') },
+        )
       }
     } catch {
-      // A list that cannot load is not worth an error banner over the action
-      // that still works. The empty state below reads honestly either way.
-    } finally {
-      setLoading(false)
+      // A list that could not be read says so; it is never "No snapshots yet".
+      setState((s) => (s === 'ready' ? s : 'failed'))
     }
   }, [projectId])
 
   useEffect(() => {
-    load()
+    void load()
   }, [load])
 
-  // A queued snapshot or restore runs in the project's region: check on it
-  // until nothing is waiting there.
+  // A queued snapshot or restore runs in the project's region: check on it until it finishes.
   const waiting = jobs.filter((job) => OPEN.has(job.status))
   useEffect(() => {
     if (waiting.length === 0) return
-    const timer = setInterval(load, POLL_MS)
+    const timer = setInterval(() => void load(), POLL_MS)
     return () => clearInterval(timer)
   }, [waiting.length, load])
 
-  /** A 202: the work was queued in the project's region. */
   function queued(data: { jobId?: string; region?: string }, what: 'snapshot' | 'restore') {
     if (data.jobId) watching.current.add(data.jobId)
     const where = data.region ? regionLabel(data.region) : 'the project’s region'
-    setMessage({
-      tone: 'success',
-      text: what === 'snapshot'
-        ? `Snapshot queued in ${where}, where this project's data is kept. It appears here when it finishes.`
-        : `Restore queued in ${where}, where this project's data is kept. It runs there within a few minutes.`,
+    setNotice({
+      tone: 'done',
+      text: what === 'snapshot' ? `Snapshot queued in ${where}, where this project’s data is kept.` : `Restore queued in ${where}. It runs there within a few minutes.`,
     })
   }
 
   async function takeSnapshot() {
     setTaking(true)
-    setMessage(null)
+    setNotice(null)
     try {
-      const res = await fetch(`/api/projects/${projectId}/backup`, { method: 'POST' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'The snapshot failed.')
+      const res = await fetch(`/api/projects/${projectId}/backup`, { method: 'POST', credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? 'The snapshot was not taken.')
       if (res.status === 202 && data.queued) queued(data, 'snapshot')
-      else setMessage({ tone: 'success', text: 'Snapshot taken.' })
+      else setNotice({ tone: 'done', text: 'Snapshot taken.' })
       await load()
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The snapshot failed.' })
+      setNotice({ tone: 'refused', text: err instanceof Error ? err.message : 'The snapshot was not taken.' })
     } finally {
       setTaking(false)
     }
@@ -154,140 +133,146 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
 
   async function restore(snapshot: Snapshot) {
     setRestoring(snapshot.id)
-    setMessage(null)
+    setNotice(null)
     try {
       const res = await fetch(`/api/projects/${projectId}/backup`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ backupId: snapshot.id }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'The restore failed.')
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? 'The restore did not finish.')
       if (res.status === 202 && data.queued) queued(data, 'restore')
-      else setMessage({ tone: 'success', text: 'Restored. Reload to see the current tables.' })
+      else setNotice({ tone: 'done', text: 'Restored. Reload to see the current tables.' })
       await load()
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The restore failed.' })
+      setNotice({ tone: 'refused', text: err instanceof Error ? err.message : 'The restore did not finish.' })
     } finally {
       setRestoring(null)
       setConfirmRestore(null)
     }
   }
 
+  const link = `rounded-[3px] text-zinc-200 underline decoration-white/25 underline-offset-[3px] transition-colors duration-150 hover:text-white hover:decoration-white/60 ${FOCUS}`
+  const restoreWaiting = waiting.some((job) => job.type === 'workspace_restore')
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-      <div className={`flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b ${RULE} pl-4 pr-2 sm:pl-5`}>
-        <div className="flex min-w-0 items-baseline gap-2">
-          <h2 className="text-[13px] font-medium text-zinc-100">Snapshots</h2>
-          {!loading && snapshots.length > 0 && (
-            <span className="text-[12px] tabular-nums text-faint">{snapshots.length}</span>
-          )}
-        </div>
-        <KitButton size="sm" icon={Camera} onClick={takeSnapshot} loading={taking}>
-          {taking ? 'Taking snapshot…' : 'Take snapshot'}
-        </KitButton>
-      </div>
-
-      <div className="w-full max-w-[860px] flex-1 space-y-5 px-4 py-5 sm:px-5">
-        <KitNote icon={Info} title="What a snapshot holds">
-          This project&rsquo;s tables, rows, indexes, constraints and row-level security policies, end users
-          included. Not its stored files, Backenly account data, API keys, project configuration or function
-          source. Use it to roll a project back or move it, not as a whole-server backup.
-          {!CLOUD_CONTROL_PLANE && (
-            <> Recovering the whole deployment is in account Settings, under Recovery.</>
-          )}
-        </KitNote>
-
-        {message && (
-          <KitNote tone={message.tone} icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle}>
-            {message.text}
-          </KitNote>
-        )}
-
-        {waiting.length > 0 && (
-          <KitNote icon={Clock} title={waiting.some((job) => job.type === 'workspace_restore') ? 'Restore waiting' : 'Snapshot waiting'}>
-            {waiting.length === 1 ? 'One request is' : `${waiting.length} requests are`} waiting
-            {waiting[0].region ? ` in ${regionLabel(waiting[0].region)}` : ''}, where this project&rsquo;s data is kept.
-            This panel updates when {waiting.length === 1 ? 'it finishes' : 'they finish'}.
-          </KitNote>
-        )}
-
-        {loading ? (
-          <div className={`overflow-hidden border ${EDGE} ${R_PANEL}`} aria-hidden>
-            {[0, 1, 2].map((i) => (
-              <div key={i} className={`flex items-center gap-4 px-4 py-3.5 ${i > 0 ? `border-t ${RULE}` : ''}`}>
-                <Skeleton className="h-[12px] w-40" />
-                <Skeleton className="ml-auto h-[12px] w-16" />
-              </div>
-            ))}
-          </div>
-        ) : snapshots.length === 0 ? (
-          <div className={`border ${EDGE} ${R_PANEL}`}>
-            <EmptyState
-              icon={Camera}
-              title="No snapshots yet"
-              description="A snapshot reads the project's schema and rows as they are now. Take one before a risky change."
-              action={
-                <KitButton size="sm" icon={Camera} onClick={takeSnapshot} loading={taking}>
-                  Take snapshot
-                </KitButton>
-              }
-            />
-          </div>
-        ) : (
-          <ul className={`overflow-hidden border ${EDGE} ${R_PANEL}`}>
-            {snapshots.map((snapshot, i) => {
-              const ok = snapshot.status === 'completed'
-              return (
-                <li
-                  key={snapshot.id}
-                  className={`flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 ${i > 0 ? `border-t ${RULE}` : ''}`}
-                >
-                  <StatusDot tone={ok ? 'operational' : 'failed'} label={ok ? 'Completed' : 'Failed'} className="w-[92px]" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[13px] tabular-nums text-zinc-200">{formatWhen(snapshot.createdAt)}</p>
-                    {snapshot.error && <p className="mt-0.5 text-[12px] text-rose-300/90">{snapshot.error}</p>}
-                  </div>
-                  <span className="text-[12.5px] tabular-nums text-faint">{formatBytes(snapshot.sizeBytes)}</span>
-                  {ok && (
-                    <KitButton
-                      size="sm"
-                      variant="ghost"
-                      icon={RotateCcw}
-                      onClick={() => setConfirmRestore(snapshot)}
-                      // Not a second restore behind one still waiting in the project's region.
-                      disabled={restoring !== null || waiting.some((job) => job.type === 'workspace_restore')}
-                      loading={restoring === snapshot.id}
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="w-full max-w-[880px] px-[16px] py-[24px] sm:px-[24px]">
+        <Section
+          id="snapshots"
+          title="Snapshots"
+          count={snapshots.length}
+          aside={
+            canWrite && state !== 'failed' ? (
+              <KitButton size="sm" icon={Camera} onClick={() => void takeSnapshot()} loading={taking}>
+                Take snapshot
+              </KitButton>
+            ) : undefined
+          }
+          description={
+            <>
+              Tables, rows, indexes, constraints and RLS policies, end users included. Not files, keys, settings or function code. To undo one change, use{' '}
+              <Link href={`/app/projects/${projectId}/changes`} className={link}>
+                History
+              </Link>
+              .{' '}
+              {CLOUD_CONTROL_PLANE ? null : <>Recovering the whole deployment is in account Settings, under Recovery. </>}
+              To download a copy, use{' '}
+              <Link href={`/app/projects/${projectId}/connect?tab=postgres`} className={link}>
+                Postgres on the Connect page
+              </Link>
+              .
+            </>
+          }
+        >
+          {notice && (notice.tone === 'refused' ? <RefusedLine className="mb-[10px]">{notice.text}</RefusedLine> : <p role="status" className="mb-[10px] text-[12.5px] leading-[18px] text-zinc-300">{notice.text}</p>)}
+          <Panel>
+            {state === 'failed' ? (
+              <ErrorRow things="snapshots" stillWorks={canWrite ? 'Taking one still works.' : undefined} onRetry={() => void load()} />
+            ) : state === 'loading' ? (
+              <RowSkeleton rows={3} />
+            ) : snapshots.length === 0 && waiting.length === 0 ? (
+              <EmptyLine>No snapshots yet. Take one before a risky change.</EmptyLine>
+            ) : (
+              <RowList>
+                {waiting.map((job) => (
+                  <Row
+                    key={job.id}
+                    lead="glyph"
+                    glyph="busy"
+                    glyphLabel="Running"
+                    busy
+                    title={
+                      <span className={ROW_TITLE}>
+                        {job.type === 'workspace_restore' ? 'Restore running' : 'Snapshot running'}
+                        {job.region ? ` in ${regionLabel(job.region)}` : ''}
+                      </span>
+                    }
+                  >
+                    <Facts className="!mt-[4px]">
+                      <Fact>
+                        Asked <Time iso={job.createdAt} />
+                      </Fact>
+                    </Facts>
+                  </Row>
+                ))}
+                {snapshots.map((s) => {
+                  const ok = s.status === 'completed'
+                  return (
+                    <Row
+                      key={s.id}
+                      lead="glyph"
+                      glyph={ok ? 'done' : 'failed'}
+                      glyphLabel={ok ? 'Completed' : 'Failed'}
+                      title={
+                        <span className={ROW_TITLE}>
+                          <Time iso={s.createdAt} mode="dateTime" />
+                        </span>
+                      }
+                      actions={
+                        ok && canAdminister ? (
+                          <KitButton
+                            size="sm"
+                            variant="ghost"
+                            icon={RotateCcw}
+                            onClick={() => setConfirmRestore(s)}
+                            disabled={restoring !== null || restoreWaiting}
+                            loading={restoring === s.id}
+                          >
+                            Restore
+                          </KitButton>
+                        ) : undefined
+                      }
                     >
-                      Restore
-                    </KitButton>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        )}
+                      <Facts className="!mt-[4px]">
+                        {ok && <Fact>{formatBytes(s.sizeBytes)}</Fact>}
+                        {!ok && <Fact>Failed</Fact>}
+                      </Facts>
+                      {s.error && <RefusedLine className="mt-[6px]">{s.error}</RefusedLine>}
+                    </Row>
+                  )
+                })}
+              </RowList>
+            )}
+          </Panel>
+        </Section>
       </div>
 
       <KitConfirmDialog
         open={!!confirmRestore}
         danger
         busy={restoring !== null}
-        title="Restore this snapshot?"
-        // Named plainly. Everything in the project's schema is replaced by
-        // what the snapshot held, and rows written since are not merged in.
+        title="Restore to this snapshot?"
         description={
           confirmRestore
-            ? `Every table in this project is replaced by the snapshot taken ${formatWhen(confirmRestore.createdAt)}. ` +
-              `Rows written since then are not kept. The live schema is renamed aside first, so a restore ` +
-              `that fails leaves the current data in place.`
+            ? `Every table in this project is replaced by the snapshot from ${formatTime(confirmRestore.createdAt, 'dateTime')}. Rows written since then are not kept. The live schema is set aside first, so a restore that fails leaves today's data in place.`
             : undefined
         }
         confirmLabel="Restore"
-        onConfirm={() => confirmRestore && restore(confirmRestore)}
-        onCancel={() => {
-          if (restoring === null) setConfirmRestore(null)
-        }}
+        onConfirm={() => confirmRestore && void restore(confirmRestore)}
+        onCancel={() => restoring === null && setConfirmRestore(null)}
       />
     </div>
   )

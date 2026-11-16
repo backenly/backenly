@@ -3,25 +3,31 @@
 /**
  * AssistantPanel — the platform Q&A helper.
  *
- * A slim right panel, kit language (#16171d, hairlines, violet only for the
- * send action). It streams answers from /api/projects/[id]/assistant — a
- * conversation-only endpoint grounded in the platform manifest + this
- * project's connect context. It answers "how do I…/where is…/can Backenly…"
- * questions and points at the right section; it NEVER builds or mutates.
- * Building happens through the user's coding agent over MCP (Connect) or the
- * Database section UI.
+ * A slim right panel in the kit's language. It streams answers from
+ * /api/projects/[id]/assistant — a conversation-only endpoint grounded in the
+ * platform manifest + this project's connect context. It answers "how do
+ * I…/where is…/can Backenly…" questions and points at the right section; it
+ * NEVER builds or mutates. Building happens through the user's coding agent
+ * over MCP (Connect) or the Database section UI.
+ *
+ * From 1536px the page makes room for it (ConsoleFrame `rightInset`). Below
+ * that it overlays the page instead of squeezing it: at 1280 the squeezed page
+ * was about 650px wide and cut its own words ("Data…", "Stora…"). Escape
+ * closes it and returns focus to Ask.
+ *
+ * Its sparkle is violet: the AI is Backenly acting, the one thing violet marks.
  *
  * History is per-session React state — deliberately not persisted. This is a
- * help surface, not a build journal (the Overview's agent journal owns the
- * record of change).
+ * help surface, not a build journal (History owns the record of change).
  */
 
 import { useEffect, useRef, useState } from 'react'
 import { useParams, usePathname } from 'next/navigation'
-import { X, ArrowUp, RotateCcw, Sparkles } from 'lucide-react'
+import { X, ArrowUp, RotateCcw } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAssistantStore } from '@/lib/stores/use-assistant-store'
+import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
 
 export const ASSISTANT_PANEL_WIDTH = 380
 
@@ -170,41 +176,53 @@ export function AssistantPanel() {
 
   const suggestions = suggestionsFor(pathname)
 
+  // Escape closes the panel from anywhere inside it, and focus goes back to Ask.
+  const closeToToggle = () => {
+    setOpen(false)
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-assistant-toggle]')?.focus())
+  }
+
   return (
     <>
-      {/* Mobile backdrop */}
+      {/* Phone backdrop. Wider, the panel sits over the page without hiding the rest of it. */}
       <div
         onClick={() => setOpen(false)}
-        className="sm:hidden fixed inset-0 top-12 bg-black/60 backdrop-blur-sm z-30 transition-opacity"
+        className="sm:hidden fixed inset-0 top-[var(--console-bar)] bg-black/60 backdrop-blur-sm z-30 transition-opacity"
         aria-hidden="true"
       />
       <aside
-        className="fixed top-12 right-0 bottom-0 z-40 w-full sm:w-[380px] bg-[#0f1012] border-l border-white/[0.07] flex flex-col shadow-2xl pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+        className="fixed top-[var(--console-bar)] right-0 bottom-0 z-40 w-full sm:w-[380px] bg-[#0f1012] border-l border-white/[0.07] flex flex-col shadow-[-24px_0_64px_-24px_rgba(0,0,0,0.85)] 2xl:shadow-none pb-[max(0.5rem,env(safe-area-inset-bottom))]"
         aria-label="Assistant"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            closeToToggle()
+          }
+        }}
       >
       {/* ── Header ── */}
       <div className="flex items-center gap-2 h-11 px-3.5 border-b border-white/[0.07] flex-shrink-0">
-        <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
-        <span className="text-[12.5px] font-semibold text-zinc-100">Assistant</span>
-        <span className="text-[12px] font-mono text-faint mt-px">answers only</span>
+        {/* Backenly's own tile mark: the assistant is Backenly answering, not a generic "AI" sparkle. */}
+        <img src="/backenly-icon-hd.svg" alt="" aria-hidden width={16} height={16} className="flex-shrink-0" />
+        <h2 className="text-[13px] font-medium leading-[20px] text-zinc-100">Assistant</h2>
         <div className="ml-auto flex items-center gap-0.5">
           {messages.length > 0 && (
             <button
               onClick={() => { abortRef.current?.abort(); setMessages([]); setStreaming(false) }}
               title="Clear conversation"
               aria-label="Clear conversation"
-              className="inline-flex items-center justify-center w-7 h-7 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors"
+              className={`inline-flex items-center justify-center w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.05] transition-colors ${FOCUS}`}
             >
-              <RotateCcw className="w-3.5 h-3.5" />
+              <RotateCcw aria-hidden className="w-3.5 h-3.5" />
             </button>
           )}
           <button
-            onClick={() => setOpen(false)}
+            onClick={closeToToggle}
             title="Close (⌘J)"
             aria-label="Close assistant"
-            className="inline-flex items-center justify-center w-7 h-7 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors"
+            className={`inline-flex items-center justify-center w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.05] transition-colors ${FOCUS}`}
           >
-            <X className="w-3.5 h-3.5" />
+            <X aria-hidden className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
@@ -226,7 +244,7 @@ export function AssistantPanel() {
                 <button
                   key={s}
                   onClick={() => send(s)}
-                  className="text-left px-3 py-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-[12.5px] text-zinc-400 hover:text-zinc-200 hover:border-white/[0.14] transition-colors"
+                  className={`text-left px-3 py-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-[12.5px] text-zinc-400 hover:text-zinc-200 hover:border-white/[0.14] transition-colors ${FOCUS_INSET}`}
                 >
                   {s}
                 </button>
@@ -292,14 +310,15 @@ export function AssistantPanel() {
               }
             }}
             placeholder="Ask how something works…"
+            aria-label="Ask the assistant"
             rows={1}
-            className="flex-1 resize-none bg-transparent text-[12px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none leading-relaxed max-h-24 py-1"
+            className="flex-1 resize-none bg-transparent text-[16px] sm:text-[12px] text-zinc-100 placeholder:text-faint focus:outline-none leading-relaxed max-h-24 py-1"
           />
           <button
             onClick={() => send(input)}
             disabled={!input.trim() || streaming}
             aria-label="Send"
-            className="inline-flex items-center justify-center w-[26px] h-[26px] rounded-md bg-white text-black hover:bg-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+            className={`inline-flex items-center justify-center w-[26px] h-[26px] rounded-md bg-white text-black hover:bg-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0 ${FOCUS}`}
           >
             <ArrowUp className="w-3.5 h-3.5" />
           </button>

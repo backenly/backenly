@@ -541,7 +541,12 @@ export class PostgresService {
       if (value !== undefined && value !== null && value !== '') {
         // Escape column name and use parameterized query
         const escapedKey = Prisma.raw(`"${key.replace(/"/g, '""')}"`)
-        filterConditions.push(Prisma.sql`${escapedKey} = ${value}`)
+        // ::text on the column: the RLS session layer binds parameters as
+        // text, and a bare uuid = text (or integer = text) comparison is a
+        // 42883, so a filter on any column but a text one failed. Compared as
+        // text it matches uuid, number, boolean and enum columns alike, the
+        // same cast updateRow and deleteRow use on the id.
+        filterConditions.push(Prisma.sql`${escapedKey}::text = ${value}`)
       }
     }
 

@@ -1,638 +1,486 @@
 'use client'
 
 /**
- * BranchesPanel — the UI face of preview branches ("PRs for your backend").
+ * Branches: preview copies of the schema, and the rule that sends agents to
+ * them ("PRs for your backend").
  *
- * Talks to the routes shipped in app/api/projects/[id]/branches:
- *   GET    /branches            list
- *   POST   /branches {name, includeData}
- *                               create (schema clone; rows only when asked)
- *   GET    /branches/[id]       schema diff vs main
- *   POST   /branches/[id]       merge (replays the branch's logged statements onto production, after the confirm dialog)
- *   DELETE /branches/[id]       discard (drops the clone)
- *   POST   /branches/[id]/keys  issue a key bound to the branch (BranchPreviewCard)
+ *   Branches  Beta  1 of 5 active                                    [New branch]
+ *   A branch is a copy of your schema. Merging applies its changes to production.
+ *   Active
+ *   ●  add-ratings-histogram                                         [Merge]  ⋯
+ *      Created 3 h ago   2 statements   10 requests   Last request 38 min ago
+ *   Merged
+ *   ✓  add-follows                                                  Merged Nov 12
+ *   Production
+ *      Protected production                                                 [●]
+ *      Agents change the schema only on a branch. You approve each merge.
  *
- * Built from the console kit like every other section. Discarding drops the
- * clone, so it asks first.
+ * A branch opens as its own page (?branch=<id>, BranchPage). This component
+ * owns what both views share: the reads, the dialogs and the writes, so
+ * moving between the list and a branch keeps what was read.
+ *
+ * Merging replays the branch's logged statements onto production, in order,
+ * as one governed change (lib/branches/engine.ts), after a person confirms
+ * the exact statements. A merge the coding agent asked for is decided in one
+ * place, Autonomy: the branch then shows "Your agent asked to merge" and a
+ * Review link to that request instead of its own Merge.
  */
 
-import { useEffect, useState, useCallback } from 'react'
-import { AlertTriangle, ArrowRight, Check, GitBranch, Plus, RefreshCw, Trash2, X } from 'lucide-react'
-import { BranchPreviewCard, type BranchPreview } from './BranchPreviewCard'
+import { useState } from 'react'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { GitBranch, GitMerge, Plus, Trash2 } from 'lucide-react'
+import { IconWell } from '@/components/console/IconWell'
 import {
-  EmptyState,
-  GhostPreview,
-  IconButton,
   KitButton,
-  KitCard,
-  KitCardBody,
-  KitCardHeader,
-  KitConfirmDialog,
-  KitField,
-  KitInput,
-  KitModal,
-  KitNote,
+  KitButtonLink,
   KitSwitch,
   OverflowMenu,
   PageHeader,
-  SectionLabel,
-  Skeleton,
+  StatusGlyph,
   Tag,
 } from '@/components/inspector/kit'
+import { Time } from '@/components/console/Time'
+import { EmptyPanel, ErrorRow, RefusedLine } from '@/components/console/states'
+import { RefreshButton } from '@/components/console/InstrumentBar'
+import { Fact, Facts, Panel, ROW_TITLE, RowSkeleton, Section } from '@/components/autonomy/rows'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
+import { BranchPage, type MergeState } from './BranchPage'
+import { DiscardDialog, MergeDialog, NewBranchDialog } from './BranchDialogs'
+import {
+  BRANCH_LIMIT,
+  refusal,
+  requestCount,
+  statements,
+  useBranchFacts,
+  useBranchList,
+  useMergeAsks,
+  useProtection,
+  type Branch,
+  type BranchFacts,
+} from './data'
 
-/** Active preview branches a project may hold at once (lib/branches). */
-const BRANCH_LIMIT = 5
+export function BranchesPanel({ projectId, branchId = null }: { projectId: string; branchId?: string | null }) {
+  const router = useRouter()
+  const role = useProjectRole(projectId)
+  const list = useBranchList(projectId)
+  const protection = useProtection(projectId)
+  const { asks, reload: reloadAsks } = useMergeAsks(projectId)
+  const all = list.branches ?? []
+  const active = all.filter((b) => b.status === 'active')
+  const merged = all.filter((b) => b.status === 'merged')
+  const { facts, reload: reloadFacts, reloadOne } = useBranchFacts(
+    projectId,
+    active.map((b) => b.id),
+  )
 
-interface Branch {
-  id: string
-  name: string
-  status: 'active' | 'merged' | 'discarded'
-  schemaName?: string
-  createdAt: string
-  mergedAt: string | null
-  /** Present for an active branch: where to point an app at it. */
-  preview?: BranchPreview
-}
+  const [newOpen, setNewOpen] = useState(false)
+  const [preparing, setPreparing] = useState<string | null>(null)
+  const [mergeFor, setMergeFor] = useState<Branch | null>(null)
+  const [merging, setMerging] = useState(false)
+  const [merges, setMerges] = useState<Record<string, MergeState>>({})
+  const [discardFor, setDiscardFor] = useState<Branch | null>(null)
+  const [discarding, setDiscarding] = useState(false)
+  const [discardRefused, setDiscardRefused] = useState<Record<string, string>>({})
 
-interface ColumnDiff { name: string; dataType: string }
-interface TableAlteration {
-  table: string
-  addedColumns: ColumnDiff[]
-  droppedColumns: string[]
-  typeChanged: Array<{ column: string; from: string; to: string }>
-  /** Read from the branch's statements: a renamed column keeps its values. */
-  renamedColumns?: Array<{ from: string; to: string; readded: boolean }>
-}
-interface SchemaDiff {
-  addedTables: Array<{ tableName: string; columns: unknown[] }>
-  droppedTables: string[]
-  altered: TableAlteration[]
-  identical: boolean
-}
-
-interface MergeResult {
-  applied: string[]
-  review: string[]
-  fullyMerged: boolean
-}
-
-function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 60) return 'just now'
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
-}
-
-export function BranchesPanel({ projectId }: { projectId: string }) {
-  const [branches, setBranches] = useState<Branch[]>([])
-  const [loading, setLoading] = useState(true)
-  const [creating, setCreating] = useState(false)
-  const [showNew, setShowNew] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [includeData, setIncludeData] = useState(false)
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [openDiff, setOpenDiff] = useState<{ id: string; name: string; diff: SchemaDiff; migrations: string[]; conflicts: string[] } | null>(null)
-  const [mergeOutcome, setMergeOutcome] = useState<{ name: string; result: MergeResult } | null>(null)
-  const [confirmDiscard, setConfirmDiscard] = useState<Branch | null>(null)
-  const [confirmMerge, setConfirmMerge] = useState<{ branch: Branch; migrations: string[]; conflicts: string[] } | null>(null)
-  const [openPreview, setOpenPreview] = useState<string | null>(null)
-  const [protectedProduction, setProtectedProduction] = useState<boolean | null>(null)
-  const [savingProtection, setSavingProtection] = useState(false)
-
-  const base = `/api/projects/${projectId}/branches`
-
-  useEffect(() => {
-    let cancelled = false
-    fetch(`/api/projects/${projectId}/protection`, { credentials: 'include' })
-      .then((r) => r.json())
-      .then((j) => { if (!cancelled && j.success) setProtectedProduction(!!j.protectedProduction) })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [projectId])
-
-  const saveProtection = async (next: boolean) => {
-    setSavingProtection(true); setError(null)
-    try {
-      const res = await fetch(`/api/projects/${projectId}/protection`, {
-        method: 'PUT', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ protectedProduction: next }),
-      })
-      const j = await res.json()
-      if (!res.ok || !j.success) { setError(j.error || 'Could not change production protection.'); return }
-      setProtectedProduction(!!j.protectedProduction)
-    } catch {
-      setError('Network error changing production protection.')
-    } finally {
-      setSavingProtection(false)
-    }
-  }
-
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch(base, { credentials: 'include' })
-      const j = await res.json()
-      if (j.success) setBranches(j.branches)
-    } catch {
-      setError('Could not load branches.')
-    } finally {
-      setLoading(false)
-    }
-  }, [base])
-
-  useEffect(() => { load() }, [load])
-
-  const create = async () => {
-    const name = newName.trim().toLowerCase()
-    if (!name) return
-    setCreating(true); setError(null)
-    try {
-      const res = await fetch(base, {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, includeData }),
-      })
-      const j = await res.json()
-      if (!res.ok || !j.success) { setError(j.error || 'Could not create branch.'); return }
-      setNewName('')
-      setIncludeData(false)
-      setShowNew(false)
-      await load()
-    } catch {
-      setError('Network error creating branch.')
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  const viewDiff = async (b: Branch) => {
-    setBusy(b.id); setError(null); setMergeOutcome(null)
-    try {
-      const res = await fetch(`${base}/${b.id}`, { credentials: 'include' })
-      const j = await res.json()
-      if (!res.ok || !j.success) { setError(j.error || 'Could not diff branch.'); return }
-      setOpenDiff({ id: b.id, name: b.name, diff: j.diff, migrations: j.migrations ?? [], conflicts: j.conflicts ?? [] })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  // Merging changes production, so the human sees exactly which statements
-  // will be applied before confirming.
-  const askMerge = async (b: Branch) => {
-    setBusy(b.id); setError(null)
-    try {
-      const res = await fetch(`${base}/${b.id}`, { credentials: 'include' })
-      const j = await res.json()
-      if (!res.ok || !j.success) { setError(j.error || 'Could not read the branch.'); return }
-      setConfirmMerge({ branch: b, migrations: j.migrations ?? [], conflicts: j.conflicts ?? [] })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const merge = async (b: Branch) => {
-    setBusy(b.id); setError(null)
-    try {
-      const res = await fetch(`${base}/${b.id}`, { method: 'POST', credentials: 'include' })
-      const j = await res.json()
-      if (!res.ok || !j.success) { setError(j.error || 'Merge failed.'); return }
-      setMergeOutcome({ name: b.name, result: j })
-      setOpenDiff(null)
-      if (openPreview === b.id) setOpenPreview(null)
-      await load()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const discard = async (b: Branch) => {
-    setBusy(b.id); setError(null)
-    try {
-      const res = await fetch(`${base}/${b.id}`, { method: 'DELETE', credentials: 'include' })
-      const j = await res.json()
-      if (!res.ok || !j.success) { setError(j.error || 'Could not discard branch.'); return }
-      if (openDiff?.id === b.id) setOpenDiff(null)
-      if (openPreview === b.id) setOpenPreview(null)
-      await load()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const active = branches.filter((b) => b.status === 'active')
-  const merged = branches.filter((b) => b.status === 'merged')
+  const listHref = `/app/projects/${projectId}/branches`
   const atLimit = active.length >= BRANCH_LIMIT
-  const previewing = active.find((b) => b.id === openPreview && b.preview)
 
-  const openNew = () => {
-    setError(null)
-    setShowNew(true)
+  const refreshAll = () => {
+    void list.reload()
+    void reloadFacts()
+    void reloadAsks()
   }
 
-  // The page header lives here, not in the route file, because its action
-  // opens this panel's dialog. Creating a branch used to be a form that sat
-  // open above the list on every visit, a paragraph of mechanics and all.
+  // The confirm lists the statements a merge runs, so they are read again first: the agent may have added one.
+  const askMerge = async (b: Branch) => {
+    setPreparing(b.id)
+    setMerges((m) => ({ ...m, [b.id]: {} }))
+    const f = await reloadOne(b.id)
+    setPreparing(null)
+    if (!f.detail) {
+      setMerges((m) => ({ ...m, [b.id]: { refused: "Could not read the branch's statements, so nothing was merged. Try again." } }))
+      return
+    }
+    if (f.detail.conflicts.length > 0) return
+    setMergeFor(b)
+  }
+
+  const merge = async () => {
+    const b = mergeFor
+    if (!b) return
+    setMerging(true)
+    let next: MergeState
+    try {
+      const res = await fetch(`/api/projects/${projectId}/branches/${b.id}`, { method: 'POST', credentials: 'include' })
+      let j: { success?: boolean; applied?: unknown; review?: unknown; fullyMerged?: unknown; error?: string } | null = null
+      try {
+        j = await res.json()
+      } catch {
+        j = null
+      }
+      next =
+        res.ok && j?.success
+          ? {
+              outcome: {
+                applied: Array.isArray(j.applied) ? (j.applied as string[]) : [],
+                review: Array.isArray(j.review) ? (j.review as string[]) : [],
+                fullyMerged: j.fullyMerged !== false,
+              },
+            }
+          : { refused: refusal(j, 'The merge did not run.') }
+    } catch {
+      next = { refused: 'The merge did not run. The server did not answer.' }
+    }
+    setMerges((m) => ({ ...m, [b.id]: next }))
+    setMerging(false)
+    setMergeFor(null)
+    void list.reload()
+    void reloadAsks()
+    if (next.refused) void reloadOne(b.id)
+  }
+
+  const discard = async () => {
+    const b = discardFor
+    if (!b) return
+    setDiscarding(true)
+    setDiscardRefused((r) => ({ ...r, [b.id]: '' }))
+    let ok = false
+    try {
+      const res = await fetch(`/api/projects/${projectId}/branches/${b.id}`, { method: 'DELETE', credentials: 'include' })
+      let j: { success?: boolean; error?: string } | null = null
+      try {
+        j = await res.json()
+      } catch {
+        j = null
+      }
+      ok = res.ok && !!j?.success
+      if (!ok) setDiscardRefused((r) => ({ ...r, [b.id]: refusal(j, 'The branch was not discarded.') }))
+    } catch {
+      setDiscardRefused((r) => ({ ...r, [b.id]: 'The branch was not discarded. The server did not answer.' }))
+    }
+    setDiscarding(false)
+    setDiscardFor(null)
+    if (ok && branchId === b.id) router.push(listHref)
+    void list.reload()
+  }
+
+  const dialogs = (
+    <>
+      <NewBranchDialog
+        open={newOpen}
+        onClose={() => setNewOpen(false)}
+        projectId={projectId}
+        atLimit={atLimit}
+        onCreated={() => {
+          setNewOpen(false)
+          void list.reload()
+        }}
+      />
+      <MergeDialog
+        branchName={mergeFor?.name ?? null}
+        migrations={(mergeFor && facts[mergeFor.id]?.detail?.migrations) || []}
+        busy={merging}
+        onCancel={() => {
+          if (!merging) setMergeFor(null)
+        }}
+        onConfirm={() => void merge()}
+      />
+      <DiscardDialog
+        branchName={discardFor?.name ?? null}
+        busy={discarding}
+        onCancel={() => {
+          if (!discarding) setDiscardFor(null)
+        }}
+        onConfirm={() => void discard()}
+      />
+    </>
+  )
+
+  if (branchId) {
+    const branch = all.find((b) => b.id === branchId) ?? null
+    return (
+      <>
+        <BranchPage
+          projectId={projectId}
+          branchId={branchId}
+          branch={branch}
+          loading={list.loading}
+          listError={list.error}
+          onRetryList={() => void list.reload()}
+          retrying={list.refreshing}
+          facts={facts[branchId]}
+          askId={branch ? asks.get(branch.name) : undefined}
+          canMerge={role.canAdminister}
+          canDiscard={role.canWrite}
+          roleLoading={role.loading}
+          preparing={preparing === branchId}
+          merge={merges[branchId]}
+          discardRefused={discardRefused[branchId] || undefined}
+          onMerge={() => branch && void askMerge(branch)}
+          onDiscard={() => branch && setDiscardFor(branch)}
+          onRefreshRequests={() => void reloadOne(branchId, 'requests')}
+          onRetryDetail={() => void reloadOne(branchId)}
+        />
+        {dialogs}
+      </>
+    )
+  }
+
+  const firstLoad = list.loading && !list.branches
+  const failed = list.error && !list.branches
+
   return (
     <div>
       <PageHeader
-        className="!px-0"
+        flush
         title="Branches"
         meta={
           <>
-            <Tag tone="violet">Beta</Tag>
-            {!loading && (
+            <Tag>Beta</Tag>
+            {list.branches && (
               <span className="text-[13px] tabular-nums text-faint">
                 {active.length} of {BRANCH_LIMIT} active
               </span>
             )}
           </>
         }
-        description="An isolated copy of your schema for your agent to build against. Merging replays the branch’s changes onto production after you approve them."
+        description="A branch is a copy of your schema. Merging applies its changes to production."
         actions={
-          <KitButton
-            variant="primary"
-            icon={Plus}
-            onClick={openNew}
-            disabled={atLimit}
-            title={atLimit ? `${BRANCH_LIMIT} branches are active. Merge or discard one first.` : undefined}
-          >
-            New branch
-          </KitButton>
+          role.canWrite && !failed ? (
+            <KitButton variant="primary" size="lg" icon={Plus} onClick={() => setNewOpen(true)}>
+              New branch
+            </KitButton>
+          ) : undefined
         }
       />
 
-      <div className="space-y-4">
-      {protectedProduction !== null && (
-        <KitCard className="flex items-start justify-between gap-6 px-4 py-3.5 sm:px-5">
-          <div className="min-w-0">
-            <p id="protected-production" className="text-[13px] font-medium leading-[20px] text-zinc-100">
-              Protected production
-            </p>
-            <p className="mt-0.5 max-w-[72ch] text-[12.5px] leading-[18px] text-faint [text-wrap:pretty]">
-              {protectedProduction
-                ? 'Agents change the schema on a preview branch, and production gets it only through a merge you approve. Your own changes in the dashboard are not affected.'
-                : 'Agents can change production\'s schema directly. Turn on to require a branch and your approval for every agent schema change.'}
-            </p>
-          </div>
-          <KitSwitch
-            checked={protectedProduction}
-            onChange={saveProtection}
-            disabled={savingProtection}
-            label="Protected production"
-            className="mt-0.5"
-          />
-        </KitCard>
-      )}
-
-      {error && !showNew && (
-        <KitNote tone="danger" icon={AlertTriangle}>
-          {error}
-        </KitNote>
-      )}
-
-      {mergeOutcome && (
-        <KitNote
-          tone={mergeOutcome.result.fullyMerged ? 'success' : 'warn'}
-          icon={mergeOutcome.result.fullyMerged ? Check : AlertTriangle}
-          title={
-            mergeOutcome.result.fullyMerged
-              ? `Merged ${mergeOutcome.name}`
-              : `Merged ${mergeOutcome.name} in part. Some changes need the review path.`
-          }
-          actions={<IconButton icon={X} label="Dismiss" onClick={() => setMergeOutcome(null)} />}
+      <div className="space-y-8">
+        <Section
+          id="branches-active"
+          title="Active"
+          count={active.length}
+          aside={!firstLoad && !failed ? <RefreshButton onRefresh={refreshAll} refreshing={list.refreshing} label="Refresh branches" /> : undefined}
         >
-          <ul className="mt-1 space-y-1">
-            {mergeOutcome.result.applied.map((a, i) => (
-              <li key={`a${i}`} className="flex items-start gap-2 text-zinc-300">
-                <Check className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
-                {a}
-              </li>
-            ))}
-            {mergeOutcome.result.review.map((r, i) => (
-              <li key={`r${i}`} className="flex items-start gap-2 text-amber-100/90">
-                <ArrowRight className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-amber-300" />
-                {r}
-              </li>
-            ))}
-          </ul>
-        </KitNote>
-      )}
-
-      {/* Preview endpoint */}
-      {previewing && previewing.preview && (
-        <BranchPreviewCard
-          key={previewing.id}
-          projectId={projectId}
-          branch={{ id: previewing.id, name: previewing.name, schemaName: previewing.schemaName, preview: previewing.preview }}
-          onClose={() => setOpenPreview(null)}
-        />
-      )}
-
-      {/* Diff detail */}
-      {openDiff && (
-        <KitCard className="overflow-hidden">
-          <KitCardHeader
-            title={
-              <span>
-                What changed on <span className="font-mono">{openDiff.name}</span>
-              </span>
-            }
-            actions={<IconButton icon={X} label="Close the comparison" onClick={() => setOpenDiff(null)} />}
-          />
-          <KitCardBody>
-            {openDiff.diff.identical ? (
-              <p className="text-[13px] text-faint">No schema changes on this branch.</p>
+          <Panel>
+            {list.error && list.branches && (
+              <ErrorRow things="branches" staleAt={list.readAt} onRetry={() => void list.reload()} retrying={list.refreshing} />
+            )}
+            {firstLoad ? (
+              <RowSkeleton rows={2} />
+            ) : failed ? (
+              <ErrorRow things="branches" onRetry={() => void list.reload()} retrying={list.refreshing} />
+            ) : active.length === 0 ? (
+              <EmptyPanel
+                title="No branches yet"
+                sentence={
+                  role.canWrite
+                    ? 'Ask your agent to build on one, or create one here.'
+                    : 'Branches your agent or a developer creates show here.'
+                }
+                docs={{ label: 'Branches docs', slug: 'branches' }}
+              />
             ) : (
-              <div className="space-y-4">
-                {openDiff.diff.addedTables.length > 0 && (
-                  <div>
-                    <SectionLabel>New tables</SectionLabel>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {openDiff.diff.addedTables.map((t) => (
-                        <Tag key={t.tableName} tone="good" mono>
-                          + {t.tableName}
-                        </Tag>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {openDiff.diff.altered.map((a) => (
-                  <div key={a.table}>
-                    <SectionLabel>
-                      <span className="font-mono">{a.table}</span>
-                    </SectionLabel>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {(a.renamedColumns ?? []).map((r) => (
-                        <Tag key={`renamed:${r.from}`} tone="warn" mono>
-                          {r.from} renamed {r.to}
-                        </Tag>
-                      ))}
-                      {a.addedColumns.map((c) => (
-                        <Tag key={c.name} tone="good" mono>
-                          + {c.name} {c.dataType}
-                        </Tag>
-                      ))}
-                      {a.droppedColumns.map((c) => (
-                        <Tag key={c} tone="bad" mono>
-                          − {c}
-                        </Tag>
-                      ))}
-                      {a.typeChanged.map((t) => (
-                        <Tag key={t.column} tone="warn" mono>
-                          {t.column}: {t.from} to {t.to}
-                        </Tag>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-                {openDiff.diff.droppedTables.length > 0 && (
-                  <div>
-                    <SectionLabel>Dropped tables</SectionLabel>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {openDiff.diff.droppedTables.map((t) => (
-                        <Tag key={t} tone="bad" mono>
-                          − {t}
-                        </Tag>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {openDiff.migrations.length > 0 && (
-              <div className="mt-4">
-                <SectionLabel>A merge applies these to production, in order</SectionLabel>
-                <ol className="mt-1.5 space-y-1">
-                  {openDiff.migrations.map((m, i) => (
-                    <li key={i} className="font-mono text-[12px] leading-[18px] text-zinc-300">
-                      {i + 1}. {m}
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            )}
-            {openDiff.conflicts.length > 0 && (
-              <KitNote tone="warn" icon={AlertTriangle} title="Main changed since this branch was cut">
-                Production has changed {openDiff.conflicts.join(', ')}, which this branch&apos;s migrations also touch, so
-                the merge will be refused. Create a fresh branch from production and apply the change there.
-              </KitNote>
-            )}
-          </KitCardBody>
-        </KitCard>
-      )}
-
-      {/* List. Not overflow-hidden: a row's "…" menu opens below it and was
-          cut off by the card's edge on the last row. */}
-      <KitCard>
-        <KitCardHeader
-          title={
-            <span className="flex items-baseline gap-2">
-              Active branches
-              {!loading && <span className="text-[12px] font-normal tabular-nums text-faint">{active.length}</span>}
-            </span>
-          }
-          actions={<IconButton icon={RefreshCw} label="Refresh branches" onClick={load} />}
-        />
-        {loading ? (
-          <div className="space-y-3 px-4 py-4" aria-hidden>
-            <Skeleton className="h-[14px] w-40" />
-            <Skeleton className="h-[14px] w-28" />
-          </div>
-        ) : active.length === 0 ? (
-          <EmptyState
-            icon={GitBranch}
-            preview={<GhostPreview kind="list" />}
-            title="No preview branches"
-            description="Create one to test a schema change on an isolated copy, then merge it into production when it works."
-            action={
-              <KitButton icon={Plus} onClick={openNew}>
-                New branch
-              </KitButton>
-            }
-          />
-        ) : (
-          <ul className="divide-y divide-white/[0.06]">
-            {active.map((b) => (
-              <li key={b.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
-                <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-mono text-[13px] text-zinc-100">{b.name}</p>
-                  <p className="text-[12px] text-faint">Created {timeAgo(b.createdAt)}</p>
-                </div>
-                <div className="flex flex-shrink-0 items-center gap-1.5">
-                  {b.preview && (
-                    <KitButton
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setOpenPreview(openPreview === b.id ? null : b.id)}
-                    >
-                      Preview
-                    </KitButton>
-                  )}
-                  <KitButton size="sm" variant="ghost" onClick={() => viewDiff(b)} loading={busy === b.id && !confirmDiscard}>
-                    Compare
-                  </KitButton>
-                  <KitButton size="sm" onClick={() => askMerge(b)} disabled={busy === b.id}>
-                    Merge
-                  </KitButton>
-                  <OverflowMenu
-                    label={`More actions for ${b.name}`}
-                    items={[{ label: 'Discard branch', icon: Trash2, danger: true, onClick: () => setConfirmDiscard(b) }]}
+              <ul className="divide-y divide-white/[0.06]">
+                {active.map((b) => (
+                  <ActiveRow
+                    key={b.id}
+                    projectId={projectId}
+                    branch={b}
+                    facts={facts[b.id]}
+                    askId={asks.get(b.name)}
+                    canMerge={role.canAdminister}
+                    canDiscard={role.canWrite}
+                    preparing={preparing === b.id}
+                    merge={merges[b.id]}
+                    discardRefused={discardRefused[b.id] || undefined}
+                    onMerge={() => void askMerge(b)}
+                    onDiscard={() => setDiscardFor(b)}
                   />
-                </div>
-              </li>
-            ))}
-          </ul>
+                ))}
+              </ul>
+            )}
+          </Panel>
+          {!role.loading && !failed && active.length > 0 && !role.canAdminister && (
+            <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
+              {role.canWrite ? 'Only admins can merge.' : 'Only developers and admins can change branches.'}
+            </p>
+          )}
+        </Section>
+
+        {merged.length > 0 && (
+          <Section id="branches-merged" title="Merged" count={merged.length}>
+            <Panel>
+              <ul className="divide-y divide-white/[0.06]">
+                {merged.map((b) => (
+                  <MergedRow key={b.id} branch={b} merge={merges[b.id]} />
+                ))}
+              </ul>
+            </Panel>
+          </Section>
         )}
-      </KitCard>
 
-      {/* History: a merged branch no longer answers its keys, but it happened. */}
-      {merged.length > 0 && (
-        <KitCard className="overflow-hidden">
-          <KitCardHeader
-            title={
-              <span className="flex items-baseline gap-2">
-                Merged
-                <span className="text-[12px] font-normal tabular-nums text-faint">{merged.length}</span>
-              </span>
-            }
-          />
-          <ul className="divide-y divide-white/[0.06]">
-            {merged.map((b) => (
-              <li key={b.id} className="flex items-center gap-3 px-4 py-2.5">
-                <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-600" strokeWidth={1.75} />
-                <p className="min-w-0 flex-1 truncate font-mono text-[13px] text-zinc-400">{b.name}</p>
-                <span className="text-[12px] text-faint">
-                  Merged {b.mergedAt ? timeAgo(b.mergedAt) : ''}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </KitCard>
-      )}
-
+        <Section id="branches-production" title="Production">
+          <Panel>
+            {protection.value === null && protection.error ? (
+              <ErrorRow things="production protection" onRetry={() => void protection.reload()} />
+            ) : protection.value === null ? (
+              <RowSkeleton rows={1} lead="none" />
+            ) : (
+              <div className="flex items-start gap-x-[24px] px-[16px] py-[14px] sm:px-[20px]">
+                <div className="min-w-0 flex-1">
+                  <h3 className={ROW_TITLE}>Protected production</h3>
+                  <p className="mt-[2px] text-[13px] leading-[20px] text-zinc-400">
+                    {protection.value
+                      ? 'Agents change the schema only on a branch. You approve each merge.'
+                      : "Agents can change production's schema directly."}
+                  </p>
+                  {protection.refused && <RefusedLine className="mt-[8px]">{protection.refused}</RefusedLine>}
+                </div>
+                {role.loading ? null : role.canAdminister ? (
+                  <KitSwitch
+                    checked={protection.value}
+                    onChange={(next) => void protection.save(next)}
+                    disabled={protection.saving}
+                    label="Protected production"
+                    className="mt-[1px]"
+                  />
+                ) : (
+                  <span className="pt-[1px] text-[13px] leading-[20px] text-zinc-300">{protection.value ? 'On' : 'Off'}</span>
+                )}
+              </div>
+            )}
+          </Panel>
+        </Section>
       </div>
 
-      <KitModal
-        open={showNew}
-        onClose={() => {
-          if (!creating) setShowNew(false)
-        }}
-        title="New preview branch"
-        description="A copy of this project's schema with the same row security and its own id sequences. Production keeps serving while your agent builds against it."
-        footer={
-          <>
-            <KitButton variant="ghost" onClick={() => setShowNew(false)} disabled={creating}>
-              Cancel
-            </KitButton>
-            <KitButton
-              variant="primary"
-              icon={Plus}
-              loading={creating}
-              disabled={!newName.trim() || atLimit}
-              onClick={create}
-            >
-              {creating ? 'Cloning…' : 'Create branch'}
-            </KitButton>
-          </>
-        }
-      >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            create()
-          }}
-          className="space-y-4"
-        >
-          <KitField label="Branch name" hint="Lowercase letters, numbers and dashes.">
-            <KitInput
-              placeholder="add-payments"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              disabled={creating}
-              className="font-mono"
-              aria-label="Branch name"
-              name="branch-name"
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </KitField>
-          <label className="flex cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
-            <input
-              type="checkbox"
-              checked={includeData}
-              onChange={(e) => setIncludeData(e.target.checked)}
-              disabled={creating}
-              className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
-            />
-            <span className="min-w-0">
-              <span className="block text-[13px] font-medium text-zinc-100">Copy production rows</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
-                Only to reproduce a problem that depends on real data: the copy includes your end users&apos; records,
-                and anyone holding a key for this branch can read them.
-              </span>
-            </span>
-          </label>
-          {error && (
-            <KitNote tone="danger" icon={AlertTriangle}>
-              {error}
-            </KitNote>
-          )}
-        </form>
-      </KitModal>
-
-      <KitConfirmDialog
-        open={!!confirmDiscard}
-        danger
-        busy={!!confirmDiscard && busy === confirmDiscard.id}
-        title={confirmDiscard ? `Discard ${confirmDiscard.name}?` : 'Discard branch'}
-        description="The branch's cloned schema and every row in it are dropped. Production is not touched. This cannot be undone."
-        confirmLabel="Discard branch"
-        onCancel={() => {
-          if (!busy) setConfirmDiscard(null)
-        }}
-        onConfirm={async () => {
-          if (!confirmDiscard) return
-          await discard(confirmDiscard)
-          setConfirmDiscard(null)
-        }}
-      />
-
-      <KitConfirmDialog
-        open={!!confirmMerge}
-        busy={!!confirmMerge && busy === confirmMerge.branch.id}
-        title={confirmMerge ? `Merge ${confirmMerge.branch.name} into production?` : 'Merge branch'}
-        description={
-          confirmMerge && confirmMerge.conflicts.length > 0
-            ? `Production has changed ${confirmMerge.conflicts.join(', ')} since this branch was cut, so the merge will be refused. Create a fresh branch instead.`
-            : confirmMerge && confirmMerge.migrations.length === 0
-              ? 'This branch has no schema changes. Merging closes it and drops its schema; production is not changed.'
-              : 'These statements are applied to production, in order, through the governed path. The branch is then closed, its schema dropped and its keys stop working.'
-        }
-        confirmLabel={confirmMerge && confirmMerge.conflicts.length > 0 ? 'Close' : 'Merge into production'}
-        onCancel={() => {
-          if (!busy) setConfirmMerge(null)
-        }}
-        onConfirm={async () => {
-          if (!confirmMerge) return
-          // A conflicting merge is refused by the server; there is nothing to send.
-          if (confirmMerge.conflicts.length === 0) await merge(confirmMerge.branch)
-          setConfirmMerge(null)
-        }}
-      >
-        {confirmMerge && confirmMerge.migrations.length > 0 && (
-          <ol className="max-h-[240px] space-y-1 overflow-auto rounded-[8px] border border-white/[0.07] bg-black/30 px-3.5 py-3">
-            {confirmMerge.migrations.map((m, i) => (
-              <li key={i} className="font-mono text-[12px] leading-[18px] text-zinc-300">
-                {i + 1}. {m}
-              </li>
-            ))}
-          </ol>
-        )}
-      </KitConfirmDialog>
+      {dialogs}
     </div>
+  )
+}
+
+/**
+ * An active branch. Its name opens its page; Merge (or the agent's request)
+ * and ⋯ sit at the right. On a phone: name and ⋯ on the first line, facts on
+ * the second, Merge on the third.
+ */
+function ActiveRow({
+  projectId,
+  branch,
+  facts,
+  askId,
+  canMerge,
+  canDiscard,
+  preparing,
+  merge,
+  discardRefused,
+  onMerge,
+  onDiscard,
+}: {
+  projectId: string
+  branch: Branch
+  facts: BranchFacts | undefined
+  askId?: string
+  canMerge: boolean
+  canDiscard: boolean
+  preparing: boolean
+  merge?: MergeState
+  discardRefused?: string
+  onMerge: () => void
+  onDiscard: () => void
+}) {
+  const detail = facts?.detail ?? null
+  const requests = facts?.requests ?? null
+  const conflicts = detail?.conflicts ?? []
+  const href = `/app/projects/${projectId}/branches?branch=${branch.id}`
+
+  const act = askId ? (
+    <span className="flex flex-wrap items-center gap-[10px]">
+      <StatusGlyph state="waiting" label="Your agent asked to merge" showLabel />
+      {canMerge && (
+        <KitButtonLink href={`/app/projects/${projectId}/autonomy#approval-${askId}`} size="sm">
+          Review
+        </KitButtonLink>
+      )}
+    </span>
+  ) : canMerge && conflicts.length === 0 ? (
+    <KitButton size="sm" onClick={onMerge} loading={preparing}>
+      Merge
+    </KitButton>
+  ) : null
+
+  return (
+    <li className="relative transition-colors duration-150 hover:bg-[#121316]">
+      <div className="flex items-start gap-[12px] px-[16px] py-[14px] sm:px-[20px]">
+        <IconWell icon={GitBranch} className="-mt-[3.5px]" />
+        <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-[16px] gap-y-[10px]">
+          <div className="min-w-0 flex-1">
+            <Link
+              href={href}
+              className="block font-mono text-[13px] font-medium leading-[21px] text-zinc-50 [overflow-wrap:anywhere] after:absolute after:inset-0 after:content-[''] focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-white/70"
+            >
+              {branch.name}
+            </Link>
+            <Facts>
+              <Fact>
+                <Time iso={branch.createdAt} prefix="Created" />
+              </Fact>
+              {detail && <Fact>{detail.migrations.length > 0 ? statements(detail.migrations.length) : 'No schema changes'}</Fact>}
+              {requests && <Fact>{requests.length > 0 ? requestCount(requests.length) : 'No requests yet'}</Fact>}
+              {requests && requests[0] && (
+                <Fact>
+                  <Time iso={requests[0].timestamp} prefix="Last request" />
+                </Fact>
+              )}
+              {conflicts.length > 0 && <span className="font-medium text-zinc-50">Production changed since this branch was cut</span>}
+            </Facts>
+            {merge?.refused && <RefusedLine className="mt-[8px]">{merge.refused}</RefusedLine>}
+            {discardRefused && <RefusedLine className="mt-[8px]">{discardRefused}</RefusedLine>}
+          </div>
+          {act && <div className="relative z-[1] order-3 flex w-full items-center sm:order-2 sm:w-auto">{act}</div>}
+          {canDiscard && (
+            <div className="relative z-[1] order-2 -mr-[4px] sm:order-3">
+              <OverflowMenu
+                label={`More actions for ${branch.name}`}
+                items={[{ label: 'Discard branch', icon: Trash2, danger: true, onClick: onDiscard }]}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </li>
+  )
+}
+
+/** A merged branch: it happened, so it stays listed; its schema and keys are gone. */
+function MergedRow({ branch, merge }: { branch: Branch; merge?: MergeState }) {
+  const outcome = merge?.outcome
+  return (
+    <li className="flex items-start gap-[12px] px-[16px] py-[14px] sm:px-[20px]">
+      <IconWell icon={GitMerge} quiet className="-mt-[3.5px]" />
+      <div className="flex min-w-0 flex-1 flex-wrap items-start justify-between gap-x-[16px] gap-y-[2px]">
+        <div className="min-w-0">
+          <p className="font-mono text-[13px] leading-[21px] text-zinc-300 [overflow-wrap:anywhere]">{branch.name}</p>
+          {outcome && (
+            <Facts>
+              <span className="text-zinc-300">
+                {outcome.applied.length > 0 ? `${statements(outcome.applied.length)} applied to production` : 'Production did not change'}
+              </span>
+            </Facts>
+          )}
+          {outcome?.review.map((r, i) => (
+            <p key={i} className="mt-[6px] flex items-start gap-[8px] text-[12.5px] leading-[18px] text-zinc-50">
+              <StatusGlyph state="waiting" label="Needs a review" className="mt-[3px]" />
+              <span className="min-w-0 [overflow-wrap:anywhere]">{r}</span>
+            </p>
+          ))}
+        </div>
+        {branch.mergedAt && (
+          <span className="pt-[2px] text-[12.5px] leading-[18px] text-faint">
+            <Time iso={branch.mergedAt} mode="date" prefix="Merged" />
+          </span>
+        )}
+      </div>
+    </li>
   )
 }

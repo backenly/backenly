@@ -23,11 +23,16 @@ import { n, type MovePlan, type MoveProgress, type RowProgress } from './plan'
    - the "Moving" dot is still; the numbers already move.
    Table names are machine text, so they are mono; counts are Geist with
    tabular figures. Bars scale on the compositor (transform), never by width.
+
+   The rows (LedgerHead, LedgerRow, StateGlyph) are shared with the console's
+   real import (./ImportLedger), which reads them from GET /api/import/{jobId}
+   instead of a clock.
 ───────────────────────────────────────────────────────────── */
 
 /** One grid for every row: name, bar, the source's count, Backenly's count, state. */
-const GRID =
+export const LEDGER_GRID =
   'grid grid-cols-[minmax(0,1fr)_84px_16px] items-center gap-x-4 px-4 sm:grid-cols-[minmax(112px,200px)_minmax(0,1fr)_84px_84px_16px] sm:px-5'
+const GRID = LEDGER_GRID
 
 export function whereOf(plan: MovePlan): string {
   return plan.source === 'postgres' ? plan.sourceWhere : `${SOURCES[plan.source].name}, ${plan.sourceWhere}`
@@ -83,21 +88,11 @@ export function MoveLedger({
       </div>
 
       <div role="table" aria-label={`Moving ${plan.project}`} className="pb-1.5 pt-1">
-        <div role="row" className={`${GRID} h-[32px] text-[12px] leading-[16px] text-faint`}>
-          <span role="columnheader">{tableWords.many.charAt(0).toUpperCase() + tableWords.many.slice(1)}</span>
-          <span role="columnheader" className="hidden tabular-nums sm:block">
-            {p.reading ? `Reading ${tableCount} ${tableWords.many}` : `${p.matchedTables} of ${tableCount} matched`}
-          </span>
-          <span role="columnheader" className="hidden text-right sm:block">
-            {from}
-          </span>
-          <span role="columnheader" className="text-right">
-            Backenly
-          </span>
-          <span role="columnheader">
-            <span className="sr-only">State</span>
-          </span>
-        </div>
+        <LedgerHead
+          name={tableWords.many.charAt(0).toUpperCase() + tableWords.many.slice(1)}
+          progress={p.reading ? `Reading ${tableCount} ${tableWords.many}` : `${p.matchedTables} of ${tableCount} matched`}
+          from={from}
+        />
         {plan.tables.map((t, i) => (
           <LedgerRow key={t.name} label={t.name} mono row={p.tables[i]} />
         ))}
@@ -155,21 +150,48 @@ function MoveStatus({ progress, project }: { progress: MoveProgress; project: st
   )
 }
 
-const PHASE_WORD: Record<RowProgress['phase'] | 'review', string> = {
+/** A ledger row's state. `stopped` is a row an import ended on before it finished. */
+export type LedgerRowPhase = RowProgress['phase'] | 'stopped'
+
+const PHASE_WORD: Record<LedgerRowPhase | 'review', string> = {
   waiting: 'Waiting',
   copying: 'Copying',
   checking: 'Counting both sides',
   matched: 'Matched',
+  stopped: 'Stopped before it was counted',
   review: 'Waiting for your review',
 }
 
+/** The column names: what the rows are, how many match, then the two counts. */
+export function LedgerHead({ name, progress, from }: { name: string; progress: string; from: string }) {
+  return (
+    <div role="row" className={`${GRID} h-[32px] text-[12px] leading-[16px] text-faint`}>
+      <span role="columnheader">{name}</span>
+      <span role="columnheader" className="hidden tabular-nums sm:block">
+        {progress}
+      </span>
+      <span role="columnheader" className="hidden text-right sm:block">
+        {from}
+      </span>
+      <span role="columnheader" className="text-right">
+        Backenly
+      </span>
+      <span role="columnheader">
+        <span className="sr-only">State</span>
+      </span>
+    </div>
+  )
+}
+
 /** A row's state as a glyph, named for screen readers and on hover. */
-function StateGlyph({ phase }: { phase: RowProgress['phase'] | 'review' }) {
+export function StateGlyph({ phase }: { phase: LedgerRowPhase | 'review' }) {
   const word = PHASE_WORD[phase]
   return (
     <span title={word} className="flex h-[16px] w-[16px] items-center justify-center">
       <span className="sr-only">{word}</span>
-      {phase === 'waiting' && <span aria-hidden className="h-[6px] w-[6px] rounded-full border border-zinc-600" />}
+      {(phase === 'waiting' || phase === 'stopped') && (
+        <span aria-hidden className="h-[6px] w-[6px] rounded-full border border-zinc-600" />
+      )}
       {(phase === 'copying' || phase === 'checking') && (
         <span
           aria-hidden
@@ -182,25 +204,39 @@ function StateGlyph({ phase }: { phase: RowProgress['phase'] | 'review' }) {
   )
 }
 
-function LedgerRow({ label, row, mono = false }: { label: string; row: RowProgress; mono?: boolean }) {
+export function LedgerRow({
+  label,
+  row,
+  mono = false,
+  note,
+}: {
+  label: string
+  row: { phase: LedgerRowPhase; done: number; total: number }
+  mono?: boolean
+  /** A fact after the name, faint ("1.2 GB" beside Files). */
+  note?: string
+}) {
   const { phase, done, total } = row
-  const fill = total ? done / total : 0
+  const fill = total ? Math.min(1, done / total) : 0
+  const quiet = phase === 'waiting' || phase === 'stopped'
   return (
     <div role="row" className={`relative ${GRID} h-[34px]`}>
       <span
         role="cell"
+        title={label}
         className={`truncate ${mono ? 'font-mono text-[12px]' : 'text-[13px]'} ${
-          phase === 'waiting' ? 'text-faint' : mono ? 'text-zinc-200' : 'text-zinc-300'
+          quiet ? 'text-faint' : mono ? 'text-zinc-200' : 'text-zinc-300'
         }`}
       >
         {label}
+        {note && <span className="ml-2 font-sans text-[12px] text-faint">{note}</span>}
       </span>
 
       {/* The bar: its own column from sm up; on a phone, the row's bottom rule fills instead. */}
       <span role="cell" aria-hidden className="hidden h-[2px] overflow-hidden rounded-full bg-white/[0.06] sm:block">
         <span
           className={`block h-full origin-left rounded-full transition-[transform,background-color] duration-300 ease-linear motion-reduce:transition-none ${
-            phase === 'matched' ? 'bg-zinc-600' : 'bg-zinc-400'
+            phase === 'matched' || phase === 'stopped' ? 'bg-zinc-600' : 'bg-zinc-400'
           }`}
           style={{ transform: `scaleX(${fill})` }}
         />
@@ -214,10 +250,12 @@ function LedgerRow({ label, row, mono = false }: { label: string; row: RowProgre
         {n(total)}
       </span>
       <span role="cell" className="text-right text-[12.5px] tabular-nums">
-        {phase === 'waiting' ? (
+        {phase === 'waiting' || (phase === 'stopped' && done === 0) ? (
           <span className="text-zinc-600">–</span>
         ) : (
-          <span className={phase === 'matched' ? 'text-zinc-300' : 'text-zinc-50'}>{n(done)}</span>
+          <span className={phase === 'matched' ? 'text-zinc-300' : phase === 'stopped' ? 'text-zinc-400' : 'text-zinc-50'}>
+            {n(done)}
+          </span>
         )}
       </span>
 

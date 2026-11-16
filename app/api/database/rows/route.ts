@@ -7,6 +7,7 @@ import { prisma } from '@/lib/db'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { getWorkspaceMongoDB } from '@/lib/services/workspaceDatabase'
 import { invalidateTableStats } from '@/lib/services/workspace-table-stats'
+import { redactRows } from '@/lib/mcp/read-query'
 import { z } from 'zod'
 
 const querySchema = z.object({
@@ -183,9 +184,18 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
       )
     }
 
+    // Secret-bearing columns (the end-user table's password hash, tokens,
+    // keys) are blanked exactly as the read-only SQL path blanks them
+    // (lib/mcp/read-query.ts redactRows), so the grid cannot show what the SQL
+    // tab withholds. The names travel with the rows: a withheld value and a
+    // NULL look alike in a cell and mean opposite things, and the console keeps
+    // a withheld column out of its edit form.
+    const { rows, redactedColumns } = redactRows(result.data)
+
     return NextResponse.json({
       success: true,
-      data: result.data,
+      data: rows,
+      redactedColumns,
       pagination: {
         total: result.total,
         page: result.page,

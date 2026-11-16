@@ -89,8 +89,14 @@ const HELP = [
 
 export function OrgShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? ''
-  const settingsActive = pathname.startsWith('/app/settings')
   const orgHrefs = useOrgHrefs()
+  // Settings is the organization's own (name, owner, deletion) when there is
+  // an organization, the way Vercel's team sidebar does it; the person's own
+  // account settings stay in the avatar menu. A self-hosted build has no
+  // organizations, so it keeps the account page.
+  const orgBase = orgHrefs.projects.startsWith('/app/org/') ? orgHrefs.projects : null
+  const settingsHref = orgBase ? `${orgBase}/settings` : '/app/settings'
+  const settingsActive = orgBase ? pathname.startsWith(`${orgBase}/settings`) : pathname.startsWith('/app/settings')
   // Org-scoped surfaces take their hrefs from the org-routing seam.
   const hrefOf = (item: (typeof NAV)[number]) => orgHrefs[item.id as keyof typeof orgHrefs]
 
@@ -115,7 +121,7 @@ export function OrgShell({ children }: { children: ReactNode }) {
         <>
           <SidebarPlan billingHref={orgHrefs.billing} />
           <ul>
-            <NavItem href="/app/settings" icon={Settings} label="Settings" active={settingsActive} />
+            <NavItem href={settingsHref} icon={Settings} label="Settings" active={settingsActive} />
           </ul>
         </>
       }

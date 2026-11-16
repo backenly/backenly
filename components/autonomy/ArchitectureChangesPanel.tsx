@@ -44,11 +44,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Layers, Loader2, Pause, Play, Undo2, XCircle } from 'lucide-react'
-import { KitButton, Tag } from '@/components/inspector/kit'
+import { Loader2, Pause, Play, Undo2, XCircle } from 'lucide-react'
+import { KitButton, type GlyphState } from '@/components/inspector/kit'
+import { formatTime } from '@/components/console/format'
 import { Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 import { ADMIN_ONLY, announceArchitectureChange } from './architecture-decisions'
+import { ARCHITECTURE_ICON } from './row-icons'
 
 type Action = 'undo' | 'pause' | 'resume'
 
@@ -62,21 +64,28 @@ type RowState =
 const MAX_ROWS = 5
 
 
-const TONE: Record<ArchitectureChangeView['status']['tone'], 'neutral' | 'warn' | 'violet' | 'good' | 'bad'> = {
-  neutral: 'neutral',
-  attention: 'warn',
-  progress: 'violet',
-  good: 'good',
-  bad: 'bad',
+
+/** "3 h ago", the console's relative time (decision 13). */
+function timeAgo(iso: string): string {
+  return formatTime(iso, 'ago')
 }
 
-function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 5) return 'just now'
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
+/** The status, as the row's lead: ◐ under way, ◆ waits on you, ‖ set aside, ✓ done, ✕ stopped. */
+/** The glyph in words for screen readers; the status itself is the row's first fact. */
+const GLYPH_WORDS: Record<ArchitectureChangeView['status']['tone'], string> = {
+  neutral: 'Set aside',
+  attention: 'Needs you',
+  progress: 'Under way',
+  good: 'Finished',
+  bad: 'Stopped',
+}
+
+const GLYPH: Record<ArchitectureChangeView['status']['tone'], GlyphState> = {
+  neutral: 'paused',
+  attention: 'waiting',
+  progress: 'busy',
+  good: 'done',
+  bad: 'failed',
 }
 
 /** Waiting in the queue above: decided there, not here. */
@@ -198,10 +207,10 @@ function ChangeRow({
 
   return (
     <Row
-      icon={Layers}
-      tone={c.status.tone === 'bad' ? 'danger' : c.status.tone === 'good' ? 'done' : 'neutral'}
+      lead="well"
+      icon={ARCHITECTURE_ICON}
+      tone={GLYPH[c.status.tone] === 'done' || GLYPH[c.status.tone] === 'idle' ? 'done' : 'neutral'}
       busy={busy}
-      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
       title={<p className={ROW_TITLE}>{c.headline}</p>}
       actions={
         queued ? undefined : (
@@ -246,7 +255,7 @@ function ChangeRow({
       {c.waiting && <p className={ROW_TEXT}>{c.waiting}</p>}
       {c.outcome?.plain && <p className={`${ROW_TEXT} !text-zinc-300`}>{c.outcome.plain}</p>}
       <Facts>
-        <Tag tone={TONE[c.status.tone] ?? 'neutral'}>{c.status.label}</Tag>
+        <Fact strong>{c.status.label}</Fact>
         <Fact><span className="tabular-nums">{timeAgo(c.at)}</span></Fact>
       </Facts>
       {queued && <RowNote>Waiting on you in the queue above.</RowNote>}

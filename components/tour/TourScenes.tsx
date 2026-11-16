@@ -225,7 +225,7 @@ function DatabaseScene({ still }: SceneProps) {
               animate={{ opacity: 1, scale: 1 }}
               transition={at(still, 1.6 + i * 0.15, 0.3)}
             >
-              <ShieldCheck className="h-[11px] w-[11px] text-emerald-400" strokeWidth={2} />
+              <ShieldCheck className="h-[11px] w-[11px] text-zinc-300" strokeWidth={2} />
             </motion.span>
           </div>
           <div className="py-[3px]">
@@ -315,15 +315,16 @@ function AutopilotScene({ still }: SceneProps) {
             animate={{ opacity: 1, x: 0 }}
             transition={at(still, 0.45 + i * 0.55, 0.36)}
           >
-            {/* Grey while it is applied and verified, then the outcome's colour. */}
+            {/* Dim while it is applied and verified, then the outcome's brightness:
+                white where it waits for you, mid grey where it is done. */}
             <motion.span
               className="h-[6px] w-[6px] flex-shrink-0 rounded-full"
               initial={still ? false : { backgroundColor: '#52525b' }}
-              animate={{ backgroundColor: fix.held ? '#fbbf24' : '#34d399' }}
+              animate={{ backgroundColor: fix.held ? '#fafafa' : '#d4d4d8' }}
               transition={at(still, 0.8 + i * 0.55, 0.3)}
             />
             <span className="min-w-0 flex-1 truncate text-[12px] text-zinc-300">{fix.what}</span>
-            <span className={`text-[11.5px] ${fix.held ? 'text-amber-200' : 'text-zinc-500'}`}>{fix.outcome}</span>
+            <span className={`text-[11.5px] ${fix.held ? 'font-medium text-zinc-50' : 'text-zinc-500'}`}>{fix.outcome}</span>
           </motion.div>
         ))}
       </div>

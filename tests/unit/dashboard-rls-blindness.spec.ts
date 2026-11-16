@@ -95,11 +95,12 @@ describe('publish refusal names its blockers (P1)', () => {
     expect(s).not.toContain('Details are in the readiness panel.')
   })
 
-  it('the readiness panel sorts failures above passes before capping', () => {
+  it('the readiness panel lists every failing check first, blockers before warnings, and never crops them', () => {
+    // Rebuilt 2026-11-16: failing checks are rows of their own, passing ones behind "Show checks".
     const s = read('app/app/projects/[id]/deploy/page.tsx')
-    expect(s).toContain('const orderedChecks')
-    expect(s).toContain('visibleChecks.map')
+    expect(s).toContain('const failingChecks = [...ran.filter((c) => stopsPublish(c)), ...ran.filter((c) => c.status === \'fail\' && !stopsPublish(c))]')
+    expect(s).toContain('failingChecks.map(checkRow)')
     // The unsorted crop is what hid the blocker.
-    expect(s).not.toContain('readinessChecks.slice(0, 8).map')
+    expect(s).not.toMatch(/failingChecks\.slice\(|readinessChecks\.slice\(0, 8\)\.map/)
   })
 })

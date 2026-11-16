@@ -8,12 +8,12 @@ import type { StatusTone } from '@/components/inspector/kit'
 import type { ChangeOutcomeState, ChangeSummary } from '@/lib/changes/history'
 
 export const OUTCOME: Record<ChangeOutcomeState, { tone: StatusTone; label: string }> = {
-  healthy: { tone: 'operational', label: 'Applied · Verified' },
-  unverified: { tone: 'attention', label: 'Applied · Not verified' },
+  healthy: { tone: 'operational', label: 'Verified' },
+  unverified: { tone: 'attention', label: 'Not verified' },
   recovered: { tone: 'managed', label: 'Recovered automatically' },
   restored: { tone: 'neutral', label: 'Restored' },
   awaiting_approval: { tone: 'attention', label: 'Restore requires approval' },
-  kept: { tone: 'attention', label: 'Kept · Checks failed' },
+  kept: { tone: 'attention', label: 'Kept, checks failed' },
   needs_attention: { tone: 'failed', label: 'Needs attention' },
   in_progress: { tone: 'beta', label: 'In progress' },
   failed: { tone: 'paused', label: 'Not applied' },
@@ -33,7 +33,9 @@ export function awaitsDecision(c: Pick<ChangeSummary, 'outcome'>): boolean {
 
 /**
  * The parts of the backend a change can touch, in the sidebar's order: the
- * History page's filters and each row's label (ChangeSummary.resources).
+ * History page's filter and each row's facts (ChangeSummary.resources).
+ * Function environment values are called secrets everywhere now (project
+ * decision 3); the id stays `env`, so ?part=env links keep working.
  */
 export const RESOURCES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'database', label: 'Database' },
@@ -42,7 +44,7 @@ export const RESOURCES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'functions', label: 'Functions' },
   { id: 'integrations', label: 'Integrations' },
   { id: 'webhooks', label: 'Webhooks' },
-  { id: 'env', label: 'Environment' },
+  { id: 'env', label: 'Secrets' },
   { id: 'keys', label: 'API keys' },
   { id: 'frontends', label: 'Allowed origins' },
 ]
@@ -73,6 +75,7 @@ export const EVENT: Record<string, string> = {
   reconciled: 'Settled after an interruption',
 }
 
+/** Older relative wording, kept for the pages that still import it (Auth email settings). New code uses formatTime. */
 export function ago(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
   if (s < 60) return 'just now'
@@ -82,6 +85,7 @@ export function ago(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+/** Kept for Monitoring's older log explorer. New code uses formatTime. */
 export function when(iso: string): string {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' })
 }
