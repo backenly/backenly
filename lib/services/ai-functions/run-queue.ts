@@ -156,6 +156,26 @@ export async function queuedFunctionRuns(projectId: string): Promise<Map<string,
   return new Map(rows.map((r) => [r.function_id, r.n]))
 }
 
+/**
+ * Drop every run queued for one function, and say how many: called when the
+ * function is switched off. They would not run anyway (the executor refuses a
+ * switched-off function), but they would wait in the queue, be counted in its
+ * backlog and run if it were switched on again, acting on rows as they were
+ * then. Switching back on starts from new row changes, as a paused project's
+ * resume does (discardOutbox). A run already going finishes.
+ */
+export async function discardQueuedRuns(projectId: string, functionId: string): Promise<number> {
+  const schema = workspaceSchemaName(projectId)
+  const db = await workspaceRawClient(projectId)
+  return db
+    .$executeRawUnsafe(`DELETE FROM "${schema}"."${FUNCTION_JOBS_TABLE}" WHERE function_id = $1 AND claimed_at IS NULL`, functionId)
+    .catch((err: any) => {
+      // A project whose queue was never created has nothing queued.
+      if (/does not exist/.test(String(err?.message ?? ''))) return 0
+      throw err
+    })
+}
+
 // ── Pacing ───────────────────────────────────────────────────────────────────
 
 /** A counting semaphore: at most `size` holders, released in arrival order. */
@@ -187,6 +207,8 @@ export interface RunnerOutcome {
   abandoned: number
   /** Jobs put back because the function supervisor had no free slot. */
   deferred: number
+  /** Jobs the plan refused: each dropped its function's queue (runJob). */
+  refused: number
 }
 
 /**
@@ -200,7 +222,7 @@ export function kickFunctionRuns(projectId: string, refill: () => Promise<number
   const runner = workThrough(projectId, refill)
     .catch((err: any) => {
       console.warn(`[functions] queue runner for ${projectId} stopped:`, err?.message ?? err)
-      return { ran: 0, abandoned: 0, deferred: 0 }
+      return { ran: 0, abandoned: 0, deferred: 0, refused: 0 }
     })
     .finally(() => runners.delete(projectId))
   runners.set(projectId, runner)
@@ -208,7 +230,7 @@ export function kickFunctionRuns(projectId: string, refill: () => Promise<number
 }
 
 async function workThrough(projectId: string, refill: () => Promise<number>): Promise<RunnerOutcome> {
-  const outcome: RunnerOutcome = { ran: 0, abandoned: 0, deferred: 0 }
+  const outcome: RunnerOutcome = { ran: 0, abandoned: 0, deferred: 0, refused: 0 }
   for (;;) {
     let drained = false
     let turnedAway = false
@@ -232,6 +254,7 @@ async function workThrough(projectId: string, refill: () => Promise<number>): Pr
             })
             if (result === 'abandoned') outcome.abandoned += 1
             else if (result === 'ran') outcome.ran += 1
+            else if (result === 'refused') outcome.refused += 1
             else if (result === 'busy' || result === 'unavailable') {
               if (result === 'busy') outcome.deferred += 1
               turnedAway = true
@@ -302,7 +325,7 @@ async function putBack(projectId: string, jobId: string): Promise<void> {
  * recorded as a failed run and dropped instead of run again. A job the
  * function supervisor turned away for capacity did not run, and goes back.
  */
-async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'abandoned' | 'busy' | 'unavailable'> {
+async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'abandoned' | 'busy' | 'unavailable' | 'refused'> {
   if (job.attempts > MAX_ATTEMPTS) {
     const { recordFunctionRun } = await import('./run-records')
     await recordFunctionRun({
@@ -320,12 +343,40 @@ async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'aban
     return 'abandoned'
   }
   const { executeAiFunction } = await import('./executor')
-  // Recorded by the executor, success or failure; a throw here leaves the job
-  // claimed, to be claimed again once RECLAIM_AFTER_SECONDS have passed.
-  const result = await executeAiFunction(job.function_id, projectId, job.event)
+  // Recorded by the executor, success or failure, except a refusal for the
+  // plan's limit, recorded below; a throw here leaves the job claimed, to be
+  // claimed again once RECLAIM_AFTER_SECONDS have passed.
+  const result = await executeAiFunction(job.function_id, projectId, job.event, { queued: true })
   if (result.errorCode === 'RUNNER_BUSY') {
     await putBack(projectId, job.id)
     return 'busy'
+  }
+  if (result.errorCode === 'PLAN_LIMIT_EXCEEDED') {
+    // The month's runs are used: nothing still queued for this function can
+    // run before the month ends or the limit rises. Its queue goes, with one
+    // record for all of it, where each queued run used to leave a failed run
+    // of its own (production QA re-test, 2026-11-16, #40). Runs of it that
+    // were already going when it went are refused as they reach the plan, and
+    // the record already said so.
+    await release(projectId, job.id)
+    if (!firstRefusal(job.function_id)) return 'refused'
+    const dropped = await discardQueuedRuns(projectId, job.function_id).catch(() => 0)
+    const { recordFunctionRun } = await import('./run-records')
+    const what = `this ${job.event.type} on ${job.event.table ?? 'a table'}`
+    await recordFunctionRun({
+      functionId: job.function_id,
+      projectId,
+      success: false,
+      logs: [],
+      error:
+        `Not run: ${result.error ?? 'the plan allows no more function runs this month.'} ` +
+        (dropped > 0
+          ? `So ${what} and the ${dropped.toLocaleString('en-US')} ${dropped === 1 ? 'run' : 'runs'} still queued for this function were dropped.`
+          : `So ${what} was dropped.`),
+      durationMs: 0,
+      triggerType: job.event.type,
+    })
+    return 'refused'
   }
   // Functions cannot run here at all (the executor recorded why): left claimed,
   // so a supervisor that is restarting gets it again after RECLAIM_AFTER_SECONDS,
@@ -333,6 +384,23 @@ async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'aban
   if (result.errorCode === 'RUNNER_UNAVAILABLE') return 'unavailable'
   await release(projectId, job.id)
   return 'ran'
+}
+
+/** When each function's queue was last dropped for the plan's limit, in this process. */
+const refusedAt = new Map<string, number>()
+const REFUSAL_WINDOW_MS = 60_000
+
+/**
+ * Whether this refusal is the first for the function in the last minute, the
+ * one that drops its queue and writes the record. Only the region's scheduler
+ * leader runs the queue (lib/scheduler/leader.ts), so this process sees them all.
+ */
+function firstRefusal(functionId: string): boolean {
+  const now = Date.now()
+  for (const [id, at] of refusedAt) if (now - at >= REFUSAL_WINDOW_MS) refusedAt.delete(id)
+  if (refusedAt.has(functionId)) return false
+  refusedAt.set(functionId, now)
+  return true
 }
 
 /** For tests: the runners going in this process, and the slots taken. */
@@ -353,4 +421,108 @@ export async function rowEventFunctions(
     where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: { in: triggerTypes } },
     select: { id: true, triggerType: true, triggerTable: true },
   })
+}
+
+// ── The month's runs ─────────────────────────────────────────────────────────
+
+const PLURAL: Record<string, string> = { insert: 'inserts', update: 'updates', delete: 'deletes' }
+
+/**
+ * Which of a drain batch's runs to queue, by the function runs the project's
+ * billing account has left this month, and the records that say so
+ * (production QA re-test, 2026-11-16, #40: one 32,000-row insert queued about
+ * 32,000 runs where Free includes 10,000 a month, and nothing said so).
+ *
+ *   - None left: nothing is queued, and each function gets one "Not run"
+ *     record for the batch, saying how many row changes it missed.
+ *   - Fewer left than the queue would hold with this batch: everything is
+ *     queued, and each function in the batch gets one notice, once, as the
+ *     queue passes what is left. When the runs are used, the first refusal
+ *     drops the rest of that function's queue with one record (runJob).
+ *
+ * The plan still decides each run as it starts (executeAiFunction); this only
+ * keeps runs the month cannot pay for out of the queue. `record` writes the
+ * records, and is called once the batch has been queued.
+ */
+export async function admitWithinAllowance(
+  projectId: string,
+  jobs: FunctionJob[],
+): Promise<{ admit: FunctionJob[]; record: () => Promise<void> }> {
+  const nothing = { admit: jobs, record: async () => {} }
+  if (jobs.length === 0) return nothing
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true, organizationId: true } })
+  const { accountOf } = await import('@/lib/usage/account')
+  const account = project ? accountOf(project) : null
+  if (!account) return nothing
+  const { functionRunsLeft } = await import('@/lib/entitlements/policy')
+  const runs = await functionRunsLeft(account)
+  if (!runs) return nothing
+
+  const byFunction = new Map<string, { count: number; type: string; table: string }>()
+  for (const job of jobs) {
+    const group = byFunction.get(job.functionId) ?? { count: 0, type: job.event.type, table: job.event.table ?? 'a table' }
+    group.count += 1
+    byFunction.set(job.functionId, group)
+  }
+  const { planDisplayName } = await import('@/lib/entitlements/plan-names')
+  const plan = `${planDisplayName(runs.planName)} plan`
+  const cap = runs.cap.toLocaleString('en-US')
+  const { recordFunctionRun } = await import('./run-records')
+
+  if (runs.left <= 0) {
+    return {
+      admit: [],
+      record: async () => {
+        for (const [functionId, g] of byFunction) {
+          await recordFunctionRun({
+            functionId,
+            projectId,
+            success: false,
+            logs: [],
+            error:
+              `Not run: ${g.count.toLocaleString('en-US')} ${g.count === 1 ? g.type : PLURAL[g.type] ?? `${g.type}s`} on ${g.table} ` +
+              `arrived after this month's ${cap} function runs were used (${plan}), so no run was queued for ${g.count === 1 ? 'it' : 'them'}.`,
+            durationMs: 0,
+            triggerType: g.type,
+          })
+        }
+      },
+    }
+  }
+
+  const waiting = await queuedRunCount(projectId)
+  if (waiting <= runs.left && waiting + jobs.length > runs.left) {
+    const total = (waiting + jobs.length).toLocaleString('en-US')
+    const left = runs.left.toLocaleString('en-US')
+    return {
+      admit: jobs,
+      record: async () => {
+        for (const [functionId, g] of byFunction) {
+          await recordFunctionRun({
+            functionId,
+            projectId,
+            success: true,
+            logs: [
+              `Row changes on ${g.table} have queued ${total} function runs in this project, more than the ${left} of this ` +
+                `month's ${cap} the account has left (${plan}). Once those are used, the runs still queued are dropped, not run.`,
+            ],
+            error: null,
+            durationMs: 0,
+            triggerType: 'notice',
+          })
+        }
+      },
+    }
+  }
+  return nothing
+}
+
+/** Every run in a project's queue, started or not. A project with no queue has none. */
+async function queuedRunCount(projectId: string): Promise<number> {
+  const schema = workspaceSchemaName(projectId)
+  const db = await workspaceRawClient(projectId)
+  const rows = await db
+    .$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM "${schema}"."${FUNCTION_JOBS_TABLE}"`)
+    .catch(() => [] as Array<{ n: number }>)
+  return rows[0]?.n ?? 0
 }

@@ -572,9 +572,20 @@ async function drainProject(projectId: string): Promise<number> {
     }
   }
 
+  // Runs the month's allowance cannot pay for are not queued, and a burst
+  // larger than what is left says so (run-queue.ts admitWithinAllowance).
+  // Should the allowance not be readable, every run is queued: each is still
+  // checked against the plan as it starts.
+  const { admitWithinAllowance } = await import('@/lib/services/ai-functions/run-queue')
+  const { admit, record } = await admitWithinAllowance(projectId, functionJobs).catch((err: any) => {
+    console.warn(`[capture] function runs left for ${projectId} could not be read:`, err?.message ?? err)
+    return { admit: functionJobs, record: async () => {} }
+  })
+
   // The functions' jobs and the end of these rows, together: an event is
   // either still here or queued for its functions, never neither.
-  await enqueueReleasingOutbox(projectId, functionJobs, OUTBOX_TABLE, deliveredIds)
+  await enqueueReleasingOutbox(projectId, admit, OUTBOX_TABLE, deliveredIds)
+  await record().catch(() => {})
 
   return deliveredIds.length
 }

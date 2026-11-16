@@ -23,6 +23,7 @@ import { isRouteModuleFunction, usesAsService, validateRouteModule } from './rou
 import { FunctionRunnerBusyError, FunctionRunnerUnavailableError } from './isolation/client'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
+import { perRowSentence, runsPerRow } from './row-runs'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { functionNameForms, resolveFunctionByName } from './names'
 import { integrationsUsedBy, missingIntegrations } from './integration-use'
@@ -588,6 +589,7 @@ export async function deployFunctionCode(
       `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
       (columns ? `, run only when ${columns.join(' or ')} changes` : '') +
+      (runsPerRow(fn.triggerType) ? `. ${perRowSentence(fn.triggerType)}` : '') +
       missingIntegrationDeployNote(missing) +
       (runsAsService
         ? '. Its asService blocks run as the service role, so row-level security does not apply to their SQL: check who is calling before one runs'

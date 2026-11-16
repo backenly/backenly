@@ -457,6 +457,28 @@ export async function enforceAiFunctionInvocation(billingAccountId: string): Pro
 }
 
 /**
+ * The function runs an account can still start this month, by the rule
+ * enforceAiFunctionInvocation applies to each run: the plan's included runs,
+ * or the spend limit's cap past them. Null when the plan sets no limit.
+ *
+ * The run queue reads it before it queues a burst of row-event runs
+ * (lib/services/ai-functions/run-queue.ts), so runs the month cannot pay for
+ * are not queued at all, and a burst larger than what is left says so.
+ */
+export async function functionRunsLeft(
+  billingAccountId: string,
+): Promise<{ left: number; cap: number; planName: string } | null> {
+  const ent = await getAccountEntitlements(billingAccountId)
+  if (!ent) return { left: 0, cap: 0, planName: 'NONE' }
+  const max = ent.maxAiFunctionInvocationsPerMonth
+  if (max === null) return null
+  const usage = await getMonthlyUsage(billingAccountId)
+  const { effectiveCap } = await import('@/lib/usage/overage')
+  const cap = await effectiveCap(billingAccountId, 'fn_runs', max, ent)
+  return { left: Math.max(0, cap - usage.aiFunctionInvocations), cap, planName: ent.planName }
+}
+
+/**
  * @deprecated Realtime connection caps are enforced by the ListenerHub
  * (lib/realtime/listener-hub.ts) via lib/quota/kernel.ts
  * enforceRealtimeConnection. This wrapper delegates so any legacy caller

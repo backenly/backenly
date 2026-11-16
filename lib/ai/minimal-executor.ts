@@ -12324,6 +12324,7 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
 async function executeListAiFunctions(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
+    const { runsPerRow } = await import('@/lib/services/ai-functions/row-runs')
     // ── The SOURCE and the LAST ERROR are part of the answer ───────────────────
     //
     // This used to select metadata only. Combined with `{"error":"internal_error"}`
@@ -12397,7 +12398,7 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
       return (
         `• **${fn.name}** (${fn.status}) — ${fn.description.slice(0, 80)}${fn.description.length > 80 ? '…' : ''}\n` +
         `  ${c.method} ${fn.url}\n` +
-        `  Trigger: \`${fn.triggerType}${fn.triggerTable ? ':' + fn.triggerTable : ''}\` · Runs: ${fn.runCount}` +
+        `  Trigger: \`${fn.triggerType}${fn.triggerTable ? ':' + fn.triggerTable : ''}\`${runsPerRow(fn.triggerType) ? ' (once per row: a bulk write runs it for every row)' : ''} · Runs: ${fn.runCount}` +
         contractLine +
         (fn.lastError ? `\n  ⚠ Last error: ${fn.lastError.slice(0, 160)}` : '')
       )

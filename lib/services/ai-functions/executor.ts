@@ -136,6 +136,12 @@ export interface FunctionCallerContext {
    * word would make the next run test something it never wrote or saw.
    */
   selfHeal?: boolean
+  /**
+   * Started from the row-event run queue. A refusal for the plan's limit is
+   * then recorded by the queue, once for every run of the function it drops
+   * (lib/services/ai-functions/run-queue.ts), not once per run here.
+   */
+  queued?: boolean
 }
 
 /** A sandbox body's own budget inside the runner; the run is killed a little after it. */
@@ -843,8 +849,9 @@ export async function executeAiFunction(
       // A quota block must still leave a trace: trigger-fired functions
       // (on_signup/on_insert/...) swallow errors, so without a log row the
       // block is invisible everywhere. Do NOT flip status/lastError — the
-      // function itself is fine; the plan is the constraint.
-      await persistExecutionLog(functionId, projectId, false, [], decision.message, 0, event.type)
+      // function itself is fine; the plan is the constraint. A queued run's
+      // trace is the queue's, one for all the runs it drops.
+      if (!caller.queued) await persistExecutionLog(functionId, projectId, false, [], decision.message, 0, event.type)
       return {
         success: false,
         logs: [],
