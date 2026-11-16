@@ -134,7 +134,6 @@ const NEEDS_APPROVAL = new Set<FindingType>([
   'oauth_redirect_uri_missing',   // Redirect URI change requires IdP confirmation
   'dead_api_endpoint',            // Removing an endpoint may break existing clients
   'deploy_failure',               // Deployment decisions belong to the project owner
-  'auth_spike',                   // Anomalous auth traffic — needs human investigation
   // Auth mutations are never auto-executed — safety contract
   'auth_jwt_missing',             // Restoring a JWT secret changes auth for all end-users
   'auth_users_table_missing',     // Creating the users table bootstraps the auth subsystem
@@ -275,6 +274,24 @@ export function classifyFix(
       reason:
         'This table is taking heavy sequential scans, but Backenly could not identify a column ' +
         'it is safe to index on its own. Pick the column your queries filter or sort by.',
+    }
+  }
+
+  // ── Failed sign-ins ────────────────────────────────────────────────────────
+  //
+  // notify_only: there is nothing in the backend to repair. The sign-in limits
+  // (lib/security/end-user-signin-limit.ts) already refuse repeated failures
+  // from one address and against one account; what is left is for the owner to
+  // judge, a client sending stale credentials or someone trying passwords. It
+  // was rated approval and mapped to FIX_AUTH, which re-checks auth
+  // configuration that a run of wrong passwords says nothing about: an
+  // "Approve & fix" that could change nothing (production QA, 2026-11-16).
+  if (type === 'auth_spike') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Most password sign-ins are failing. Backenly already refuses repeated failures from one ' +
+        'address and against one account, and there is nothing in the backend to change.',
     }
   }
 
@@ -586,7 +603,6 @@ const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
   oauth_redirect_uri_missing:   'Changing redirect URIs requires confirmation from the identity provider.',
   dead_api_endpoint:            'Removing an endpoint may break existing client integrations.',
   deploy_failure:               'Deployment decisions should be made by the project owner.',
-  auth_spike:                   'Anomalous authentication traffic requires human investigation before acting.',
   auth_jwt_missing:             'Restoring or rotating a JWT secret invalidates all existing end-user sessions — project owner must confirm.',
   auth_users_table_missing:     'Creating the users table bootstraps the entire auth subsystem — project owner must confirm before activation.',
   unused_index:                 'Backenly measured that PostgreSQL never used this index, but only you know whether something that runs rarely still needs it.',

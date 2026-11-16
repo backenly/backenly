@@ -142,7 +142,7 @@ const GUARDRAIL_GATED_TYPES = new Set([
   'broken_webhook', 'broken_auth', 'integration_key_invalid',
   'integration_webhook_failing', 'integration_smtp_unreachable',
   'oauth_config_invalid', 'oauth_redirect_uri_missing', 'dead_api_endpoint',
-  'deploy_failure', 'auth_spike', 'auth_jwt_missing', 'auth_users_table_missing',
+  'deploy_failure', 'auth_jwt_missing', 'auth_users_table_missing',
 ])
 
 /**
