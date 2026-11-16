@@ -27,6 +27,9 @@ import {
 import { looksFabricated, verificationLabel } from '@/lib/integrations/key-verification'
 import { ADVERTISED_CAP, buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
 
+// Made-up Stripe keys, built from parts so secret scanners don't take them for real ones.
+const SK_LIVE = 'sk_' + 'live_'
+
 // ── #26 / #46 — ownership inference ──────────────────────────────────────────
 
 /** The e-commerce schema from the report: users ← orders ← order_items. */
@@ -178,7 +181,7 @@ describe('fabricated credentials are refused before they reach a provider', () =
   })
 
   it('does not reject a realistic high-entropy key', () => {
-    expect(looksFabricated('sk_live_51H8xQ2KzP9mWvR3tYbN7cLdF')).toBeNull()
+    expect(looksFabricated(SK_LIVE + '51H8xQ2KzP9mWvR3tYbN7cLdF')).toBeNull()
   })
 
   it('never labels an unconfirmed credential as connected', () => {
