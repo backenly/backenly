@@ -43,6 +43,7 @@ import {
   type IsolatedOutcome,
 } from './isolation/client'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
+import { NOT_RUN } from './record-kinds'
 import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
 import { recordUsage } from '@/lib/usage/ledger'
@@ -849,9 +850,11 @@ export async function executeAiFunction(
       // A quota block must still leave a trace: trigger-fired functions
       // (on_signup/on_insert/...) swallow errors, so without a log row the
       // block is invisible everywhere. Do NOT flip status/lastError — the
-      // function itself is fine; the plan is the constraint. A queued run's
-      // trace is the queue's, one for all the runs it drops.
-      if (!caller.queued) await persistExecutionLog(functionId, projectId, false, [], decision.message, 0, event.type)
+      // function itself is fine; the plan is the constraint. So the trace is a
+      // run that did not happen, which nothing counts as the function failing
+      // (record-kinds.ts). A queued run's trace is the queue's, one for all
+      // the runs it drops.
+      if (!caller.queued) await persistExecutionLog(functionId, projectId, false, [], `Not run: ${decision.message}`, 0, NOT_RUN)
       return {
         success: false,
         logs: [],

@@ -48,6 +48,7 @@ import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import type { FunctionEvent } from './executor'
 import { RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
+import { NOT_RUN, NOTICE } from './record-kinds'
 
 /** The queue, one per workspace schema, beside the capture outbox. Leading underscore: never served by the API. */
 export const FUNCTION_JOBS_TABLE = '_backenly_function_jobs'
@@ -374,7 +375,8 @@ async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'aban
           ? `So ${what} and the ${dropped.toLocaleString('en-US')} ${dropped === 1 ? 'run' : 'runs'} still queued for this function were dropped.`
           : `So ${what} was dropped.`),
       durationMs: 0,
-      triggerType: job.event.type,
+      // A run that did not happen, not a failure of the function (record-kinds.ts).
+      triggerType: NOT_RUN,
     })
     return 'refused'
   }
@@ -483,7 +485,7 @@ export async function admitWithinAllowance(
               `Not run: ${g.count.toLocaleString('en-US')} ${g.count === 1 ? g.type : PLURAL[g.type] ?? `${g.type}s`} on ${g.table} ` +
               `arrived after this month's ${cap} function runs were used (${plan}), so no run was queued for ${g.count === 1 ? 'it' : 'them'}.`,
             durationMs: 0,
-            triggerType: g.type,
+            triggerType: NOT_RUN,
           })
         }
       },
@@ -508,7 +510,7 @@ export async function admitWithinAllowance(
             ],
             error: null,
             durationMs: 0,
-            triggerType: 'notice',
+            triggerType: NOTICE,
           })
         }
       },

@@ -17,6 +17,8 @@
  *  2. With no runs left, row changes queue no run, and each drain batch leaves
  *     one "Not run" record for the function.
  *  3. deploy_code and the function list say a row function runs once per row.
+ *  4. Those records are not runs: a function that only stopped at the cap is
+ *     not reported as failing, and the run log says "not run", not "FAILED".
  */
 
 import { randomUUID } from 'crypto'
@@ -36,6 +38,9 @@ import { executeInWorkspaceSchema, queryWorkspaceSchema } from '@/lib/services/w
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { deployFunctionCode } from '@/lib/services/ai-functions/agent-actions'
 import { executeAction } from '@/lib/ai/minimal-executor'
+import { listFunctionLogs } from '@/lib/services/ai-functions/agent-actions'
+import { executeAiFunction } from '@/lib/services/ai-functions/executor'
+import { detectFailingFunctions } from '@/lib/autonomy/function-failures'
 
 // One run at a time, so each run starts after the one before it was counted.
 // Set before the queue is loaded, which reads it once.
@@ -90,7 +95,7 @@ beforeAll(async () => {
   projectId = (await prisma.project.create({ data: { name: `fn-allowance-${randomUUID().slice(0, 8)}`, userId: ownerId }, select: { id: true } })).id
   schema = workspaceSchemaName(projectId)
   await prisma.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`)
-  for (const table of ['orders', 'refunds']) {
+  for (const table of ['orders', 'refunds', 'views']) {
     await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."${table}" (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n integer NOT NULL)`)
   }
   await ensureFunctionJobs(projectId)
@@ -143,7 +148,7 @@ it('queues no run once the month’s runs are used, and leaves one record per dr
   expect(records).toHaveLength(1)
   expect(records[0]).toMatchObject({
     success: false,
-    triggerType: 'insert',
+    triggerType: 'not_run',
     error: "Not run: 12 inserts on refunds arrived after this month's 50 function runs were used (Free plan), so no run was queued for them.",
   })
 }, 120_000)
@@ -161,3 +166,26 @@ it('says in deploy_code and in the list that a row function runs once per row', 
   const list = (await executeAction({ action: 'LIST_AI_FUNCTIONS', params: {} } as any, projectId, undefined, 0, undefined, false)) as any
   expect(list.message).toMatch(/\*\*audit-refund\*\*[\s\S]*?Trigger: `on_db_insert:refunds` \(once per row: a bulk write runs it for every row\)/)
 }, 60_000)
+
+it('reports no failing function for one that only stopped at the cap, and says "not run" in its log', async () => {
+  const id = await deploy('count-view', 'views')
+  await used(CAP)
+  // Three drain batches at the cap, and three calls the plan refuses.
+  for (let batch = 1; batch <= 3; batch++) {
+    await executeInWorkspaceSchema(projectId, `INSERT INTO "${schema}"."views" (n) SELECT g FROM generate_series(1, 4) g`)
+    await drainWebhookOutbox()
+    await settled()
+    expect((await executeAiFunction(id, projectId, { type: 'manual', data: {} })).errorCode).toBe('PLAN_LIMIT_EXCEEDED')
+  }
+
+  // Not a failing function: its code never ran.
+  expect((await detectFailingFunctions(projectId)).filter((f) => f.details.functionId === id)).toEqual([])
+
+  const records = await runsOf(id)
+  expect(records).toHaveLength(6)
+  expect(records.every((r) => !r.success && r.triggerType === 'not_run' && r.error?.startsWith('Not run: '))).toBe(true)
+
+  const logs = await listFunctionLogs({ userId: ownerId, projectId }, { name: 'count-view' })
+  expect(logs.summary).toContain('count-view: not run, Not run: 4 inserts on views arrived after')
+  expect(logs.summary).not.toMatch(/count-view: FAILED/)
+}, 120_000)

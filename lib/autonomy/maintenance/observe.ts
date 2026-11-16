@@ -32,6 +32,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { NOT_A_RUN } from '@/lib/services/ai-functions/record-kinds'
 
 /** Relative error-rate worsening that counts as a regression. */
 export const ERROR_RATE_TOLERANCE = 0.02
@@ -87,7 +88,8 @@ export async function measureWindow(
 
   const fnRuns = await prisma.aiFunctionLog
     .findMany({
-      where: { projectId, createdAt: { gte: from, lt: to } },
+      // Runs only: not the records of runs that did not happen, or notices.
+      where: { projectId, createdAt: { gte: from, lt: to }, triggerType: { notIn: [...NOT_A_RUN] } },
       select: { success: true },
     })
     .catch(() => [] as Array<{ success: boolean }>)
