@@ -1236,6 +1236,11 @@ tests/integration/db-doors-agree.spec.ts
 # on load and fixes only on an explicit action. Real project, users table and
 # function rows are the property.
 tests/integration/readiness-reads-never-write.spec.ts
+
+# Deploy readiness and a build's own check call functions functions: the
+# trigger check keeps its id and says "Function trigger configuration … All 2
+# functions" (production QA re-test, 2026-11-16, #47).
+tests/integration/deploy-readiness-says-functions.spec.ts
 # The pages that show readiness (the Overview's /build-status, the Deploy
 # page's GET /readiness) reuse a recent behavioral verification of the backend
 # as it is now: three reads at once verify once, a governed change, five

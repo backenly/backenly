@@ -160,7 +160,7 @@ describe('a function', () => {
     })
     expect(created.summary).toBe('Created function sendWelcome')
     const rewritten = await change('rewrite sendWelcome', () => prisma.aiFunction.update({ where: { id: fnId }, data: { generatedCode: 'v2', status: 'inactive' } }))
-    expect(rewritten.summary).toBe('Changed function sendWelcome: generated code, turned off')
+    expect(rewritten.summary).toBe('Changed function sendWelcome: code, turned off')
     expect(await restore(rewritten.id)).toMatchObject({ ok: true })
     expect(await prisma.aiFunction.findUnique({ where: { id: fnId } })).toMatchObject({ generatedCode: 'v1', status: 'active' })
 
