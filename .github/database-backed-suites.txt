@@ -2352,3 +2352,9 @@ tests/integration/verifier-database-checks-write-nothing.spec.ts
 # limit in middleware.ts, the v2 route's own refusals, a stored file's public
 # address) as well as the runtime's. Real middleware, Next routes and runtime.
 tests/integration/error-envelope-every-door.spec.ts
+# Backenly's own check accounts do not stay in a project's users table: the
+# contract sweep removes stale ones (exact addresses only, never a person's),
+# run_test purges a sign-up it gave up on again later, the build verifier
+# removes its users, and the report lists and removes leftovers. Real project,
+# users table and runtime.
+tests/integration/check-accounts-are-removed.spec.ts
