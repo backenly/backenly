@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 test('opens with an explanation rather than a blank pane', async ({ page }) => {
-  await expect(page.getByText('Run a query to see results.')).toBeVisible()
+  await expect(page.getByText(/^Reads only\./)).toBeVisible()
   // The page states where the restriction actually lives, so nobody reads the
   // editor's behaviour as the security model.
   await expect(page.getByText(/refused by the database, not by this page/i)).toBeVisible()
@@ -41,7 +41,7 @@ test('a SELECT round-trips and reports its timing', async ({ page }) => {
 
   // The value, in a results table.
   await expect(page.getByRole('columnheader', { name: 'one' })).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByText(/1 row ·/)).toBeVisible()
+  await expect(page.getByText('1 row', { exact: true })).toBeVisible()
 })
 
 test('a refused write names the governed path instead of only refusing', async ({ page }) => {
@@ -58,7 +58,11 @@ test('a refused write names the governed path instead of only refusing', async (
 })
 
 test('the history remembers a query that ran, and can be cleared', async ({ page }) => {
+  // History is a menu in the SQL toolbar (rebuilt 2026-11-16).
+  const history = page.getByRole('button', { name: 'History', exact: true })
+  await history.click()
   await expect(page.getByText('Queries you run appear here.')).toBeVisible()
+  await history.click()
 
   await page.getByLabel('SQL query').fill('SELECT 2 AS two')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
@@ -66,13 +70,16 @@ test('the history remembers a query that ran, and can be cleared', async ({ page
 
   // Only successful queries are remembered; a refused one is not a query that
   // ran, and offering it back would be offering a mistake.
-  const clear = page.getByRole('button', { name: 'Clear query history' })
+  await history.click()
+  const clear = page.getByRole('menuitem', { name: 'Clear history' })
   await expect(clear).toBeVisible()
   await clear.click()
+  await history.click()
   await expect(page.getByText('Queries you run appear here.')).toBeVisible()
 })
 
 test('a snippet fills the editor', async ({ page }) => {
-  await page.getByRole('button', { name: 'Tables and row estimates' }).click()
+  await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Tables and row estimates' }).click()
   await expect(page.getByLabel('SQL query')).toHaveValue(/pg_stat_user_tables/)
 })

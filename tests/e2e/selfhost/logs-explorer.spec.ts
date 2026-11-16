@@ -27,9 +27,10 @@ test('logs is a tab on monitoring, not a page nobody links to', async ({ page })
   await tab.click()
 
   // The filter bar is the part that exists in every state, including empty.
+  // (Rebuilt 2026-11-16: the pane's toolbar names its selects Source and Level.)
   await expect(page.getByLabel('Search logs')).toBeVisible()
-  await expect(page.getByLabel('Filter by type')).toBeVisible()
-  await expect(page.getByLabel('Filter by severity')).toBeVisible()
+  await expect(page.getByLabel('Source', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Level', { exact: true })).toBeVisible()
 })
 
 test('a fresh deployment shows the logs empty state, not the monitoring one', async ({ page }) => {
@@ -42,32 +43,34 @@ test('a fresh deployment shows the logs empty state, not the monitoring one', as
   await expect(page.getByText('Nothing to watch yet')).toHaveCount(0)
 
   // Either rows or one of the two empty states. All three are correct
-  // outcomes; a blank panel is not.
-  const table = page.locator('table')
-  const emptyNoLogs = page.getByText('No logs yet')
+  // outcomes; a blank panel is not. Entries are list items, grouped by day.
+  const rows = page.locator('section[aria-label="Logs"] li')
+  const emptyNoLogs = page.getByText(/No logs in the last/)
   const emptyFiltered = page.getByText('No logs match these filters')
-  await expect(table.or(emptyNoLogs).or(emptyFiltered).first()).toBeVisible({ timeout: 30_000 })
+  await expect(rows.first().or(emptyNoLogs).or(emptyFiltered).first()).toBeVisible({ timeout: 30_000 })
 })
 
 test('filtering to a severity with nothing in it offers a way back', async ({ page }) => {
   await page.getByRole('tab', { name: 'Logs', exact: true }).click()
-  await expect(page.getByLabel('Filter by severity')).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByLabel('Level', { exact: true })).toBeVisible({ timeout: 30_000 })
 
-  await page.getByLabel('Filter by severity').selectOption('debug')
-  await page.getByLabel('Filter by type').selectOption('function')
+  await page.getByLabel('Level', { exact: true }).selectOption('debug')
+  await page.getByLabel('Source', { exact: true }).selectOption('function')
 
   // "Nothing matches your filters" and "nothing exists" are different
   // situations needing different actions, and only the first can offer a
   // clear-filters button that means anything.
   const cleared = page.getByRole('button', { name: /clear/i })
-  const rows = page.locator('tbody tr')
+  const rows = page.locator('section[aria-label="Logs"] li')
   const filteredEmpty = page.getByText('No logs match these filters')
 
   await expect(filteredEmpty.or(rows.first())).toBeVisible({ timeout: 30_000 })
+  // The way back is offered exactly where it means something: on the empty,
+  // filtered result. With matching rows there is nothing to clear back to.
   if (await filteredEmpty.isVisible()) {
     await expect(page.getByRole('button', { name: 'Clear filters' })).toBeVisible()
+    await expect(cleared.first()).toBeVisible()
   }
-  await expect(cleared.first()).toBeVisible()
 })
 
 test('the tab survives a reload of the monitoring page', async ({ page }) => {

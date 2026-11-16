@@ -267,7 +267,7 @@ export function SqlWorkspace({ projectId, table = null }: { projectId: string; t
               <Spinner className="h-3.5 w-3.5" /> Running
             </p>
           ) : !result ? (
-            <p className="px-[16px] py-[14px] text-[12.5px] leading-[18px] text-faint sm:px-[20px]">Reads only: SELECT, WITH and EXPLAIN. Ask your agent for changes.</p>
+            <p className="px-[16px] py-[14px] text-[12.5px] leading-[18px] text-faint sm:px-[20px]">Reads only. Writes are refused by the database, not by this page. Ask your agent to make changes.</p>
           ) : (
             <>
               <div className={`flex min-h-[38px] flex-wrap items-center gap-x-[14px] gap-y-[4px] border-b ${RULE} px-[16px] py-[6px] text-[12.5px] tabular-nums text-faint sm:px-[20px]`}>

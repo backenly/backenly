@@ -155,8 +155,9 @@ test.describe('empty states are honest, not fabricated', () => {
     await page.goto(`/app/projects/${projectId()}/monitoring`)
     await page.getByRole('tab', { name: 'Logs', exact: true }).click()
 
-    const table = page.locator('tbody tr')
-    const empty = page.getByText('No logs yet')
+    // Entries are list items grouped by day; the empty state names the range.
+    const table = page.locator('section[aria-label="Logs"] li')
+    const empty = page.getByText(/No logs in the last/)
 
     // One or the other. Rows would mean real recorded activity; the empty
     // state would mean none. A table of plausible-looking sample rows is the
