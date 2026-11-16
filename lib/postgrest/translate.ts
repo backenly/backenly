@@ -334,6 +334,14 @@ const UPSERT_TARGET_HINT =
   'or CREATE UNIQUE INDEX … WHERE true.'
 
 /**
+ * PGRST002 once the gateway's own retries are spent. Says the request did not
+ * run, because for a write that is what the caller needs to know before
+ * sending it again.
+ */
+const SCHEMA_CACHE_REFUSAL_MESSAGE =
+  'The data plane is reloading its schema cache and did not run this request. Retry in a second.'
+
+/**
  * The API's code for a database error in PG_STATUS. A value of the wrong type,
  * format or length, or for a column the table does not have, is about the
  * request's values, as /database/insert says (lib/api/v1/data-errors.ts); only
@@ -427,13 +435,18 @@ export function toApiError(
     }
   }
 
-  // PGRST002 — the schema cache failed to build. Instance-wide, not caller's
-  // fault, and clears only on a restart (see lib/postgrest/health.ts).
+  // PGRST002 — PostgREST's schema cache is empty because a reload failed. Not
+  // the caller's fault, and usually brief: PostgREST tries the reload again 1 s
+  // later, backing off to every 32 s while it keeps failing (v14.15,
+  // AppState.hs retryingSchemaCacheLoad). The request never ran, since
+  // PostgREST refuses it before reading the body, so the gateway has already
+  // sent it again for about 2 s (lib/postgrest/schema-cache-retry.ts); this is
+  // the answer once that budget is spent, with Retry-After: 1.
   if (pgCode === 'PGRST002') {
     return {
       status: 503,
       body: {
-        error: 'The data plane is temporarily unavailable.',
+        error: SCHEMA_CACHE_REFUSAL_MESSAGE,
         code: 'DATA_PLANE_UNAVAILABLE',
       },
     }
@@ -532,7 +545,7 @@ export function stripUpstreamError(
         message:
           pgCode === 'PGRST106'
             ? 'This project\'s data plane is still being provisioned. Retry shortly.'
-            : 'The data plane is temporarily unavailable.',
+            : SCHEMA_CACHE_REFUSAL_MESSAGE,
       },
     }
   }
