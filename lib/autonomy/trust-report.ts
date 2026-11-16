@@ -34,6 +34,7 @@ import { resolveExecutionMode, type ExecutionModeState } from './execution-mode'
 import { ARCHITECTURE_LOG_TYPE, MILESTONE_ACTION } from '@/lib/evolution-engine/memory'
 import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 import { describeProposal } from './ai-proposals'
+import { withoutStaleDiagnosis } from './finding-fingerprint'
 
 export interface TrustScoreboard {
   windowDays: number
@@ -650,7 +651,9 @@ export async function buildTrustReport(
   for (const pr of proposals) if (!proposalByFinding.has(pr.findingId)) proposalByFinding.set(pr.findingId, pr)
 
   const pendingApprovals: PendingApproval[] = pending.map(p => {
-    const raw = (p.details ?? {}) as Record<string, any>
+    // A diagnosis made from evidence the row no longer carries is not served
+    // (lib/autonomy/finding-fingerprint.ts), judged on the details as stored.
+    const raw = withoutStaleDiagnosis(p.type, (p.details ?? {}) as Record<string, any>)
     // Legacy pending rows stored executor params unredacted; never serve them.
     const det = raw.executorParams
       ? { ...raw, executorParams: redactSecretParams(raw.executorParams), executorParamsSealed: undefined }
