@@ -167,10 +167,12 @@ describe('a new key', () => {
     expect((await res.json()).code).toBe('ADMIN_KEY_NEEDS_SERVICE_ROLE')
   })
 
-  it('says what it is, not just "public"', async () => {
+  it('says what it is, not "public"', async () => {
     const res = await create({ name: 'server', role: 'admin', serviceRole: true, projectId })
     expect(res.status).toBe(201)
-    expect((await res.json()).apiKey).toMatchObject({ keyType: 'public', kind: 'service' })
+    const { apiKey } = await res.json()
+    expect(apiKey).toMatchObject({ kind: 'service' })
+    expect(apiKey).not.toHaveProperty('keyType')
   })
 })
 

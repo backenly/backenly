@@ -2308,3 +2308,8 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# Every API keys response names the key by its kind and never by keyType
+# ("public" for every project key); the list says the window that decides each
+# key's requests. Real key rows through the create, list, read, change and
+# rotate routes.
+tests/integration/key-responses-say-what-the-key-is.spec.ts

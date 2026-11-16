@@ -8,7 +8,7 @@ import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
 import { keyKind, mintKey } from '@/lib/auth/key-prefix'
-import { isSharedKey } from '@/lib/security/shared-key'
+import { clientWindowOf, isSharedKey } from '@/lib/security/shared-key-rate'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { governedChange } from '@/lib/changes/ledger'
 import { ADMIN_KEY_NEEDS_SERVICE_ROLE, ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE } from '@/lib/security/admin-key-placement'
@@ -115,7 +115,9 @@ export async function GET(request: NextRequest) {
         // recoverable form at all.
         key: maskApiKey(key.keyPrefix),
         keyPrefix: key.keyPrefix,
-        keyType: key.keyType,
+        // `kind` says what the key is. `keyType` is not returned: it is a
+        // storage value that reads 'public' for every project key, service and
+        // admin keys included (lib/auth/key-prefix.ts). Requests may still send it.
         /** What the key is: publishable, service, server (admin, server-only), mcp or dashboard. */
         kind: keyKind(key),
         role: key.role,
@@ -132,6 +134,8 @@ export async function GET(request: NextRequest) {
         expiresAt: key.expiresAt,
         rateLimit: key.rateLimit,
         rateLimitWindow: key.rateLimitWindow,
+        /** The window that decides this key's requests: each address's for a shared key (lib/security/shared-key.ts), the key's own for any other. */
+        clientWindow: clientWindowOf({ ...key, shared: isSharedKey(key) }),
         requestCount: key.requestCount,
         resetAt: key.resetAt,
       })),
@@ -284,7 +288,6 @@ export async function POST(request: NextRequest) {
         /** true = this is the only time the full key is returned; store it now */
         keyShownOnce: true,
         keyPrefix: apiKey.keyPrefix,
-        keyType: apiKey.keyType,
         kind: keyKind(apiKey),
         role: apiKey.role,
         permissions: apiKey.permissions,

@@ -13,10 +13,11 @@ import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
 jest.mock('next/navigation', () => ({ useParams: () => ({ id: 'p1' }) }))
 
 const key = (id: string, name: string, branch: { id: string; name: string; status: string } | null) => ({
-  id, name, key: 'proj_live_ab12…', keyPrefix: 'proj_live_ab12', keyType: 'public', role: 'client',
+  id, name, key: 'proj_live_ab12…', keyPrefix: 'proj_live_ab12', kind: 'publishable', role: 'client',
   permissions: ['read', 'write'], capabilities: [], serviceRole: false, branchId: branch?.id ?? null, branch,
   projectId: 'p1', lastUsed: null, createdAt: '2026-11-09T10:00:00.000Z', expiresAt: '2027-02-07T10:00:00.000Z',
-  rateLimit: 1000, rateLimitWindow: 3600, requestCount: 0, resetAt: null,
+  rateLimit: 1000, rateLimitWindow: 3600, clientWindow: { limit: 300, windowSeconds: 10, perAddress: true },
+  requestCount: 0, resetAt: null,
 })
 
 beforeEach(() => {
