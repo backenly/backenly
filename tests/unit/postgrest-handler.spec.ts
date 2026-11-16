@@ -121,6 +121,9 @@ describe('a refusal by row-level security reaches the caller as one', () => {
     stubUpstream(401, { code: '42501', message: 'permission denied for table reviews' })
     const res = mockRes()
     await handleViaPostgrest(mockReq('POST', {}, { rating: 9 }), res, ['reviews'], { projectId: PROJECT })
+    // The code says what the status says (production QA re-test, 2026-11-16, N15).
+    expect(res.statusCode).toBe(401)
+    expect(res.body.code).toBe('UNAUTHORIZED')
     expect(res.body.layer).toBe('database')
     expect(res.body.diagnosis).toMatch(/no end-user token/)
     expect(res.body.diagnosis).not.toMatch(/API key/)

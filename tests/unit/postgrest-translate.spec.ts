@@ -398,13 +398,13 @@ describe('stripUpstreamError — v2 passthrough', () => {
     expect(out.body.details).toMatch(/already exists/)
   })
 
-  it('reduces a privilege error to FORBIDDEN without naming the table', () => {
+  it("answers a privilege error with PostgREST's code, without naming the table", () => {
     const out = stripUpstreamError(403, {
       code: '42501',
       message: 'permission denied for table users',
     })
     expect(out.status).toBe(403)
-    expect(out.body.code).toBe('FORBIDDEN')
+    expect(out.body.code).toBe('42501')
     expect(JSON.stringify(out.body)).not.toMatch(/users/)
   })
 

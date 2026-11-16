@@ -365,6 +365,15 @@ const PG_STATUS: Record<string, number> = {
 }
 
 /**
+ * A refusal of a caller with no signed-in user (PostgreSQL 42501, which
+ * PostgREST answers 401 for the anonymous role and 403 for a signed-in one).
+ * The table may well allow the same request from a signed-in user.
+ */
+export const ANONYMOUS_REFUSAL =
+  "The table's row-level security or grants do not allow this without a signed-in user. " +
+  "Send the user's session token in X-User-Token."
+
+/**
  * PostgREST's error body → Backenly's `{error, code}` shape.
  *
  * PostgREST echoes the failing SQL construct in `message`/`details`, which can
@@ -382,10 +391,18 @@ export function toApiError(
   const message = typeof b.message === 'string' ? b.message : ''
 
   // Checked before the constraint map so a privilege error can never take the
-  // message-echoing path.
+  // message-echoing path. The code says what the status says: a 401 is
+  // UNAUTHORIZED (an anonymous insert refused 401 used to carry FORBIDDEN,
+  // production QA re-test 2026-11-16, N15), a 403 FORBIDDEN.
   if (pgCode === '42501' || status === 401 || status === 403) {
+    if (status === 401) {
+      return {
+        status: 401,
+        body: { error: pgCode === '42501' ? ANONYMOUS_REFUSAL : 'Not authorized to perform this operation', code: 'UNAUTHORIZED' },
+      }
+    }
     return {
-      status: status === 401 ? 401 : 403,
+      status: 403,
       body: { error: 'Not authorized to perform this operation', code: 'FORBIDDEN' },
     }
   }
@@ -564,10 +581,25 @@ export function stripUpstreamError(
     }
   }
 
-  if (pgCode === '42501' || status === 401 || status === 403) {
+  // PostgREST's own code and statuses: 42501, answered 401 for a caller with
+  // no signed-in user and 403 for a signed-in one, which is what a PostgREST
+  // client (postgrest-js, supabase-js) checks. The message stays Backenly's:
+  // PostgreSQL's names a table, possibly not the one the caller asked for.
+  if (pgCode === '42501') {
     return {
       status: status === 401 ? 401 : 403,
-      body: { code: 'FORBIDDEN', message: 'Not authorized to perform this operation' },
+      body: {
+        code: '42501',
+        message: 'Not authorized to perform this operation',
+        details: null,
+        hint: status === 401 ? ANONYMOUS_REFUSAL : null,
+      },
+    }
+  }
+  if (status === 401 || status === 403) {
+    return {
+      status,
+      body: { code: status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN', message: 'Not authorized to perform this operation' },
     }
   }
 
