@@ -781,6 +781,11 @@ tests/integration/credential-rotation-provider-secrets.spec.ts
 # run failed.
 tests/integration/scheduled-snapshots.spec.ts
 
+# A failed export names its cause in plain words and keeps the database's host
+# and address to the log (production QA re-test, 2026-11-16, N5). The real
+# route with a stand-in pg_dump; the project row it reads is real.
+tests/integration/export-says-why-it-failed.spec.ts
+
 # HIGH, found by the final qualification on a real deployment: a PostgreSQL
 # restart made the next /api/v1/* request reject with P1017 and the RUNTIME
 # PROCESS EXITED. Express 4 does not await its handlers, so an async rejection
