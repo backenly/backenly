@@ -1493,6 +1493,10 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
     }).finally(() => clearTimeout(id))
   }
 
+  // Whether the sign-up answered. One that did not may still create the
+  // account after the purge in `finally`.
+  let signupAnswered = false
+
   try {
     // ── 1. HTTP Signup → JWT ──────────────────────────────────────────────────
     let signupRes: Response
@@ -1502,6 +1506,7 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: testEmail, password: testPassword, name: '__bv_http_test__' }),
       })
+      signupAnswered = true
     } catch (err: any) {
       if (err.name === 'AbortError') {
         return { ...base, skipped: true, skipReason: 'HTTP test skipped — server unreachable from itself (self-request timeout)' }
@@ -1616,6 +1621,10 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
     try {
       const { purgeSyntheticAuthArtifacts } = await import('@/lib/services/end-user-auth-table')
       await purgeSyntheticAuthArtifacts(projectId, { email: testEmail })
+      if (!signupAnswered) {
+        const { purgeAgainLater } = await import('@/lib/services/check-account-cleanup')
+        purgeAgainLater(projectId, testEmail)
+      }
     } catch { /* non-fatal */ }
   }
 }

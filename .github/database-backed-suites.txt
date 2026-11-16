@@ -2263,3 +2263,9 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# Backenly's own check accounts do not stay in a project's users table: the
+# contract sweep removes stale ones (exact addresses only, never a person's),
+# run_test purges a sign-up it gave up on again later, the build verifier
+# removes its users, and the report lists and removes leftovers. Real project,
+# users table and runtime.
+tests/integration/check-accounts-are-removed.spec.ts

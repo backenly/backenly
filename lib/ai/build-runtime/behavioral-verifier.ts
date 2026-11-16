@@ -15,6 +15,7 @@
  */
 
 import type { VerificationCheck, VerificationReport } from './verifier'
+import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
 
@@ -185,9 +186,6 @@ async function scenarioAuthSignupAndSignin(
       })
     }
 
-    // Cleanup: delete test user if possible
-    await cleanupTestUser(projectId, tokenPair.accessToken, tokenPair.userId)
-
     const passed = checks.every(c => c.status !== 'fail')
     return { scenario: 'Auth: Signup + Signin', passed, checks, durationMs: Date.now() - start }
   } catch (err) {
@@ -198,6 +196,8 @@ async function scenarioAuthSignupAndSignin(
       durationMs: Date.now() - start,
       error: String(err),
     }
+  } finally {
+    await cleanupTestUser(projectId, email)
   }
 }
 
@@ -259,10 +259,10 @@ async function scenarioAdminRouteRejectsNonAdmin(
 ): Promise<BehavioralScenarioResult> {
   const start = Date.now()
   const checks: VerificationCheck[] = []
+  const email = `behavioral_admin_test_${Date.now()}@backenly-test.internal`
 
   try {
     // Signup as a regular user
-    const email = `behavioral_admin_test_${Date.now()}@backenly-test.internal`
     const signupRes = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -314,9 +314,6 @@ async function scenarioAdminRouteRejectsNonAdmin(
       }
     }
 
-    // Cleanup
-    await cleanupTestUser(projectId, token, signupBody?.user?.id)
-
     const passed = checks.every(c => c.status !== 'fail')
     return { scenario: 'Auth: Admin route rejects non-admin', passed, checks, durationMs: Date.now() - start }
   } catch (err) {
@@ -327,6 +324,8 @@ async function scenarioAdminRouteRejectsNonAdmin(
       durationMs: Date.now() - start,
       error: String(err),
     }
+  } finally {
+    await cleanupTestUser(projectId, email)
   }
 }
 
@@ -351,10 +350,11 @@ async function scenarioRLSCrossUserIsolation(
   let userAId = ''
   let userBId = ''
   let createdRowId: string | null = null
+  const emailA = `rls_userA_${Date.now()}@backenly-test.internal`
+  const emailB = `rls_userB_${Date.now() + 1}@backenly-test.internal`
 
   try {
     // ── Create user A ──────────────────────────────────────────────────────
-    const emailA = `rls_userA_${Date.now()}@backenly-test.internal`
     const resA = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -371,7 +371,6 @@ async function scenarioRLSCrossUserIsolation(
     checks.push({ label: 'Created User A', status: 'pass', detail: emailA })
 
     // ── Create user B ──────────────────────────────────────────────────────
-    const emailB = `rls_userB_${Date.now() + 1}@backenly-test.internal`
     const resB = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -464,10 +463,7 @@ async function scenarioRLSCrossUserIsolation(
     }
   } finally {
     // Best-effort cleanup
-    await Promise.allSettled([
-      tokenA && userAId ? cleanupTestUser(projectId, tokenA, userAId) : Promise.resolve(),
-      tokenB && userBId ? cleanupTestUser(projectId, tokenB, userBId) : Promise.resolve(),
-    ])
+    await Promise.allSettled([cleanupTestUser(projectId, emailA), cleanupTestUser(projectId, emailB)])
   }
 }
 
@@ -478,10 +474,10 @@ async function scenarioCreditGuardBlocksWhenZero(
 ): Promise<BehavioralScenarioResult> {
   const start = Date.now()
   const checks: VerificationCheck[] = []
+  const email = `behavioral_credits_${Date.now()}@backenly-test.internal`
 
   try {
     // Create a user with 0 credits (default for new signups)
-    const email = `behavioral_credits_${Date.now()}@backenly-test.internal`
     const signupRes = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -533,11 +529,6 @@ async function scenarioCreditGuardBlocksWhenZero(
       checks.push({ label: 'Credit guard', status: 'skip', detail: 'No job/credits table found — test not applicable' })
     }
 
-    // Cleanup
-    if (token && signupBody?.user?.id) {
-      await cleanupTestUser(projectId, token, signupBody.user.id)
-    }
-
     const passed = checks.every(c => c.status !== 'fail')
     return { scenario: 'Credits: Zero balance blocks job creation', passed, checks, durationMs: Date.now() - start }
   } catch (err) {
@@ -548,6 +539,8 @@ async function scenarioCreditGuardBlocksWhenZero(
       durationMs: Date.now() - start,
       error: String(err),
     }
+  } finally {
+    await cleanupTestUser(projectId, email)
   }
 }
 
@@ -579,17 +572,17 @@ async function getProjectTables(
 }
 
 /**
- * Best-effort cleanup of a behavioral test user.
+ * Remove a scenario's test user and its side rows, by address, whatever the
+ * scenario's outcome. This used to ask `DELETE /auth/delete-account`, a route
+ * neither runtime serves, so every user a scenario signed up stayed in the
+ * project's users table.
  */
-async function cleanupTestUser(projectId: string, token: string, userId: string): Promise<void> {
-  if (!userId || !token) return
+async function cleanupTestUser(projectId: string, email: string): Promise<void> {
   try {
-    await fetch(`${APP_URL}/api/v1/${projectId}/auth/delete-account`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    await purgeSyntheticAuthArtifacts(projectId, { email })
   } catch {
-    // Cleanup is best-effort — never fail a scenario due to cleanup
+    // Never fail a scenario over cleanup; the sweep removes what is left
+    // (lib/services/check-account-cleanup.ts).
   }
 }
 
