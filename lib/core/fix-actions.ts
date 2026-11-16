@@ -545,6 +545,23 @@ export function getManualRemediationHint(
     // decision about the data model and Backenly cannot make it.
     // No repair exists for a spike: it may be a launch as easily as a runaway.
     // The hint hands over where the traffic went and what to check.
+    case 'usage_anomaly': {
+      const axis = String(details?.axis ?? '')
+      const paths = Array.isArray(details?.topPaths)
+        ? (details!.topPaths as Array<{ path?: string }>).map((p) => p?.path).filter(Boolean).slice(0, 3)
+        : []
+      const where = paths.length
+        ? `Start with ${paths.join(', ')}, which carried most of the day's requests.`
+        : axis === 'egress_bytes'
+          ? 'It did not go through the API, so look at file downloads: a public file shared widely, or a client re-downloading one in a loop.'
+          : 'Look at what changed that day: a deploy, a new client, or a job running more often than intended.'
+      return (
+        `This project's ${axis === 'egress_bytes' ? 'egress' : axis === 'fn_runs' ? 'function runs' : 'new end users'} ` +
+        `jumped far past its usual daily level. ${where} If it is expected growth, dismiss this; if it is not, ` +
+        'fix the cause before it reaches your plan limit or spend limit (the Usage page shows both).'
+      )
+    }
+
     // A table anyone with the publishable key can read in full, holding
     // columns named like credentials or personal data
     // (drift-detector.ts detectSensitiveColumnsAnyoneCanRead). Nothing to
@@ -561,23 +578,6 @@ export function getManualRemediationHint(
         `on ${t} so a row is visible only to the signed-in user it belongs to, or so only your server (the ` +
         `service role) reads it. If the table is meant to be public, keep ${which} out of it. Backenly will ` +
         'not change who can read it on its own.'
-      )
-    }
-
-    case 'usage_anomaly': {
-      const axis = String(details?.axis ?? '')
-      const paths = Array.isArray(details?.topPaths)
-        ? (details!.topPaths as Array<{ path?: string }>).map((p) => p?.path).filter(Boolean).slice(0, 3)
-        : []
-      const where = paths.length
-        ? `Start with ${paths.join(', ')}, which carried most of the day's requests.`
-        : axis === 'egress_bytes'
-          ? 'It did not go through the API, so look at file downloads: a public file shared widely, or a client re-downloading one in a loop.'
-          : 'Look at what changed that day: a deploy, a new client, or a job running more often than intended.'
-      return (
-        `This project's ${axis === 'egress_bytes' ? 'egress' : axis === 'fn_runs' ? 'function runs' : 'new end users'} ` +
-        `jumped far past its usual daily level. ${where} If it is expected growth, dismiss this; if it is not, ` +
-        'fix the cause before it reaches your plan limit or spend limit (the Usage page shows both).'
       )
     }
 
