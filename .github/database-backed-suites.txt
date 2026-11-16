@@ -2263,3 +2263,6 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# An approval card says a deleted function, schedule or trigger can be undone
+# when History restores it, and that what nothing keeps cannot. Real rows.
+tests/integration/approval-cards-know-what-history-restores.spec.ts
