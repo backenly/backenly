@@ -87,7 +87,12 @@ ENV DATABASE_URL=postgresql://build:build@127.0.0.1:1/unused \
 # cannot happen twice. Run BEFORE the build, so the failure costs seconds.
 RUN npx tsx scripts/verify-public-build-inputs.ts --inputs
 
-RUN npm run build
+# The Cloud image is built from public + overlay, and next build type-checks
+# that whole tree in one worker. Since the console rebuild (#786) it outgrows
+# Node's default ~2 GB heap and the worker dies before reporting anything. Set
+# on this RUN only, so NODE_OPTIONS never reaches the image's environment
+# (release-web.yml refuses an image that carries it).
+RUN NODE_OPTIONS=--max-old-space-size=6144 npm run build
 
 # And again against what was actually emitted, because the check above proves
 # only what the build was TOLD. This proves the value reached the artifact.
