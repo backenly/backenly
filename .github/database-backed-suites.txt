@@ -2269,3 +2269,8 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# The dashboard assistant answers with no AI credits left, as the Pricing page
+# says it answers questions free: its model call is the platform's, held
+# against none of the account's credits; a call the account pays for is still
+# refused. Real route, gateway spend rules, credit hold and usage row.
+tests/integration/dashboard-assistant-answers-free.spec.ts
