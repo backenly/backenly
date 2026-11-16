@@ -116,6 +116,11 @@ tests/integration/export-database-rls.spec.ts
 tests/integration/export-portable-policies.spec.ts
 tests/integration/postgres-admin.spec.ts
 
+# A failed export names its cause in plain words and keeps the database's host
+# and address to the log (production QA re-test, 2026-11-16, N5). The real
+# route with a stand-in pg_dump; the project row it reads is real.
+tests/integration/export-says-why-it-failed.spec.ts
+
 # A realtime stream's end user comes from a ticket, never from its URL: Next
 # reads no user token from the query string and takes it from X-User-Token, the
 # runtime gives a ?apiKey= stream no end user, and a ticket minted with the

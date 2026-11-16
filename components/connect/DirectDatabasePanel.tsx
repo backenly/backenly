@@ -32,9 +32,6 @@ import { AlertTriangle, Eye, EyeOff } from 'lucide-react'
 import Link from 'next/link'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import {
-  BUTTON_BASE,
-  BUTTON_SIZES,
-  BUTTON_VARIANTS,
   CopyButton,
   KitButton,
   KitConfirmDialog,
@@ -78,6 +75,27 @@ const LOGIN_NAME: Record<Mode, string> = { READ_ONLY: 'Read-only', READ_WRITE: '
 const LOGIN_BODY: Record<Mode, string> = {
   READ_ONLY: 'Reads everything, changes nothing. For psql, TablePlus, BI tools and backups.',
   READ_WRITE: 'Reads and writes rows. Schema changes are refused unless you allow them.',
+}
+
+type BackupMode = 'full' | 'schema' | 'data'
+
+/** The file name a response's Content-Disposition gives, if it gives one. */
+function savedName(disposition: string | null): string | null {
+  const m = /filename="?([^";]+)"?/i.exec(disposition ?? '')
+  return m ? m[1] : null
+}
+
+/** Hand the browser a file to save, the way a download link does. */
+function saveFile(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // After the click has been handled: revoking at once can cancel the save.
+  setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 function masked(c: Credential): string {
@@ -137,6 +155,8 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
   const [busy, setBusy] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<Confirm>(null)
   const [note, setNote] = useState<{ mode: Mode | null; text: string; refused: boolean } | null>(null)
+  const [exporting, setExporting] = useState<BackupMode | null>(null)
+  const [backupNote, setBackupNote] = useState<{ text: string; refused: boolean } | null>(null)
   const canSee = role.canAdminister
 
   const read = useCallback(async () => {
@@ -327,11 +347,44 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
     )
   }
 
-  const download = (mode: 'full' | 'schema' | 'data', label: string, variant: 'secondary' | 'ghost') => (
-    // Links styled as buttons: a button inside a link is two focus stops and invalid HTML.
-    <a href={`/api/projects/${projectId}/export/database?mode=${mode}`} download className={`${BUTTON_BASE} ${BUTTON_SIZES.sm} ${BUTTON_VARIANTS[variant]}`}>
+  /**
+   * Fetch the backup and save it only when the server finished it. A link with
+   * `download` saved whatever came back, so a failed export arrived as a file
+   * named database.json holding the error, and the page said nothing
+   * (production QA re-test, 2026-11-16, N5).
+   */
+  async function backup(mode: BackupMode) {
+    setExporting(mode)
+    setBackupNote(null)
+    try {
+      let res: Response
+      try {
+        res = await fetch(`/api/projects/${projectId}/export/database?mode=${mode}`, { credentials: 'include' })
+      } catch {
+        throw new Error('The backup could not reach Backenly. Nothing was downloaded. Try again.')
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(
+          typeof data?.error === 'string' && data.error
+            ? data.error
+            : `The backup did not finish (HTTP ${res.status}). Nothing was downloaded. Try again.`,
+        )
+      }
+      const name = savedName(res.headers.get('Content-Disposition')) ?? `backup-${mode}.sql`
+      saveFile(await res.blob(), name)
+      setBackupNote({ text: `Downloaded ${name}.`, refused: false })
+    } catch (err) {
+      setBackupNote({ text: err instanceof Error ? err.message : 'The backup did not finish. Nothing was downloaded. Try again.', refused: true })
+    } finally {
+      setExporting(null)
+    }
+  }
+
+  const download = (mode: BackupMode, label: string, variant: 'secondary' | 'ghost') => (
+    <KitButton size="sm" variant={variant} onClick={() => void backup(mode)} loading={exporting === mode} disabled={exporting !== null}>
       {label}
-    </a>
+    </KitButton>
   )
 
   return (
@@ -367,6 +420,14 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
               {download('schema', 'Schema only', 'ghost')}
               {download('data', 'Data only', 'ghost')}
             </div>
+            {backupNote &&
+              (backupNote.refused ? (
+                <RefusedLine className="mt-[8px]">{backupNote.text}</RefusedLine>
+              ) : (
+                <p role="status" className="mt-[8px] text-[12.5px] leading-[18px] text-zinc-300">
+                  {backupNote.text}
+                </p>
+              ))}
             <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">Standard pg_dump. Restores on any Postgres.</p>
           </div>
         </Panel>
