@@ -167,7 +167,7 @@ export const GET = withAuth(async (
       return NextResponse.json(
         {
           success: false,
-          error: `This project was deleted. It is removed for good on ${(purgeAfter ?? deletedAt).toISOString().slice(0, 10)}.`,
+          error: `This project was deleted. Restore it from the Projects page until ${(purgeAfter ?? deletedAt).toISOString().slice(0, 10)}, when it is removed for good.`,
           code: 'PROJECT_DELETED',
         },
         { status: 404 }
@@ -336,7 +336,7 @@ export const DELETE = withAuth(async (
     const deletion = await requestProjectDeletion(projectId, { kind: 'user', userId: user.userId, email: user.email })
     return NextResponse.json({
       success: true,
-      message: `Project deleted. It is removed for good on ${deletion.purgeAfter.toISOString().slice(0, 10)}.`,
+      message: `Project deleted. Restore it from the Projects page until ${deletion.purgeAfter.toISOString().slice(0, 10)}, when it is removed for good.`,
       purgeAfter: deletion.purgeAfter.toISOString(),
     })
   } catch (error: any) {

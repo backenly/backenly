@@ -108,7 +108,9 @@ describe('deleting a project', () => {
     expect(purgeAfter).toBeGreaterThanOrEqual(before + 7 * DAY - 1000)
     expect(purgeAfter).toBeLessThanOrEqual(Date.now() + 7 * DAY + 1000)
     expect(answer.body.purgeAfter).toBe(kept!.purgeAfter!.toISOString())
-    expect(answer.body.message).toBe(`Project deleted. It is removed for good on ${kept!.purgeAfter!.toISOString().slice(0, 10)}.`)
+    expect(answer.body.message).toBe(
+      `Project deleted. Restore it from the Projects page until ${kept!.purgeAfter!.toISOString().slice(0, 10)}, when it is removed for good.`,
+    )
   })
 
   it('stops it serving at every door, saying it was deleted', async () => {
@@ -119,7 +121,10 @@ describe('deleting a project', () => {
     const refusal = refusalForState(p.id, state)!
     expect(refusal.status).toBe(503)
     const body = await refusal.json()
-    expect(body.error).toMatchObject({ code: 'PROJECT_PAUSED', message: 'This project was deleted. It is removed for good 7 days after it was deleted.' })
+    expect(body.error).toMatchObject({
+      code: 'PROJECT_PAUSED',
+      message: 'This project was deleted. Its owner can restore it from the dashboard until it is removed for good, 7 days after it was deleted.',
+    })
   })
 
   it('leaves it out of the list, and the console reads it as deleted', async () => {

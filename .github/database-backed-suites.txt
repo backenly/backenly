@@ -2329,3 +2329,8 @@ tests/integration/deletion-asks-for-name-and-sign-in.spec.ts
 # has passed and never before; an unfinished import's project goes at once.
 # Real sessions, projects, jobs and serving state.
 tests/integration/deleted-projects-are-kept-seven-days.spec.ts
+# A deleted project can be restored until it is removed for good: listed with
+# its date under ?deleted=1, brought back listed and serving (an inactivity pause
+# kept), refused in the plan's words when the plan is full, 404 to anyone who
+# cannot administer it. Real sessions, projects and serving state.
+tests/integration/deleted-projects-can-be-restored.spec.ts

@@ -30,6 +30,7 @@ import { useRouter } from 'next/navigation'
 import { AlertTriangle, Building2, Database, FolderPlus, Plus, Search, X } from 'lucide-react'
 import { DeleteRefusedError, deleteProject, type Project, type Reauthentication } from '@/lib/api/projects'
 import { SignInAgain } from '@/components/console/SignInAgain'
+import { RecentlyDeleted } from './RecentlyDeleted'
 import { OrgShell } from '@/components/shell/OrgShell'
 import {
   INPUT_BASE,
@@ -146,6 +147,8 @@ export function ProjectsHome({
   const [deleteError, setDeleteError] = useState<string | null>(null)
   // Set when the server asks for a sign-in from the last ten minutes first.
   const [deleteReauth, setDeleteReauth] = useState<Reauthentication | null>(null)
+  // Moves when a project is deleted here, so Recently deleted reads its list again.
+  const [deletedVersion, setDeletedVersion] = useState(0)
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null)
   const [renameError, setRenameError] = useState<{ id: string; message: string } | null>(null)
   const renameBusy = useRef(false)
@@ -424,6 +427,7 @@ export function ProjectsHome({
         return next
       })
       setDeleteTarget(null)
+      setDeletedVersion((n) => n + 1)
       // A delete can free a place on the plan.
       setCreationAsked((n) => n + 1)
     } catch (err) {
@@ -654,6 +658,16 @@ export function ProjectsHome({
       <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
         {header}
         {body}
+        <RecentlyDeleted
+          orgId={orgId ?? null}
+          canRestore={may.remove}
+          refreshKey={deletedVersion}
+          onRestored={() => {
+            readListAgain()
+            // A restore takes a place on the plan back.
+            setCreationAsked((n) => n + 1)
+          }}
+        />
       </div>
 
       {may.create && (
@@ -698,7 +712,7 @@ export function ProjectsHome({
         }}
         onConfirm={confirmDelete}
         title={`Delete ${deleteTarget?.name ?? 'this project'}?`}
-        description="Its API stops answering at once. Its database, tables, end users, files and change history are removed for good after 7 days."
+        description="Its API stops answering at once. You can restore it from Recently deleted for 7 days; then its database, tables, end users, files and change history are removed for good."
         confirmLabel="Delete project"
         danger
         busy={deleteBusy}

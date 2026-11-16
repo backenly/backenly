@@ -79,11 +79,27 @@ function serializeProject(project: ProjectListEntry, user: { id: string; email: 
  *
  * ?orgId= narrows the list to one organization's projects. It only ever
  * narrows: the access clause still decides which projects are visible at all.
+ *
+ * ?deleted=1 lists instead the projects asked to be deleted and not removed yet
+ * (lib/projects/deletion.ts), each with when it is removed for good: the
+ * Projects page's "Recently deleted", restored with POST /api/projects/[id]/undelete.
  */
 export const GET = withAuth(async (request: NextRequest, { user }) => {
   try {
     const organizationId = request.nextUrl?.searchParams.get('orgId') || null
     const listed = await getProjectLifecycle().list(user.userId, { organizationId })
+    if (request.nextUrl?.searchParams.get('deleted') === '1') {
+      const deleted = listed
+        .filter((project) => project.deletedAt)
+        .map((project) => ({
+          id: project.id,
+          name: project.name,
+          organizationId: project.organizationId,
+          deletedAt: project.deletedAt,
+          purgeAfter: project.purgeAfter,
+        }))
+      return NextResponse.json({ success: true, data: deleted, count: deleted.length })
+    }
     // A project asked to be deleted is not listed (lib/projects/deletion.ts).
     // Left out here, after either edition's listing, so both leave it out.
     const projects = listed.filter((project) => !project.deletedAt)
