@@ -2358,3 +2358,7 @@ tests/integration/error-envelope-every-door.spec.ts
 # removes its users, and the report lists and removes leftovers. Real project,
 # users table and runtime.
 tests/integration/check-accounts-are-removed.spec.ts
+# An end-user auth path that does not exist (/auth/user, /auth/session, a
+# mistyped provider) answers 404 ROUTE_NOT_FOUND with the auth routes there
+# are, GET /auth/me included, from the runtime and from Next. Real runtime.
+tests/integration/unknown-auth-paths.spec.ts
