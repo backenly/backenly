@@ -2263,3 +2263,7 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# An end-user auth path that does not exist (/auth/user, /auth/session, a
+# mistyped provider) answers 404 ROUTE_NOT_FOUND with the auth routes there
+# are, GET /auth/me included, from the runtime and from Next. Real runtime.
+tests/integration/unknown-auth-paths.spec.ts
