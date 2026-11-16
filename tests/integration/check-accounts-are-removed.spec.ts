@@ -65,10 +65,12 @@ beforeAll(async () => {
 }, 120_000)
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => runtime.close(() => resolve()))
+  // The database first: closing the server waits for its open connections.
   await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
   await prisma.project.deleteMany({ where: { id: projectId } }).catch(() => {})
   await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
+  runtime.closeAllConnections()
+  await new Promise<void>((resolve) => runtime.close(() => resolve()))
   if (originalProbeOrigin === undefined) delete process.env.CONTRACT_PROBE_ORIGIN
   else process.env.CONTRACT_PROBE_ORIGIN = originalProbeOrigin
   if (originalAppUrl === undefined) delete process.env.NEXT_PUBLIC_APP_URL
@@ -138,6 +140,7 @@ it("removes run_test's account when its sign-up completes after run_test gave up
     await new Promise((r) => setTimeout(r, 2500))
     expect((await emails()).filter((e) => e.startsWith('__http_bv_'))).toEqual([])
   } finally {
+    proxy.closeAllConnections()
     await new Promise<void>((resolve) => proxy.close(() => resolve()))
   }
 }, 60_000)
