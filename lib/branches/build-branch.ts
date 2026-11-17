@@ -119,8 +119,16 @@ function columnSql(col: TypedColumn): string | { error: string } {
  * the calls a branch migration takes are written; the result is read back by
  * the migration parser before anything runs, so a statement it cannot read is
  * refused there, never applied as something else.
+ *
+ * `liveRowsOnly` writes out the scope create_index gives a unique index on a
+ * table with soft delete (WHERE deleted_at IS NULL). The statement is made as
+ * written, so a typed call that relied on that scope has to say it.
  */
-export function schemaCallSql(tool: string, args: Record<string, unknown>): { sql: string } | { error: string } {
+export function schemaCallSql(
+  tool: string,
+  args: Record<string, unknown>,
+  opts: { liveRowsOnly?: boolean } = {},
+): { sql: string } | { error: string } {
   const table = String(args.tableName ?? '').trim()
   if (!table) return { error: `${tool} needs a tableName.` }
   const t = ident(table)
@@ -151,7 +159,9 @@ export function schemaCallSql(tool: string, args: Record<string, unknown>): { sq
       if (columns.length === 0) return { error: `create_index on "${table}" names no columns.` }
       const name = typeof args.indexName === 'string' && args.indexName.trim() ? ` ${ident(args.indexName.trim())}` : ''
       const method = typeof args.method === 'string' && args.method.trim() ? ` USING ${args.method.trim().toLowerCase()}` : ''
-      const where = typeof args.where === 'string' && args.where.trim() ? ` WHERE ${args.where.trim()}` : ''
+      const where = typeof args.where === 'string' && args.where.trim()
+        ? ` WHERE ${args.where.trim()}`
+        : opts.liveRowsOnly ? ' WHERE deleted_at IS NULL' : ''
       // A column's operator class (`name gin_trgm_ops`) is written after it, as SQL does.
       const classes = args.operatorClasses && typeof args.operatorClasses === 'object' ? (args.operatorClasses as Record<string, unknown>) : {}
       const item = (c: string) => (typeof classes[c] === 'string' && classes[c] ? `${ident(c)} ${ident(String(classes[c]))}` : ident(c))
@@ -397,8 +407,11 @@ export class BuildBranch {
         summary: `Nothing was built: this project's production is protected, so its schema is built on a preview branch, and ${branch.error.replace(/^\w/, (c) => c.toLowerCase()).replace(/\.$/, '')}.`,
       }
     }
+    const sql = (await this.scopedToLiveRows(tool, args, branch))
+      ? (schemaCallSql(tool, args, { liveRowsOnly: true }) as { sql: string }).sql
+      : written.sql
     const { applyBranchMigration } = await import('./migrate')
-    const outcome = await applyBranchMigration(this.projectId, branch.id, written.sql, this.userId)
+    const outcome = await applyBranchMigration(this.projectId, branch.id, sql, this.userId)
     const recorded = (outcome as { recorded?: string[] }).recorded ?? []
     this.statements.push(...recorded)
     if (!outcome.ok) {
@@ -415,6 +428,26 @@ export class BuildBranch {
       summary: (outcome as { summary: string }).summary,
       data: { onBranch: true, branch: { id: branch.id, name: branch.name }, statements: recorded },
     }
+  }
+
+  /**
+   * Whether a typed create_index is one create_index would scope to live rows:
+   * unique, with no WHERE of its own, on a table with soft delete. A CREATE
+   * UNIQUE INDEX is made as written, over every row (lib/mcp/migration-parser.ts),
+   * so the statement written for the call carries the scope, and the merge
+   * replays it.
+   */
+  private async scopedToLiveRows(tool: string, args: Record<string, unknown>, branch: TurnBranch): Promise<boolean> {
+    if (tool !== 'create_index' || args.unique !== true || args.asWritten === true) return false
+    if (typeof args.where === 'string' && args.where.trim()) return false
+    const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+    const db = await workspaceRawClient(this.projectId)
+    const rows = await db.$queryRawUnsafe<Array<{ one: number }>>(
+      `SELECT 1 AS one FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
+      branch.schemaName,
+      String(args.tableName ?? '').trim(),
+    )
+    return rows.length > 0
   }
 
   /** Save a step for after the merge, and say so. */

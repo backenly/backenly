@@ -546,7 +546,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         type: 'boolean',
         description:
           'Enforce uniqueness over the whole column tuple. On a table with soft delete (`deleted_at`) it counts ' +
-          'live rows only (the index is scoped WHERE deleted_at IS NULL) unless `where` says otherwise.',
+          'live rows only (the index is scoped WHERE deleted_at IS NULL) unless `where` or `asWritten` says otherwise.',
       },
       indexName: { type: 'string', description: 'Optional explicit index name. Omit and one is derived from the table and columns.' },
       method: {
@@ -567,6 +567,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           'Optional predicate for a PARTIAL index: only rows matching it are indexed. "true" indexes every row, ' +
           'soft-deleted ones included; an upsert (ON CONFLICT, or on_conflict on the REST API) can only target a ' +
           'unique index like that.',
+      },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'true: create the index exactly as given, so a unique one covers every row, soft-deleted ones included, ' +
+          'with no WHERE added. apply_migration sets it for CREATE INDEX.',
       },
     },
     ['tableName', 'columns']),
@@ -1676,6 +1682,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       method: a.method,
       operatorClasses: a.operatorClasses,
       where: a.where,
+      // From SQL: the index is created as the statement declares it.
+      ...(a.asWritten === true ? { asWritten: true } : {}),
     },
   }),
   rename_column: (a) => ({ action: 'RENAME_COLUMN', params: { tableName: a.tableName, oldName: a.oldName, newName: a.newName } }),

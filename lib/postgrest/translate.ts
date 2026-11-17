@@ -321,17 +321,19 @@ export interface StructuredApiError {
  * 42P10 on an upsert: no unique index covers exactly the conflict columns.
  *
  * On a table with soft delete the usual cause is Backenly's own: a UNIQUE index
- * there is scoped to live rows (WHERE deleted_at IS NULL), and Postgres cannot
- * match `ON CONFLICT (cols)`, which is all on_conflict can say, to a partial
- * index. The caller was told only "Request could not be completed". Postgres's
- * text for this error describes the request, never a row or another tenant.
+ * create_index makes there is scoped to live rows (WHERE deleted_at IS NULL),
+ * and Postgres cannot match `ON CONFLICT (cols)`, which is all on_conflict can
+ * say, to a partial index. One declared in SQL is created as written, over
+ * every row, so the statement itself is an answer. The caller was told only
+ * "Request could not be completed". Postgres's text for this error describes
+ * the request, never a row or another tenant.
  */
 const UPSERT_TARGET_MESSAGE =
   'No unique index covers exactly the on_conflict columns, so the upsert has nothing to match against.'
 const UPSERT_TARGET_HINT =
-  'On a table with soft delete, a UNIQUE index counts live rows only (WHERE deleted_at IS NULL), and an upsert ' +
-  'cannot target that. Create one over every row: create_index { tableName, columns, unique: true, where: "true" }, ' +
-  'or CREATE UNIQUE INDEX … WHERE true.'
+  'On a table with soft delete, a UNIQUE index made with create_index counts live rows only (WHERE deleted_at IS NULL), ' +
+  'and an upsert cannot target that. Create one over every row: create_index { tableName, columns, unique: true, ' +
+  'where: "true" }, or CREATE UNIQUE INDEX … ON <table> (<columns>) in SQL, which is created as written.'
 
 /**
  * The API's code for a database error in PG_STATUS. A value of the wrong type,

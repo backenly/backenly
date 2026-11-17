@@ -9768,9 +9768,17 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // caller who supplies their own `where` has said what they want and is left
     // alone; a NON-unique index is unaffected because duplicates were never the
     // question.
+    //
+    // Not one declared in SQL (`asWritten`): the statement says what it wants,
+    // and PostgreSQL makes `CREATE UNIQUE INDEX … (ext_id)` over every row.
+    // Scoped, ON CONFLICT (ext_id) cannot use it, so an upsert on the key the
+    // migration declared was refused. The result says what soft delete means
+    // for it instead.
+    const asWritten = params.asWritten === true
     let softDeleteScoped = false
     let effectiveWhere = wherePredicate
-    if (unique && !wherePredicate && !everyRow && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
+    const softDelete = unique && !wherePredicate && !everyRow && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
+    if (softDelete && !asWritten) {
       effectiveWhere = '"deleted_at" IS NULL'
       softDeleteScoped = true
     }
@@ -9967,6 +9975,12 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
         (everyRow && unique
           ? `\n\nIt covers every row, soft-deleted ones included, so an upsert (ON CONFLICT, or on_conflict ` +
             `on the REST API) can target it.`
+          : '') +
+        (softDelete && asWritten
+          ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and ` +
+            `keeps the row, so its value stays taken. An upsert (ON CONFLICT, or on_conflict on the REST API) can ` +
+            `target it. For uniqueness among live rows only, declare it WHERE deleted_at IS NULL: on_conflict ` +
+            `cannot target that one, and an ON CONFLICT in SQL has to repeat its WHERE.`
           : '') +
         (softDeleteScoped
           ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: a client ` +
@@ -10807,8 +10821,9 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         // deleted, which is what the author asked for and worth saying once.
         (ct === 'unique' && params.asWritten === true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
           ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and keeps ` +
-            `the row, so its value stays taken. For uniqueness among live rows only, create a unique index ` +
-            `WHERE deleted_at IS NULL instead (ON CONFLICT then has to name that WHERE).`
+            `the row, so its value stays taken. An upsert (ON CONFLICT, or on_conflict on the REST API) can target ` +
+            `it. For uniqueness among live rows only, create a unique index WHERE deleted_at IS NULL instead: ` +
+            `on_conflict cannot target that one, and an ON CONFLICT in SQL has to repeat its WHERE.`
           : ''),
       data: { tableName, constraintName: cName, constraintDefinition: after[0].def, columns },
     }
