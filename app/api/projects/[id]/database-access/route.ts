@@ -24,6 +24,7 @@ import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { describeCallerAddress } from '@/lib/services/direct-access-addresses'
 import {
+  DirectAccessPausedError,
   DirectAccessUnavailableError,
   getDirectAccessStatus,
   provisionDirectAccess,
@@ -70,6 +71,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ credential })
     } catch (err: any) {
       if (err instanceof DirectAccessUnavailableError) return unavailable(err)
+      // Paused or deleted: its logins are stopped, and the answer says to resume or restore it first.
+      if (err instanceof DirectAccessPausedError) return NextResponse.json({ error: err.message, code: err.code }, { status: 409 })
       console.error('[database-access] provision failed:', err?.message)
       // The definer functions only exist after scripts/setup-direct-access.sql
       // ran on the cluster — surface that honestly instead of a generic 500.

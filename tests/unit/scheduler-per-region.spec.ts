@@ -62,6 +62,7 @@ describe('instrumentation.ts', () => {
     'cleanupAllProjectGraphs',
     'runScheduledBackOfficeMaintenance',
     'pruneBaseline',
+    'reconcileDirectLoginsWithPause',
     'evaluateUsageAnomalies',
     'evaluateUsageAlerts',
     'closePreviousPeriod',

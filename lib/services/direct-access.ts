@@ -43,6 +43,7 @@ import {
   workspaceRawClient,
 } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
@@ -102,6 +103,28 @@ export class DirectAccessUnavailableError extends Error {
     super(DIRECT_ACCESS_UNAVAILABLE_MESSAGE)
     this.name = 'DirectAccessUnavailableError'
   }
+}
+
+/**
+ * A login asked for while the project is paused, or asked to be deleted, which
+ * pauses it. Its logins are stopped while it is (lib/projects/paused-logins.ts),
+ * so none is created or re-keyed: that would let one connect again.
+ */
+export class DirectAccessPausedError extends Error {
+  readonly code = 'PROJECT_PAUSED'
+  constructor(readonly deleted: boolean) {
+    super(
+      deleted
+        ? 'This project was deleted, so it gets no Postgres login. Restore it first.'
+        : "This project is paused, so its Postgres logins don't connect and no new one is made. Resume it first.",
+    )
+    this.name = 'DirectAccessPausedError'
+  }
+}
+
+async function refuseWhilePaused(projectId: string): Promise<void> {
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true, pauseReason: true } })
+  if (project?.pausedAt) throw new DirectAccessPausedError(project.pauseReason === DELETED_PAUSE_REASON)
 }
 
 export interface DirectAccessCredential {
@@ -445,6 +468,8 @@ export async function setSchemaChanges(projectId: string, allowed: boolean): Pro
  * in its region: a role anywhere else could never reach the schema.
  */
 async function provisionRole(projectId: string, mode: DirectAccessMode, schema: string) {
+  // Creating or re-keying a login gives it LOGIN: not while the project is paused.
+  await refuseWhilePaused(projectId)
   const db = await workspaceRawClient(projectId)
   const names = directAccessRoleNames(projectId)
   const roleName = mode === 'READ_ONLY' ? names.ro : names.rw
@@ -561,6 +586,13 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
     where: { projectId_mode: { projectId, mode } },
   })
   if (!existing) return
+  // A login a pause stopped is brought back on resume only while its row
+  // carries the pause's mark (lib/projects/paused-logins.ts). Cleared first,
+  // so a revocation that stops part-way, its row kept to be retried, leaves
+  // a login nothing brings back.
+  if (existing.stoppedForPauseAt) {
+    await prisma.databaseCredential.update({ where: { id: existing.id }, data: { stoppedForPauseAt: null } })
+  }
 
   // Terminates live sessions, drops policies naming the role, reassigns any
   // tables it created to the platform role, then drops it. On the project's
