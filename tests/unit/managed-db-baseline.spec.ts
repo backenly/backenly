@@ -127,6 +127,7 @@ const FORWARD_MIGRATIONS = [
   '20261110170000_request_log_origin',
   '20261111120000_webhook_tables',
   '20261116120000_project_imported_from',
+  '20261117110000_database_credential_stopped_for_pause',
   '20261117120000_project_purge_after',
 ]
 

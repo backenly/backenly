@@ -8,9 +8,12 @@
  * (lib/projects/paused-logins.ts):
  *
  *   - each login is NOLOGIN with no password, and its open sessions end; its
- *     credential row is kept;
- *   - resuming, or restoring the project, brings each back with its stored
- *     password, unless the project is still paused for another reason;
+ *     credential row is kept, marked as stopped by the pause;
+ *   - resuming, or restoring the project, brings each marked login back with
+ *     its stored password, unless the project is still paused for another
+ *     reason; a login that cannot log in for any other reason (a revocation
+ *     that stopped part-way, an operator's own hand) carries no mark and is
+ *     never brought back, by a resume, a restore or the hourly pass;
  *   - no login is created or re-keyed while paused, and the answer says to
  *     resume first; a rotation while paused leaves the login stopped, and
  *     resuming uses the new password;
@@ -174,7 +177,10 @@ describe('a pause', () => {
     expect(await passwordIs(ro, pw.ro)).toBe(false)
     expect(await loginError(ro, pw.ro)).not.toBe('logged in')
     expect(await prisma.databaseCredential.count({ where: { projectId } })).toBe(2)
+    // Each marked as the pause's, so a resume brings back these two and no other.
+    expect(await prisma.databaseCredential.count({ where: { projectId, stoppedForPauseAt: { not: null } } })).toBe(2)
     await resume()
+    expect(await prisma.databaseCredential.count({ where: { projectId, stoppedForPauseAt: { not: null } } })).toBe(0)
   }, 60_000)
 
   it('ends, and resuming brings each login back with the same password', async () => {
@@ -278,6 +284,41 @@ describe('the hourly pass and failures', () => {
     expect((await reconcileDirectLoginsWithPause()).restored).toBeGreaterThanOrEqual(1)
     expect(await canLogIn(ro)).toBe(true)
     expect(await loginError(ro, pw.ro)).toBe('logged in')
+  }, 60_000)
+
+  it('never brings back a login stopped for another reason: not on resume, not on restore, not in the hourly pass', async () => {
+    const { reconcileDirectLoginsWithPause } = await import('@/lib/projects/paused-logins')
+    const { ro, rw } = directAccessRoleNames(projectId)
+    const pw = await passwords()
+    // As a revocation that stopped part-way leaves it: the login retired, its row kept.
+    await q(`SELECT public.backenly_direct_retire_role($1)`, [ro])
+    try {
+      expect(await canLogIn(ro)).toBe(false)
+
+      await pause()
+      expect(await canLogIn(rw)).toBe(false)
+      await resume()
+      expect(await canLogIn(rw)).toBe(true)
+      expect(await canLogIn(ro)).toBe(false)
+
+      const now = new Date()
+      await requestProjectDeletion(projectId, SYSTEM, now)
+      expect(await restoreDeletedProject(projectId, SYSTEM, now)).toEqual({ restored: true })
+      expect(await canLogIn(rw)).toBe(true)
+      expect(await canLogIn(ro)).toBe(false)
+
+      await reconcileDirectLoginsWithPause()
+      expect(await canLogIn(ro)).toBe(false)
+      // An operator's own NOLOGIN, with its password kept, is left as well.
+      await q(`ALTER ROLE ${rw} NOLOGIN`)
+      await reconcileDirectLoginsWithPause()
+      expect(await canLogIn(rw)).toBe(false)
+      expect(await prisma.databaseCredential.count({ where: { projectId } })).toBe(2)
+    } finally {
+      // Back as it was, for the cases after this one.
+      await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, pw.ro, schema])
+      await q(`ALTER ROLE ${rw} LOGIN`)
+    }
   }, 60_000)
 
   it('never throws out of the hooks: a project whose region this process cannot reach is logged and left', async () => {

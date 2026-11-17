@@ -10,9 +10,14 @@
  * are ended, through the definer helper (scripts/setup-direct-access.sql,
  * backenly_direct_retire_role). Its credential row is kept.
  *
- * Resuming, or restoring a deleted project that is not otherwise paused, brings
- * each back with its stored password, re-keyed through
- * backenly_direct_create_role. For a login that exists, that helper only sets
+ * Each login the pause stops is marked on its credential row
+ * (stoppedForPauseAt), and only a marked login is ever brought back: a login
+ * that cannot log in for another reason (a revocation not yet finished, an
+ * operator's own hand) is left exactly as it is, by the pause, the resume and
+ * the hourly pass alike. Resuming, or restoring a deleted project that is not
+ * otherwise paused, brings each marked login back with its stored password,
+ * re-keyed through backenly_direct_create_role, and clears the mark. For a
+ * login that exists, that helper only sets
  * LOGIN and the password and re-applies the login's own settings (statement
  * timeout, idle-in-transaction timeout, search_path, and read-only for a
  * read-only login); it grants nothing. A password rotated while paused is the
@@ -60,8 +65,11 @@ async function hasHelper(db: RawClient, signature: string): Promise<boolean> {
 
 /**
  * Stop the project's direct logins: NOLOGIN, no password, sessions ended. Only
- * those that can still log in are touched. Answers the logins stopped. Never
- * throws.
+ * those that can still log in are touched, and each is marked as the pause's
+ * before it is stopped, so a failure part-way leaves a mark on a login that
+ * can still log in, which the next pass stops, and never a login stopped with
+ * no mark, which nothing would bring back. A login that already cannot log in
+ * is not the pause's to mark. Answers the logins stopped. Never throws.
  */
 export async function stopDirectLogins(projectId: string, why: string): Promise<string[]> {
   try {
@@ -71,7 +79,10 @@ export async function stopDirectLogins(projectId: string, why: string): Promise<
     if (!(await hasHelper(db, 'public.backenly_direct_retire_role(text)'))) return []
     const state = await loginState(db, rows.map((r) => r.roleName))
     const stopped = rows.map((r) => r.roleName).filter((role) => state.get(role) === true)
-    for (const role of stopped) await db.$queryRaw`SELECT public.backenly_direct_retire_role(${role}) AS retired`
+    for (const role of stopped) {
+      await prisma.databaseCredential.updateMany({ where: { projectId, roleName: role }, data: { stoppedForPauseAt: new Date() } })
+      await db.$queryRaw`SELECT public.backenly_direct_retire_role(${role}) AS retired`
+    }
     // A session that logged in while the first call ran outlived it: the
     // helper ends the login's sessions again, now that NOLOGIN has committed.
     for (const role of stopped) await db.$queryRaw`SELECT public.backenly_direct_retire_role(${role}) AS retired`
@@ -84,9 +95,10 @@ export async function stopDirectLogins(projectId: string, why: string): Promise<
 }
 
 /**
- * Bring the project's direct logins back with their stored passwords, if the
- * project is not paused: those that exist and cannot log in. Answers the
- * logins brought back. Never throws.
+ * Bring back, with their stored passwords, the project's direct logins a pause
+ * stopped (marked stoppedForPauseAt), if the project is not paused, and clear
+ * each mark. A login without the mark is never touched, whatever its state.
+ * Answers the logins brought back. Never throws.
  */
 export async function restoreDirectLogins(projectId: string, why: string): Promise<string[]> {
   try {
@@ -94,7 +106,7 @@ export async function restoreDirectLogins(projectId: string, why: string): Promi
     // Still paused (for inactivity, say, after a deleted project's restore): they stay stopped.
     if (!project || project.pausedAt) return []
     const rows = await prisma.databaseCredential.findMany({
-      where: { projectId },
+      where: { projectId, stoppedForPauseAt: { not: null } },
       select: { roleName: true, mode: true, passwordCipher: true, passwordIv: true, passwordTag: true },
     })
     if (rows.length === 0) return []
@@ -104,10 +116,14 @@ export async function restoreDirectLogins(projectId: string, why: string): Promi
     const schema = await resolveWorkspaceSchema(projectId)
     const restored: string[] = []
     for (const row of rows) {
-      if (state.get(row.roleName) !== false) continue
-      const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
-      await db.$queryRaw`SELECT public.backenly_direct_create_role(${row.roleName}, ${password}, ${schema}, ${row.mode})`
-      restored.push(row.roleName)
+      // Stopped by the pause and still stopped: back with its password.
+      if (state.get(row.roleName) === false) {
+        const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
+        await db.$queryRaw`SELECT public.backenly_direct_create_role(${row.roleName}, ${password}, ${schema}, ${row.mode})`
+        restored.push(row.roleName)
+      }
+      // Back now, already back, or gone: the mark has nothing left to bring back.
+      await prisma.databaseCredential.updateMany({ where: { projectId, roleName: row.roleName }, data: { stoppedForPauseAt: null } })
     }
     if (restored.length > 0) console.log(`[DirectAccess] project=${projectId}: ${restored.length} login(s) brought back (${why})`)
     return restored

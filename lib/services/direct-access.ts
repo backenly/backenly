@@ -465,6 +465,13 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
     where: { projectId_mode: { projectId, mode } },
   })
   if (!existing) return
+  // A login a pause stopped is brought back on resume only while its row
+  // carries the pause's mark (lib/projects/paused-logins.ts). Cleared first,
+  // so a revocation that stops part-way, its row kept to be retried, leaves
+  // a login nothing brings back.
+  if (existing.stoppedForPauseAt) {
+    await prisma.databaseCredential.update({ where: { id: existing.id }, data: { stoppedForPauseAt: null } })
+  }
 
   // Terminates live sessions, drops policies naming the role, reassigns any
   // tables it created to the platform role, then drops it. On the project's
