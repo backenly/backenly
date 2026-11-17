@@ -20,6 +20,10 @@
  *   purged    the daily purge (instrumentation.ts) runs the full deletion,
  *             deleteProjectCompletely, for every project past `purgeAfter`.
  *
+ * Its direct Postgres logins stop when the deletion is asked for and come back
+ * with their passwords when the project is restored, as for a pause
+ * (lib/projects/paused-logins.ts).
+ *
  * Neon keeps a deleted project restorable for 7 days the same way. A project an
  * import made and never finished is purged at once, as before: nothing in it was
  * ever the person's own work.
@@ -29,6 +33,7 @@
  * calls); it shares the columns and the lock so the two can never interleave.
  */
 import { prisma } from '@/lib/db/prisma'
+import { restoreDirectLogins, stopDirectLogins } from './paused-logins'
 import { discardOutbox } from '@/lib/webhooks/capture'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
@@ -74,6 +79,9 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
     return { requested: true, purgeAfter }
   })
   if (!marked.requested) return { ...marked, propagation: null }
+  // Its direct Postgres logins stop, as a pause stops them; restoring it brings
+  // them back with the same passwords (lib/projects/paused-logins.ts). Never throws.
+  await stopDirectLogins(projectId, 'deletion requested')
 
   // This process's gates refuse it now; the runtime within its cache's bound,
   // and a project kept in another region once its region has the change.
@@ -137,6 +145,9 @@ export async function restoreDeletedProject(
   })
   if (outcome === 'due') return { restored: false, due: true }
   if (outcome !== 'restored') return { restored: false }
+  // The logins the deletion stopped, back with their passwords, unless the
+  // project is still paused for another reason. Never throws.
+  await restoreDirectLogins(projectId, 'restored')
 
   // As after a resume: this process's gates serve it now, the runtime within its
   // cache's bound, its region once the region has the change. Registration was

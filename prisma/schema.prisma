@@ -4002,6 +4002,10 @@ model DatabaseCredential {
   passwordTag    String
   createdAt      DateTime  @default(now())
   rotatedAt      DateTime?
+  // Set while a pause or a deletion has stopped this login
+  // (lib/projects/paused-logins.ts). Resuming or restoring the project brings
+  // back only a login that carries it; one stopped for any other reason stays.
+  stoppedForPauseAt DateTime?
 
   @@unique([projectId, mode])
   @@index([projectId])

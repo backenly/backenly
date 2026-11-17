@@ -129,6 +129,7 @@ const FORWARD_MIGRATIONS = [
   '20261116120000_project_imported_from',
   '20261117120000_project_purge_after',
   '20261117140000_direct_access_addresses',
+  '20261117150000_database_credential_stopped_for_pause',
 ]
 
 describe('the assembled migration workspace', () => {

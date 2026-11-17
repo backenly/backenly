@@ -54,6 +54,12 @@ tests/integration/direct-postgres-only-where-reachable.spec.ts
 tests/integration/direct-postgres-allowed-addresses.spec.ts
 tests/integration/direct-postgres-allowed-addresses-history.spec.ts
 tests/integration/direct-postgres-allowlist-sync.spec.ts
+
+# Where the endpoint fronts RDS, each login has a libpq string (verify-full
+# through hostaddr) and one for every other client (verify-ca), both naming the
+# published RDS CA bundle; each login holds its plan's connections at once,
+# set at creation and at every read of its credentials, enforced by Postgres.
+tests/integration/direct-postgres-verified-strings-and-limits.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
@@ -861,6 +867,11 @@ tests/integration/runtime-serving-gate.spec.ts
 # unspent, and the mutation kernel refusing a paused project. Mutation-checked:
 # dropping the activity guard or the job filter fails the matching tests.
 tests/integration/project-pause-lifecycle.spec.ts
+# Pausing a project, or asking for it to be deleted, stops its direct Postgres
+# logins (NOLOGIN, sessions ended); resuming or restoring it brings them back
+# with the same passwords; none is created while paused; an hourly pass repairs
+# what a failed hook left.
+tests/integration/paused-projects-stop-direct-logins.spec.ts
 
 # The inactivity clock (Project.lastActivityAt), which decides who Backenly
 # Cloud pauses: first use, the hourly write ceiling, a paused project's clock
