@@ -583,9 +583,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
       // A route module answers for itself: its status, its body and its
       // content type, as it wrote them (lib/services/ai-functions/reply.ts).
+      // A Response's text, such as new Response('pong'), goes out as that text.
       if (result.answer) {
-        const { status, body, headers } = result.answer
-        markAsWritten(res).status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers)).json(body ?? null)
+        const { status, body, headers, text } = result.answer
+        const out = markAsWritten(res).status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers))
+        if (text && typeof body === 'string') out.send(body)
+        else out.json(body ?? null)
         return
       }
 
