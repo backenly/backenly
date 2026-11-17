@@ -40,26 +40,30 @@ describe('the functions docs match the runtime', () => {
     expect(docs).toContain('a schedule: `{ type: "cron", data: { scheduledAt, timestamp } }`')
   })
 
-  it('name exactly the modules the runner gives an http function, as does the prompt that writes them', () => {
+  it('name the modules the runner gives an http function, as does the prompt that writes them', () => {
     // A module named in one place and missing from another is code the model
-    // writes that crashes, or a helper nobody learns exists.
+    // writes that crashes, or a helper nobody learns exists. The runner also
+    // serves the paths functions imported before @backenly/functions, so code
+    // deployed with them keeps running, and nothing names those any more.
     const runner = read('lib/services/ai-functions/isolation/function-runner.cjs')
     const loader = runner.slice(runner.indexOf('function buildRequire('))
     const served = [...loader.slice(0, loader.indexOf('default:')).matchAll(/case '([^']+)':/g)]
       .map((m) => m[1])
       .filter((id) => !id.startsWith('node:'))
-    expect(served).toContain('@/lib/auth/session')
-
-    const refusal = loader.match(/Allowed: ([^`]*)\.`/)
-    expect(refusal?.[1].split(', ')).toEqual(served)
+    const named = runner.match(/const ROUTE_MODULES_ALLOWED =\s*'([^']*)'/)![1].replace(/ \([^)]*\)/g, '').split(', ')
+    expect(loader.slice(0, loader.indexOf('\n}\n'))).toContain('Allowed: ${ROUTE_MODULES_ALLOWED}')
+    expect(named).toEqual(['@backenly/functions', 'crypto', 'bcryptjs', 'jsonwebtoken'])
+    expect(served).toEqual([...named, 'next/server', '@/lib/db', '@/lib/auth/jwt', '@/lib/auth/session'])
 
     const contract = read('lib/ai/function-generator.ts')
     const promptLine = contract.slice(contract.indexOf('- Imports allowed ONLY from:')).split('\n')[0]
+    expect([...promptLine.matchAll(/'([^']+)'/g)].map((m) => m[1])).toEqual(named)
+
+    // Every module the docs name is one the runner serves.
     const docsLine = docs.slice(docs.indexOf('It may import only')).split('\n')[0]
-    for (const id of served) {
-      expect(promptLine).toContain(`'${id}'`)
-      expect(docsLine).toContain(`\`${id}\``)
-    }
+    const docsModules = [...docsLine.matchAll(/`([^`]+)`/g)].map((m) => m[1]).filter((w) => w.includes('/') || named.includes(w))
+    expect(docsModules.length).toBeGreaterThan(0)
+    for (const id of docsModules) expect(served).toContain(id)
   })
 
   it('say an http function reads the project’s variables from process.env', () => {

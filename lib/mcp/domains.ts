@@ -132,7 +132,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       trigger: 'What fires it.', functionId: '', event: '',
       table: 'The table, for a row trigger.',
       method: 'http only. Default POST.',
-      code: 'A route module for trigger "http", a sandbox body for any other.',
+      code: 'A route module for trigger "http" (helpers from @backenly/functions, answers with Response.json), a sandbox body for any other.',
       columns: 'on_update: run only when one of these changes.',
       schedule: '"every 15 minutes" or 5-field cron.',
     },

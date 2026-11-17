@@ -70,8 +70,11 @@ export interface TablePaneProps {
   onOpenSchema: () => void
   /** Read the tables list again (counts, an agent's new table). */
   onRefreshTables: () => Promise<void> | void
-  /** The project's REST base ({origin}/api/v1/{id}), for Copy API URL. */
-  apiBaseUrl: string | null
+  /**
+   * The project's REST API base ({origin}/api/v2/{id}), for Copy API URL. /db
+   * on the v1 base is deprecated, kept for existing apps (lib/api/v1/deprecation.ts).
+   */
+  restBaseUrl: string | null
   /** How long History keeps an undoable change. */
   windowDays: number | null
 }
@@ -89,7 +92,7 @@ export function TablePane({
   onDeleteTable,
   onOpenSchema,
   onRefreshTables,
-  apiBaseUrl,
+  restBaseUrl,
   windowDays,
 }: TablePaneProps) {
   const table = tableInfo.name
@@ -319,7 +322,7 @@ export function TablePane({
   const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {})
   const menu: MenuItems = [
     { label: 'Copy name', icon: Copy, onClick: () => copy(table) },
-    ...(apiBaseUrl ? [{ label: 'Copy API URL', icon: Copy, onClick: () => copy(`${apiBaseUrl}/db/${table}`) }] : []),
+    ...(restBaseUrl ? [{ label: 'Copy API URL', icon: Copy, onClick: () => copy(`${restBaseUrl}/${encodeURIComponent(table)}`) }] : []),
     { label: 'Open in Schema', icon: Network, onClick: onOpenSchema },
     // The end-user table: its sign-ins, blocks and providers are managed in Auth & Users.
     ...(table.toLowerCase() === 'users' ? [{ label: 'Open in Auth & Users', icon: Users, onClick: () => router.push(`/app/projects/${projectId}/auth`) }] : []),

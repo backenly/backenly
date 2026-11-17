@@ -19,7 +19,7 @@ import { prisma } from '@/lib/db/prisma'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
-import { isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
+import { importsFromBackenlySource, isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
 import { FunctionRunnerBusyError, FunctionRunnerUnavailableError } from './isolation/client'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
@@ -433,8 +433,9 @@ export async function deployFunctionCode(
         ok: false,
         code: 'INVALID_CODE',
         summary:
-          'An http function is a route module: `import { NextResponse } from \'next/server\'` and `export async function POST(req) { … }` ' +
-          '(or GET/PUT/PATCH/DELETE). For a sandbox body using ctx.db and ctx.integrations, use trigger "manual" or an event trigger.',
+          'An http function is a route module: `export async function POST(request) { … return Response.json(body) }` ' +
+          '(or GET/PUT/PATCH/DELETE), importing db, asService, verifyToken, isAdminRequest and createSession from \'@backenly/functions\' as it needs them. ' +
+          'For a sandbox body using ctx.db and ctx.integrations, use trigger "manual" or an event trigger.',
       }
     }
     const requested = typeof args.method === 'string' ? args.method.trim().toUpperCase() : ''
@@ -590,6 +591,9 @@ export async function deployFunctionCode(
   const renamed = rawName !== deployedName
   // Trusted work is explicit in the code, and the answer says what it means.
   const runsAsService = isHttp && usesAsService(code)
+  // Code written against the paths functions imported before @backenly/functions
+  // runs unchanged; the answer names the module to use from now on.
+  const sourcePaths = isHttp ? importsFromBackenlySource(code) : []
   return {
     ok: true,
     summary:
@@ -600,6 +604,9 @@ export async function deployFunctionCode(
       missingIntegrationDeployNote(missing) +
       (runsAsService
         ? '. Its asService blocks run as the service role, so row-level security does not apply to their SQL: check who is calling before one runs'
+        : '') +
+      (sourcePaths.length
+        ? `. It imports from ${sourcePaths.join(', ')}, which still work; new code imports the same helpers from @backenly/functions and answers with Response.json`
         : '') +
       (renamed
         ? existing

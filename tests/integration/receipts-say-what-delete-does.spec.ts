@@ -110,9 +110,9 @@ describe('what an agent is told a delete does', () => {
     expect(receipt).not.toMatch(WRONG)
   }, 120_000)
 
-  it('the runtime API guide says what DELETE on /db does', async () => {
+  it('the runtime API guide says what a DELETE on the REST API does', async () => {
     const guide = await dispatchTool('get_instructions', {}, { projectId, userId: ownerId, createdThisTurn: new Set<string>() })
     expect(guide.ok).toBe(true)
-    expect(guide.summary).toContain('`DELETE /db/<table>/<id>` removes the row, as a DELETE on `/api/v2` does; the SDK\'s `delete()` sets `"deleted_at"` and keeps the row')
+    expect(guide.summary).toContain('A DELETE there removes the row; the SDK\'s `delete()` sets `"deleted_at"` and keeps it.')
   }, 60_000)
 })

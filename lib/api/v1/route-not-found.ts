@@ -83,7 +83,10 @@ export const V1_SECTION_NOTES: Record<string, string> = {
   storage:
     'Buckets are a parameter, not a path segment: POST /storage/upload with `bucket` in the form body, ' +
     'and GET /storage/files?bucket=<name> to list. There is no /storage/{bucket}/… route.',
-  db: 'The /db/ prefix is required. There is no bare /{table} route.',
+  // /api/v2 is the REST API; /db is deprecated (lib/api/v1/deprecation.ts).
+  db:
+    '/db is deprecated, kept for existing apps: new work uses /api/v2/{projectId}/{table}, in PostgREST\'s grammar. ' +
+    'On /db the /db/ prefix is required. There is no bare /{table} route.',
   fn:
     'Function names are normalised to lowercase kebab-case (list_products deploys as list-products). ' +
     "GET /functions returns each one's exact URL.",
