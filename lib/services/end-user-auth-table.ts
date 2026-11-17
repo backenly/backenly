@@ -228,26 +228,11 @@ export async function purgeSyntheticAuthArtifacts(
   await purge('_magic_links', match.where, match.params)
   await purge('_password_resets', match.where, match.params)
 
-  if (!opts?.email) {
-    let noUsers = false
-    // Same pre-check as the purges above, for the same reason. The try/catch
-    // here was never enough: Prisma logs a failed query at `error` level BEFORE
-    // any caller's catch runs, so on a workspace with no `users` table this one
-    // line still printed a raw error block on every sweep. Fixing only the
-    // purges left exactly one of the original four behind.
-    if (!introspected || existing.has('users')) {
-      try {
-        const remaining = await executeWithUserContext<{ n: bigint }>(
-          projectId,
-          '', true, `SELECT count(*)::bigint AS n FROM "${schemaName}"."users"`,
-        )
-        noUsers = remaining.length > 0 && Number(remaining[0].n) === 0
-      } catch {
-        /* users table absent — leave noUsers false, only prune expired below */
-      }
-    }
-    await purge('_token_blacklist', noUsers ? 'TRUE' : 'expires_at < NOW()', [])
-  }
+  // Only expired revocations go, even where no user is left. A signed-out
+  // token stays valid until it expires and the runtime does not check that its
+  // user still exists, so emptying the list while tokens it holds are live
+  // would let them work again. This runs hourly for every project.
+  if (!opts?.email) await purge('_token_blacklist', 'expires_at < NOW()', [])
 
   return results
 }

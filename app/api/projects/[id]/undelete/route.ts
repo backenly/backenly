@@ -58,8 +58,9 @@ export const POST = withAuth(async (_request: NextRequest, { user, params }) => 
     )
   }
 
+  let outcome: { restored: boolean; due?: boolean }
   try {
-    await restoreDeletedProject(projectId, { kind: 'user', userId: user.userId, email: user.email })
+    outcome = await restoreDeletedProject(projectId, { kind: 'user', userId: user.userId, email: user.email })
   } catch (error) {
     if (error instanceof LifecycleBusyError) {
       return NextResponse.json(
@@ -68,6 +69,20 @@ export const POST = withAuth(async (_request: NextRequest, { user, params }) => 
       )
     }
     throw error
+  }
+  // Past its seven days the project is the daily purge's (lib/projects/deletion.ts):
+  // it is being removed for good and is not restored.
+  if (outcome.due) {
+    return NextResponse.json(
+      { success: false, error: `${project.name} is past its seven days and is being removed for good, so it can no longer be restored.`, code: 'PROJECT_PURGE_DUE' },
+      { status: 409 },
+    )
+  }
+  if (!outcome.restored) {
+    return NextResponse.json(
+      { success: false, error: `${project.name} is not deleted, so there is nothing to restore.`, code: 'PROJECT_NOT_DELETED' },
+      { status: 409 },
+    )
   }
   return NextResponse.json({ success: true, message: `${project.name} is restored.` })
 })

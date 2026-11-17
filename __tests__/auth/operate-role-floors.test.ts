@@ -15,7 +15,9 @@
  *
  *   agent-approvals decide        ADMIN   (a request only parks because its
  *                                          tool is destructive or high risk)
- *   health approve / undo         DEVELOPER
+ *   health approve / undo         DEVELOPER   (ADMIN to undo a fix that
+ *                                          changed the schema or recorded
+ *                                          governed changes)
  *   health dismiss                DEVELOPER
  *   autonomy dial                 DEVELOPER
  *   maintenance consent/revoke    ADMIN
@@ -367,6 +369,58 @@ describe('ADMIN-floor surfaces', () => {
       const res: any = await runAs(f.member, name, f.projectId)
       expect(`${name}:${res.status === 403}`).toBe(`${name}:false`)
     }
+  })
+})
+
+/**
+ * Undoing a fix whose governed changes were recorded restores the state before
+ * them, which is History's Restore previous state, an ADMIN action. The engine
+ * undoes recorded changes whether or not the fix was marked schema-touching, so
+ * the route's ADMIN gate reads the record, not that flag alone.
+ */
+describe('undoing a fix that recorded governed changes', () => {
+  async function fixedFinding(projectId: string) {
+    const f = await prisma.healthFinding.create({
+      data: {
+        projectId,
+        type: 'missing_index',
+        severity: 'warning',
+        status: 'auto_fixed',
+        autoFixed: true,
+        details: { rollbackData: { rollbackFormat: 3, changeIds: [randomUUID()], schemaTouching: false } },
+      },
+      select: { id: true },
+    })
+    return f.id
+  }
+
+  async function undo(user: TestUser, projectId: string, findingId: string) {
+    currentUserId = user.id
+    const { DELETE } = await import('@/app/api/projects/[id]/health/approve/route')
+    return DELETE(
+      req({ method: 'DELETE', token: user.token, path: `/api/projects/${projectId}/health/approve`, query: `?findingId=${findingId}&confirm=true` }) as any,
+      params({ id: projectId }),
+    ) as Promise<any>
+  }
+
+  it('refuses a DEVELOPER, and leaves the fix in place', async () => {
+    const f = await fixture('DEVELOPER')
+    const findingId = await fixedFinding(f.projectId)
+
+    const res = await undo(f.member, f.projectId, findingId)
+
+    expect(res.status).toBe(403)
+    expect((await res.json()).code).toBe('PROJECT_ROLE_INSUFFICIENT')
+    expect(await prisma.healthFinding.findUnique({ where: { id: findingId }, select: { status: true } })).toEqual({ status: 'auto_fixed' })
+  })
+
+  it('lets an ADMIN past the gate', async () => {
+    const f = await fixture('ADMIN')
+    const findingId = await fixedFinding(f.projectId)
+
+    const res = await undo(f.member, f.projectId, findingId)
+
+    expect(res.status).not.toBe(403)
   })
 })
 
