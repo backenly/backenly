@@ -19,10 +19,12 @@ import { prisma } from '@/lib/db/prisma'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
-import { isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
+import { importsFromBackenlySource, isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
 import { FunctionRunnerBusyError, FunctionRunnerUnavailableError } from './isolation/client'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
+import { perRowSentence, runsPerRow } from './row-runs'
+import { NOT_RUN, NOTICE } from './record-kinds'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { functionNameForms, resolveFunctionByName } from './names'
 import { integrationsUsedBy, missingIntegrations } from './integration-use'
@@ -236,9 +238,15 @@ export async function listFunctionLogs(
     take,
     include: { function: { select: { name: true } } },
   }))
+  // A record of runs that did not happen, or a notice, is said as what it is,
+  // not as a run that failed or succeeded (record-kinds.ts).
   const lines = logs.slice(0, 10).map((l) =>
-    `• ${l.createdAt.toISOString()} ${l.function.name}: ${l.success ? 'ok' : 'FAILED'}, ${l.durationMs}ms, ${l.triggerType}` +
-    (l.error ? `, ${l.error.slice(0, 100)}` : ''))
+    l.triggerType === NOT_RUN
+      ? `• ${l.createdAt.toISOString()} ${l.function.name}: not run, ${(l.error ?? '').slice(0, 160)}`
+      : l.triggerType === NOTICE
+        ? `• ${l.createdAt.toISOString()} ${l.function.name}: notice, ${(l.logs[0] ?? '').slice(0, 160)}`
+        : `• ${l.createdAt.toISOString()} ${l.function.name}: ${l.success ? 'ok' : 'FAILED'}, ${l.durationMs}ms, ${l.triggerType}` +
+          (l.error ? `, ${l.error.slice(0, 100)}` : ''))
   // Runs of row-event functions wait in a queue and start a few at a time
   // (./run-queue.ts): say how many have not run yet, so a missing run reads as
   // waiting, not lost.
@@ -425,8 +433,9 @@ export async function deployFunctionCode(
         ok: false,
         code: 'INVALID_CODE',
         summary:
-          'An http function is a route module: `import { NextResponse } from \'next/server\'` and `export async function POST(req) { … }` ' +
-          '(or GET/PUT/PATCH/DELETE). For a sandbox body using ctx.db and ctx.integrations, use trigger "manual" or an event trigger.',
+          'An http function is a route module: `export async function POST(request) { … return Response.json(body) }` ' +
+          '(or GET/PUT/PATCH/DELETE), importing db, asService, verifyToken, isAdminRequest and createSession from \'@backenly/functions\' as it needs them. ' +
+          'For a sandbox body using ctx.db and ctx.integrations, use trigger "manual" or an event trigger.',
       }
     }
     const requested = typeof args.method === 'string' ? args.method.trim().toUpperCase() : ''
@@ -582,15 +591,22 @@ export async function deployFunctionCode(
   const renamed = rawName !== deployedName
   // Trusted work is explicit in the code, and the answer says what it means.
   const runsAsService = isHttp && usesAsService(code)
+  // Code written against the paths functions imported before @backenly/functions
+  // runs unchanged; the answer names the module to use from now on.
+  const sourcePaths = isHttp ? importsFromBackenlySource(code) : []
   return {
     ok: true,
     summary:
       `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
       (columns ? `, run only when ${columns.join(' or ')} changes` : '') +
+      (runsPerRow(fn.triggerType) ? `. ${perRowSentence(fn.triggerType)}` : '') +
       missingIntegrationDeployNote(missing) +
       (runsAsService
         ? '. Its asService blocks run as the service role, so row-level security does not apply to their SQL: check who is calling before one runs'
+        : '') +
+      (sourcePaths.length
+        ? `. It imports from ${sourcePaths.join(', ')}, which still work; new code imports the same helpers from @backenly/functions and answers with Response.json`
         : '') +
       (renamed
         ? existing

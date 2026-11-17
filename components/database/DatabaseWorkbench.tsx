@@ -24,7 +24,8 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { InstrumentBar, type BarFact } from '@/components/console/InstrumentBar'
 import { useRecordParam } from '@/components/console/RecordDrawer'
-import { EmptyPanel, ErrorRow, RefusedLine } from '@/components/console/states'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { KIT, KitButton, KitConfirmDialog, KitField, KitInput, KitModal } from '@/components/inspector/kit'
 import { getTables, type TableInfo } from '@/lib/api/database'
 import { getProject } from '@/lib/api/projects'
@@ -138,12 +139,12 @@ export function DatabaseWorkbench({ projectId }: { projectId: string }) {
   }
 
   // ── What the panes need from the project ───────────────────────────────────
-  const [apiBaseUrl, setApiBaseUrl] = useState<string | null>(null)
+  const [restBaseUrl, setRestBaseUrl] = useState<string | null>(null)
   const [windowDays, setWindowDays] = useState<number | null>(null)
   useEffect(() => {
     let cancelled = false
     getProject(projectId)
-      .then((p) => !cancelled && setApiBaseUrl(p.apiBaseUrl ?? null))
+      .then((p) => !cancelled && setRestBaseUrl(p.restBaseUrl ?? null))
       .catch(() => {})
     // How long History can undo a dropped table or column, from History itself.
     fetch(`/api/projects/${projectId}/changes?limit=1`, { credentials: 'include' })
@@ -202,14 +203,15 @@ export function DatabaseWorkbench({ projectId }: { projectId: string }) {
     </div>
   ) : tables && tables.length === 0 ? (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <EmptyPanel
+      <FirstRun
+        picture="tables"
         title="No tables yet"
-        sentence="Your coding agent creates tables as it builds."
+        sentence="Your agent creates the tables your app needs, each with REST endpoints and row-level security."
         requests={['Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write.']}
+        projectId={projectId}
         agent={role.loading ? null : { status: agent.status, client: agent.client }}
         canConnect={role.canAdminister}
         docs={{ label: 'Database docs', slug: 'database' }}
-        headingLevel={2}
       />
     </div>
   ) : (
@@ -240,7 +242,7 @@ export function DatabaseWorkbench({ projectId }: { projectId: string }) {
             }}
             onOpenSchema={() => setTab('schema')}
             onRefreshTables={() => loadTables(true)}
-            apiBaseUrl={apiBaseUrl}
+            restBaseUrl={restBaseUrl}
             windowDays={windowDays}
           />
         ) : (

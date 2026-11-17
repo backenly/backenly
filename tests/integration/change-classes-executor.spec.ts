@@ -580,7 +580,8 @@ changeClass('CREATE INDEX and CREATE UNIQUE INDEX', {
     expect((row.footprint as any[])[0].details).toEqual(['+ index lookups_code_idx', '+ index lookups_code_region_key'])
     const unique = after.cat.tables.lookups.indexes.find((i) => i.name === 'lookups_code_region_key')!
     expect(unique.unique).toBe(true)
-    expect(unique.definition).toMatch(/WHERE \(deleted_at IS NULL\)/)
+    // As written: a UNIQUE INDEX in SQL covers every row, as PostgreSQL makes it.
+    expect(unique.definition).not.toMatch(/WHERE/)
   },
   restored: async () => {
     const names = (await catalog()).tables.lookups.indexes.map((i) => i.name)

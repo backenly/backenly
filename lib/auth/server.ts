@@ -90,6 +90,12 @@ export async function userFromToken(token: string | undefined) {
     email: session.user.email,
     role: session.user.role?.name,
     user: session.user,
+    /**
+     * When the person signed in to this session. Refreshing a session keeps
+     * it (lib/auth/session.ts refreshAccessToken), so only a real sign-in
+     * moves it: what lib/auth/recent-sign-in.ts reads before a deletion.
+     */
+    signedInAt: session.createdAt,
   }
 }
 

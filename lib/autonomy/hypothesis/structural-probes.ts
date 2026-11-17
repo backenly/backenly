@@ -25,6 +25,7 @@
 
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { queryWorkspaceAsOwner } from '@/lib/services/workspace-pool'
+import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRoles } from '../statement-attribution'
 import { isRegionError, unlessRegionError } from '@/lib/data-plane/regional'
 import { notReservedTableSql } from '@/lib/security/workspace-schema'
 import { MIN_ROWS_FOR_DESIGN_CLAIM } from '@/lib/autonomy/schema-design'
@@ -309,16 +310,25 @@ export const writeStatementShapes: ProbeFn = async ctx => {
   }
 
   const schema = `workspace_${ctx.projectId}`
+  // Only this project's statements (lib/autonomy/statement-attribution.ts).
+  const roles = statementRoles(schema, ctx.projectId)
   const res = await queryWorkspaceSchema(
     ctx.projectId,
-    `SELECT query FROM pg_stat_statements WHERE query ILIKE '%' || $1 || '%' LIMIT 500`,
+    `SELECT s.query, ${byOwnRoleColumn('r', '$2')} AS by_own_role
+       FROM pg_stat_statements s
+       JOIN pg_roles r ON r.oid = s.userid
+      WHERE ${projectStatementScope({ s: 's', r: 'r', schema: '$1', ownRoles: '$2', platformRoles: '$3' })}
+      LIMIT 500`,
     schema,
+    roles.own,
+    roles.platform,
   ).catch((err: unknown) => {
     if (isRegionError(err)) throw err
     throw new Error(`pg_stat_statements unreadable: ${err instanceof Error ? err.message : String(err)}`)
   })
 
   const writes = rowsOf(res)
+    .filter((r: any) => projectStatement({ query: String(r.query ?? ''), byOwnRole: r.by_own_role === true }, schema))
     .map((r: any) => String(r.query ?? ''))
     .filter(q => /\b(INSERT|UPDATE|DELETE)\b/i.test(q))
     .filter(q => tables.some(t => new RegExp(`\\b${t}\\b`).test(q)))

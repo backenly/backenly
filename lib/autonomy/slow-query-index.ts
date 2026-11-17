@@ -37,9 +37,8 @@
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
 import { extractIndexCandidate, type IndexCandidate } from '@/lib/ai/infra-intelligence'
-import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
-import { directAccessRoleNames } from '@/lib/services/direct-access'
 import type { RawFinding } from '@/lib/core/types'
+import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRoles } from './statement-attribution'
 
 /**
  * Mean milliseconds a statement must exceed before it is worth an index.
@@ -114,14 +113,22 @@ export async function detectSlowQueryMissingIndexes(
   const extRows = ext?.rows ?? ext ?? []
   if (extRows.length === 0) return []
 
+  const roles = statementRoles(schema, projectId)
   const res = await queryWorkspaceSchema(
     projectId,
-    // Scoped to this tenant's schema. pg_stat_statements is per-database and
-    // every project shares one, so an unscoped read would attribute another
-    // customer's query to this one.
+    // Only this project's statements (./statement-attribution.ts): those its
+    // own roles ran, and those PostgREST and Backenly ran that name its schema.
+    // pg_stat_statements is per-database and every project in a region shares
+    // one database.
     //
-    // `position()` rather than LIKE: `_` is a single-character wildcard in LIKE,
-    // so `workspace_<id>` would also match schemas that merely resemble it.
+    // PostgREST, which serves /api/v2 and v1 /db, runs each request as anon,
+    // authenticated or service_role. PostgreSQL shows the text of a statement
+    // another role ran only to a role holding the privileges of
+    // pg_read_all_stats, and until the application role held them every REST
+    // read reached this query as `<insufficient privilege>`: 30 slow v2 reads
+    // and 30 slow v1 /db reads on a 1,000,002-row table raised nothing, while 40
+    // reads through /database/query, run as the application role, raised the
+    // finding within minutes (production QA, 2026-11-16).
     //
     // No `NOT LIKE '%pg_catalog%'`. It was meant to drop catalog introspection,
     // and it dropped the app's own traffic instead: every statement PostgREST
@@ -134,27 +141,26 @@ export async function detectSlowQueryMissingIndexes(
     // equality on a quoted column, and the catalog check below needs that
     // column to exist, unindexed, on a table in this schema.
     //
-    // Statements this project's own roles ran count too, whether or not they
-    // name the schema: a function's code and a direct connection read through
-    // a search path set to the project's schema, so their statements say
-    // `FROM orders`, never `"workspace_<id>"."orders"`, and the sensor never saw
-    // them (production QA, 2026-11-09). The roles are this project's alone
-    // (bkn_fn_, bkn_ro_, bkn_rw_, bkn_own_), so no other tenant's statement is
-    // attributed here.
+    // Statements this project's own roles ran count whether or not they name
+    // the schema: a function's code and a direct connection read through a
+    // search path set to the project's schema, so their statements say
+    // `FROM orders`, never `"workspace_<id>"."orders"` (production QA,
+    // 2026-11-09).
     `SELECT LEFT(s.query, ${STATEMENT_TEXT_CHARS})             AS query,
             s.calls,
             ROUND((s.total_exec_time / NULLIF(s.calls, 0))::numeric, 2) AS avg_ms,
-            (own.rolname IS NOT NULL)                            AS by_own_role
+            ${byOwnRoleColumn('r', '$2')}                         AS by_own_role
        FROM pg_stat_statements s
-       LEFT JOIN pg_roles own ON own.oid = s.userid AND own.rolname = ANY($2::text[])
-      WHERE (position($1 in s.query) > 0 OR own.rolname IS NOT NULL)
+       JOIN pg_roles r ON r.oid = s.userid
+      WHERE ${projectStatementScope({ s: 's', r: 'r', schema: '$1', ownRoles: '$2', platformRoles: '$3' })}
         AND s.query NOT LIKE '%information_schema%'
         AND s.calls >= ${Math.max(1, Math.floor(minCalls))}
         AND (s.total_exec_time / NULLIF(s.calls, 0)) > ${Math.max(0, Number(minAvgMs) || 0)}
       ORDER BY avg_ms DESC
       LIMIT 20`,
     schema,
-    [functionRoleName(schema), ...Object.values(directAccessRoleNames(projectId))],
+    roles.own,
+    roles.platform,
   ).catch(probeQueryFailed('detectSlowQueryMissingIndexes/statements'))
 
   const rows: StatementRow[] = res?.rows ?? res ?? []
@@ -192,7 +198,9 @@ export async function detectSlowQueryMissingIndexes(
   // ── Filter 1: parse, never guess ──────────────────────────────────────────
   const parsed = new Map<string, VerifiedCandidate>()
   for (const r of rows) {
-    const cand = extractIndexCandidate(String(r.query ?? ''), schema, r.by_own_role ? { tables } : {})
+    const byOwnRole = r.by_own_role === true
+    if (!projectStatement({ query: String(r.query ?? ''), byOwnRole }, schema)) continue
+    const cand = extractIndexCandidate(String(r.query ?? ''), schema, byOwnRole ? { tables } : {})
     if (!cand) continue
     const key = `${cand.table}.${cand.column}`
     const avgMs = Number(r.avg_ms) || 0

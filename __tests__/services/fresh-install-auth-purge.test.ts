@@ -124,24 +124,25 @@ describe('a workspace that has enabled auth', () => {
   test('still purges, so the fix did not simply disable the sweep', async () => {
     // The positive half. Skipping every table would also produce a silent log,
     // and would be a much worse bug than the noise it replaced.
-    // A `.internal` domain is what SYNTHETIC_USER_SQL matches. A first draft
-    // used a `__http_bv_` prefix, which is the TARGETED-mode spelling and not
-    // what a sweep looks for - the fixture was wrong, not the sweep.
+    // A sweep matches the exact addresses of Backenly's own check accounts
+    // (lib/services/check-accounts.ts), never every `.internal` address:
+    // people have those.
     await raw(
-      `INSERT INTO "${populatedSchema}"."users"(email) VALUES ('probe@verifier.internal')`
+      `INSERT INTO "${populatedSchema}"."users"(email) VALUES ('__cv_freshinstall@backenly.internal'), ('ana@corp.internal')`
     )
 
     const before = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
       `SELECT count(*)::bigint AS n FROM "${populatedSchema}"."users"`
     )
-    expect(Number(before[0].n)).toBe(2)
+    expect(Number(before[0].n)).toBe(3)
 
     await purgeSyntheticAuthArtifacts(populatedProjectId)
 
     const after = await prisma.$queryRawUnsafe<Array<{ email: string }>>(
-      `SELECT email FROM "${populatedSchema}"."users" ORDER BY email`
+      `SELECT email FROM "${populatedSchema}"."users"`
     )
-    // The synthetic row is gone; the real one is untouched.
-    expect(after.map(r => r.email)).toEqual(['real@example.test'])
+    // The check account is gone; the real ones are untouched. Sorted here, not
+    // by ORDER BY, so the database's collation cannot change the order.
+    expect(after.map(r => r.email).sort()).toEqual(['ana@corp.internal', 'real@example.test'])
   }, 60_000)
 })

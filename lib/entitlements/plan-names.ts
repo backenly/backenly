@@ -19,8 +19,23 @@ const PLAN_DISPLAY: Record<string, string> = {
   STARTER: 'Starter',
   GROWTH: 'Growth',
   PRO: 'Pro',
+  // A self-hosted install has one plan, its own (lib/entitlements/self-hosted.ts).
+  SELF_HOSTED: 'Self-hosted',
 }
 
 export function planDisplayName(name: string): string {
   return PLAN_DISPLAY[name.toUpperCase()] ?? name
+}
+
+/**
+ * The names to put beside a refusal's plan codes. A refusal body keeps
+ * `currentPlan` and `requiredPlan` as codes, which callers decide on; whoever
+ * reads it to a person (an agent, a page) gets `currentPlanName` and
+ * `requiredPlanName`, the plans as they are sold.
+ */
+export function planNamesOf(refusal: { currentPlan: string; requiredPlan: string }): {
+  currentPlanName: string
+  requiredPlanName: string
+} {
+  return { currentPlanName: planDisplayName(refusal.currentPlan), requiredPlanName: planDisplayName(refusal.requiredPlan) }
 }

@@ -44,6 +44,7 @@ import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
 import { hasCapability } from '../platform-capabilities'
+import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRoles } from '../statement-attribution'
 import { projectRegion, regionPool } from '@/lib/data-plane/regional'
 import type { CloudRegionId } from '@/lib/regions'
 
@@ -139,32 +140,38 @@ async function collectQueryLatency(
   const cap = await hasCapability('pg_stat_statements', region)
   if (!cap.available) return
 
+  const roles = statementRoles(schema, projectId)
   const res = await pool.query<{
     query: string
     calls: string
     total_ms: string
+    by_own_role: boolean
   }>(
+    // Only this project's statements (lib/autonomy/statement-attribution.ts).
     // No `NOT LIKE '%pg_catalog%'`: every statement PostgREST runs for /api/v2
     // and v1 /db selects `pg_catalog.count(…)`, so that filter left the app's
     // own REST traffic out of the baseline (lib/autonomy/slow-query-index.ts).
     // Read long enough that two REST reads of one table with different WHERE
     // clauses, which share their first few hundred characters, stay two shapes.
-    `SELECT LEFT(query, 4000) AS query, calls, total_exec_time AS total_ms
-       FROM pg_stat_statements
-      WHERE position($1 in query) > 0
-        AND query NOT LIKE '%information_schema%'
-      ORDER BY total_exec_time DESC
+    `SELECT LEFT(s.query, 4000) AS query, s.calls, s.total_exec_time AS total_ms,
+            ${byOwnRoleColumn('r', '$2')} AS by_own_role
+       FROM pg_stat_statements s
+       JOIN pg_roles r ON r.oid = s.userid
+      WHERE ${projectStatementScope({ s: 's', r: 'r', schema: '$1', ownRoles: '$2', platformRoles: '$3' })}
+        AND s.query NOT LIKE '%information_schema%'
+      ORDER BY s.total_exec_time DESC
       LIMIT ${MAX_QUERY_SUBJECTS}`,
-    [schema],
+    [schema, roles.own, roles.platform],
   )
-  if (res.rows.length === 0) return
+  const rows = res.rows.filter(r => projectStatement({ query: r.query, byOwnRole: r.by_own_role === true }, schema))
+  if (rows.length === 0) return
 
   const prevCalls = await loadRaw(projectId, 'query_calls')
   const prevTotal = await loadRaw(projectId, 'query_total_ms')
   const nextCalls: RawReading = {}
   const nextTotal: RawReading = {}
 
-  for (const r of res.rows) {
+  for (const r of rows) {
     const fp = queryFingerprint(r.query)
     const calls = Number(r.calls) || 0
     const totalMs = Number(r.total_ms) || 0

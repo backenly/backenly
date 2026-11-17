@@ -286,6 +286,18 @@ export async function register() {
         await runScheduledBackOfficeMaintenance()
       })
 
+      // ── Deleted projects, removed for good, 03:30 UTC ──────────────────────
+      //
+      // Deleting a project keeps it for seven days (lib/projects/deletion.ts).
+      // This removes those past their date with the full deletion a request
+      // used to run, reaching their regions from home as that request did.
+      cron.platform('30 3 * * *', async () => {
+        const { purgeDeletedProjects } = await import('./lib/projects/deletion')
+        await purgeDeletedProjects().catch((err: any) =>
+          console.error('[ProjectPurge] Error:', err?.message)
+        )
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')
@@ -753,6 +765,19 @@ export async function register() {
         )
       })
 
+      // ── Direct Postgres logins and pauses — hourly, from home ──────────────
+      // A paused or deleted project's direct logins are stopped, and a resumed
+      // or restored one's brought back, as each happens
+      // (lib/projects/paused-logins.ts). This repairs any that a failure left
+      // out of line, under each project's lifecycle lock. The logins are
+      // platform records, read here once for every region.
+      cron.platform('25 * * * *', async () => {
+        const { reconcileDirectLoginsWithPause } = await import('./lib/projects/paused-logins')
+        await reconcileDirectLoginsWithPause().catch((err: any) =>
+          console.error('[DirectAccess] paused-logins pass error:', err?.message)
+        )
+      })
+
       // ── Usage anomalies — daily 00:40 UTC, for the day just completed ─────
       // A project whose egress, function runs or new MAU jumped far past its
       // own fourteen-day median becomes a finding in the Autonomy queue, with
@@ -782,6 +807,34 @@ export async function register() {
         } catch (err: any) {
           console.error('[UsageAlerts] Error:', err?.message)
         }
+      })
+
+      // ── Direct Postgres allowlists — every 5 minutes, from home ───────────
+      // Each region's database endpoint admits only the addresses its projects
+      // allow, kept on a prefix list (lib/services/direct-access-allowlist.ts).
+      // Every change to a project's addresses syncs at once; this repairs what
+      // a failed sync, a purge or an edit made outside Backenly left. The
+      // addresses are platform records and the home web task holds every
+      // region's setting, so it runs once, at home. A no-op, said once, where
+      // no region has a prefix list (a self-hosted deployment).
+      cron.platform('*/5 * * * *', async () => {
+        const { syncDirectAccessAllowlists } = await import('./lib/services/direct-access-allowlist')
+        await syncDirectAccessAllowlists().catch((err: any) =>
+          console.error('[DirectDbAllowlist] Error:', err?.message)
+        )
+      })
+
+      // ── Direct Postgres connection limits — hourly, from home ──────────────
+      // Each project's logins hold at most its plan's number of connections at
+      // once (lib/services/direct-access.ts). A plan changes in Cloud's billing,
+      // so this brings a new plan's limit to every login within the hour, where
+      // it differs; reading a login's credentials applies it at once as well.
+      // The logins are platform records, read here once for every region.
+      cron.platform('35 * * * *', async () => {
+        const { reconcileDirectConnectionLimits } = await import('./lib/services/direct-access')
+        await reconcileDirectConnectionLimits().catch((err: any) =>
+          console.error('[DirectAccess] connection limit pass error:', err?.message)
+        )
       })
 
       // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────

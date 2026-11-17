@@ -22,7 +22,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
 import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db/prisma'
-import { executeApprovedFix, revertAutoFix } from '@/lib/core/auto-fix-engine'
+import { executeApprovedFix, recordedChanges, revertAutoFix } from '@/lib/core/auto-fix-engine'
 import { quotedError, quotesKeptHere, recordedResultMessage, recordedStatements } from '@/lib/data-plane/residency'
 import type { RecordedStatement } from '@/lib/execution/sql-recorder'
 import { heldActionRecord } from '@/lib/operational-memory/held-action-targets'
@@ -167,7 +167,12 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       lower.includes('needs your action')
 
     // 503: the project's region, which keeps what a held action replays, could
-    // not be reached, so nothing ran.
+    // not be reached, so nothing ran. 409 with EXISTING_ROWS: rows already in
+    // the table break the rule (23503, 23505, 23514), nothing changed, and only
+    // a change to those rows can help, so the page must not retry it.
+    if (result.refusedByRows) {
+      return NextResponse.json({ success: false, error: result.message, code: 'EXISTING_ROWS' }, { status: 409 })
+    }
     const statusCode = result.regionUnavailable ? 503 : isLockContention ? 409 : needsUserAction ? 422 : 500
     return NextResponse.json({ success: false, error: result.message }, { status: statusCode })
   }
@@ -292,12 +297,16 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { user, project
     )
   }
 
-  // Undoing a fix that changed the schema restores the state before its
-  // governed changes, which takes admin rights, as Restore previous state does.
-  const schemaTouching = ((finding.details ?? {}) as { rollbackData?: { schemaTouching?: boolean } }).rollbackData?.schemaTouching === true
-  if (schemaTouching && !(await canAdministerProject(user.userId, projectId))) {
+  // Undoing a fix that changed the schema, or that recorded governed changes,
+  // restores the state before those changes, which takes admin rights, as
+  // Restore previous state on History does. revertAutoFix undoes recorded
+  // changes whether or not the fix was marked schema-touching, so the gate
+  // reads both.
+  const rollbackData = ((finding.details ?? {}) as { rollbackData?: Record<string, unknown> }).rollbackData ?? {}
+  const restoresGovernedChanges = rollbackData.schemaTouching === true || recordedChanges(rollbackData)
+  if (restoresGovernedChanges && !(await canAdministerProject(user.userId, projectId))) {
     return NextResponse.json(
-      { success: false, error: 'Only a project admin can undo a fix that changed the schema: it restores the state before that change.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+      { success: false, error: 'Only a project admin can undo this fix: it restores the state before the changes it made.', code: 'PROJECT_ROLE_INSUFFICIENT' },
       { status: 403 },
     )
   }

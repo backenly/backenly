@@ -80,7 +80,7 @@ it('answers the list with the plan, not a refusal', async () => {
 it('still refuses to add an endpoint on that plan', async () => {
   const r = await call(POST, { method: 'POST', body: { eventType: 'row.inserted', targetUrl: 'https://hooks.example.test/in' } })
   expect(r.status).toBe(403)
-  expect(r.body).toMatchObject({ code: 'PLAN_LIMIT_EXCEEDED', requiredPlan: 'PRO' })
+  expect(r.body).toMatchObject({ code: 'PLAN_LIMIT_EXCEEDED', requiredPlan: 'PRO', currentPlanName: 'Free', requiredPlanName: 'Pro' })
   expect(await prisma.webhook.count({ where: { projectId } })).toBe(0)
 })
 

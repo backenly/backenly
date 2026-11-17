@@ -32,9 +32,9 @@
  */
 
 import crypto from 'crypto'
+import { isIP } from 'net'
 import { prisma } from '@/lib/db/prisma'
 import {
-  RegionNotConfiguredError,
   projectDriftEvents,
   projectRegion,
   regionDatabaseUrl,
@@ -43,10 +43,14 @@ import {
   workspaceRawClient,
 } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
 import { rotateProjectChannel } from '@/lib/realtime/channels'
+import { allowlistState, type AllowlistState } from '@/lib/services/direct-access-addresses'
+import { directPostgresAllowanceFor } from '@/lib/entitlements/direct-postgres'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 
 export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -77,6 +81,52 @@ export class SchemaChangesUnavailableError extends Error {
   }
 }
 
+/**
+ * Direct connections are not offered where nothing answers them.
+ *
+ * A login's connection string names the region's developer-facing host
+ * (DIRECT_DB_HOST, or DIRECT_DB_HOST_<REGION>). Without one, the home region
+ * used to fall back to backenly.com:5432, where nothing listens: Connect handed
+ * out read-only and read-write strings that psql, TablePlus, BI tools and the
+ * copied pg_dump command could never connect with (production QA re-test,
+ * 2026-11-16, N4). Every Backenly Cloud database is private to its VPC, so
+ * until a region has a public endpoint, no string is shown or issued for it.
+ * The platform's own use of a project's read-only role, an agent's run_query,
+ * dials the database directly and is unaffected (readOnlyLogin).
+ */
+export const DIRECT_ACCESS_UNAVAILABLE_MESSAGE =
+  "Direct Postgres connections aren't available in this project's region yet: nothing outside Backenly can reach its database, so there is no connection string to give."
+
+export class DirectAccessUnavailableError extends Error {
+  readonly code = 'DIRECT_ACCESS_UNAVAILABLE'
+  constructor(readonly region: CloudRegionId, readonly variable: string) {
+    super(DIRECT_ACCESS_UNAVAILABLE_MESSAGE)
+    this.name = 'DirectAccessUnavailableError'
+  }
+}
+
+/**
+ * A login asked for while the project is paused, or asked to be deleted, which
+ * pauses it. Its logins are stopped while it is (lib/projects/paused-logins.ts),
+ * so none is created or re-keyed: that would let one connect again.
+ */
+export class DirectAccessPausedError extends Error {
+  readonly code = 'PROJECT_PAUSED'
+  constructor(readonly deleted: boolean) {
+    super(
+      deleted
+        ? 'This project was deleted, so it gets no Postgres login. Restore it first.'
+        : "This project is paused, so its Postgres logins don't connect and no new one is made. Resume it first.",
+    )
+    this.name = 'DirectAccessPausedError'
+  }
+}
+
+async function refuseWhilePaused(projectId: string): Promise<void> {
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true, pauseReason: true } })
+  if (project?.pausedAt) throw new DirectAccessPausedError(project.pauseReason === DELETED_PAUSE_REASON)
+}
+
 export interface DirectAccessCredential {
   mode: DirectAccessMode
   roleName: string
@@ -84,7 +134,38 @@ export interface DirectAccessCredential {
   host: string
   port: number
   database: string
+  /**
+   * The string for psql, pg_dump, psycopg and other libpq tools. Where the
+   * region's endpoint fronts its RDS instance, it verifies the server in full:
+   * the instance's own name (which its certificate carries) as the host, the
+   * endpoint's fixed address as hostaddr, and the CA bundle as sslrootcert.
+   */
   connectionString: string
+  /**
+   * Where the region's endpoint fronts its RDS instance: the string for clients
+   * that read sslmode=verify-ca from a URL (Go's pgx, Python's asyncpg, Rust's
+   * sqlx), on the endpoint's own name, verifying the certificate's chain
+   * against the CA bundle without its name.
+   */
+  verifyCaConnectionString?: string
+  /**
+   * Where the region's endpoint fronts its RDS instance: settings for
+   * node-postgres (and Drizzle or Prisma on it), which verifies the host name
+   * even under verify-ca, and sets the name it checks to the host whenever the
+   * host is a name (pg/lib/connection.js). So the host is the endpoint's
+   * address, which it leaves alone, and ssl.servername the instance's name:
+   * pass them with ssl: { ca: <the CA file's contents>, servername }.
+   */
+  nodePostgres?: {
+    host: string
+    port: number
+    database: string
+    user: string
+    password: string
+    ssl: { servername: string; caFile: string; caUrl: string }
+  }
+  /** Where the strings name a CA bundle: its file name, as the strings name it, and where to download it. */
+  caBundle?: { file: string; url: string }
   psqlCommand: string
   pgDumpCommand: string
   createdAt: string
@@ -97,7 +178,29 @@ export interface DirectAccessCredential {
 
 export interface DirectAccessStatus {
   schema: string
+  /** Whether a connection from outside Backenly can reach this project's database. */
+  available: boolean
+  /** Why not, in a sentence, where it cannot. */
+  unavailable?: string
   credentials: DirectAccessCredential[]
+  /**
+   * Where connections cannot be made: the logins that exist, by name, so they
+   * can still be revoked. Their passwords and strings are not given.
+   */
+  logins?: Array<{ mode: DirectAccessMode; roleName: string; createdAt: string; rotatedAt: string | null }>
+  /**
+   * Where connections can be made: the addresses this project allows
+   * (lib/services/direct-access-addresses.ts). Where the region's endpoint
+   * admits only allowed addresses (`enforced`), it admits those of every
+   * project in the region; the login's password is what reaches this one.
+   */
+  allowlist?: AllowlistState
+  /**
+   * Where connections can be made: how many each login may hold at once, by
+   * the project's plan (Postgres CONNECTION LIMIT). Null where the database
+   * cannot set it yet (helpers from before section 3b).
+   */
+  connectionLimit?: number | null
   pendingDriftEvents: number
 }
 
@@ -118,23 +221,69 @@ function generatePassword(): string {
 
 // ── Connection info ───────────────────────────────────────────────────────────
 
+/**
+ * The RDS CA bundle every Backenly image trusts (docker/web.Dockerfile builds
+ * /app/certs/rds-ca-cloud-regions.pem from docker/certs), published byte for
+ * byte at this path (public/certs) so a client can verify the server with it.
+ * The strings name the file; the console and MCP say where to download it.
+ */
+export const CA_BUNDLE_FILE = 'rds-ca-cloud-regions.pem'
+export const CA_BUNDLE_PATH = `/certs/${CA_BUNDLE_FILE}`
+
 interface ConnectionTarget {
   host: string
   port: number
   database: string
   sslmode: string
+  /**
+   * Where the region's endpoint fronts its RDS instance (DIRECT_DB_TLS_HOST and
+   * DIRECT_DB_HOSTADDR, regional forms as for DIRECT_DB_HOST): the instance's
+   * own name, which its certificate carries and a name of Backenly's would not,
+   * and the endpoint's fixed address, so libpq connects to the address and
+   * verifies the name.
+   */
+  verified: { tlsHost: string; hostaddr: string } | null
+}
+
+const misconfigurationSaid = new Set<string>()
+
+/** DIRECT_DB_TLS_HOST and DIRECT_DB_HOSTADDR for the region, when both are set and usable. */
+function verifiedEndpoint(region: CloudRegionId): { tlsHost: string; hostaddr: string } | null {
+  const tls = regionSetting('DIRECT_DB_TLS_HOST', region)
+  const addr = regionSetting('DIRECT_DB_HOSTADDR', region)
+  const tlsHost = tls.value?.trim()
+  const hostaddr = addr.value?.trim()
+  if (!tlsHost && !hostaddr) return null
+  const problem =
+    !tlsHost || !hostaddr
+      ? `${tlsHost ? tls.variable : addr.variable} is set without ${tlsHost ? addr.variable : tls.variable}`
+      : !isIP(hostaddr)
+        ? `${addr.variable} is not an IP address`
+        : !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(tlsHost)
+          ? `${tls.variable} is not a host name`
+          : null
+  if (problem) {
+    if (!misconfigurationSaid.has(problem)) {
+      misconfigurationSaid.add(problem)
+      console.warn(`[DirectAccess] region=${region}: ${problem}, so its strings keep sslmode=require until both are set`)
+    }
+    return null
+  }
+  return { tlsHost: tlsHost!, hostaddr: hostaddr! }
 }
 
 /**
  * Where a developer connects to reach a project's data: the database in the
  * project's region, where its role exists.
  *
- * The home region keeps DIRECT_DB_HOST / DIRECT_DB_PORT and their defaults.
- * Any other region needs its own DIRECT_DB_HOST_<REGION> (DIRECT_DB_PORT_<REGION>
- * optional): without it this refuses, rather than hand out the home host, where
- * the project's role and schema do not exist.
+ * Each region needs its own developer-facing host: DIRECT_DB_HOST for the home
+ * region, DIRECT_DB_HOST_<REGION> for any other (DIRECT_DB_PORT and its
+ * regional form optional). Without one this refuses with
+ * DirectAccessUnavailableError rather than name a host nothing answers on:
+ * another region's, or backenly.com. Outside production the home region keeps
+ * localhost, the developer's own database.
  */
-function connectionTargetFor(region: CloudRegionId, projectId: string): ConnectionTarget {
+function connectionTargetFor(region: CloudRegionId, _projectId: string): ConnectionTarget {
   const isProd = process.env.NODE_ENV === 'production'
   let database = 'backenly'
   try {
@@ -144,16 +293,17 @@ function connectionTargetFor(region: CloudRegionId, projectId: string): Connecti
     /* keep default */
   }
   const host = regionSetting('DIRECT_DB_HOST', region)
-  if (region !== HOME_REGION && !host.value) {
-    throw new RegionNotConfiguredError(region, host.variable, projectId)
-  }
+  const hostname = host.value || (!isProd && region === HOME_REGION ? 'localhost' : '')
+  if (!hostname) throw new DirectAccessUnavailableError(region, host.variable)
   return {
-    host: host.value || (isProd ? 'backenly.com' : 'localhost'),
+    host: hostname,
     port: parseInt(regionSetting('DIRECT_DB_PORT', region).value ?? '5432', 10),
     database,
-    // Snakeoil cert on the box → require (encrypted, no CA verification). Local
+    // Where the endpoint is not described further (a self-hosted server with a
+    // certificate of its own): require (encrypted, no CA verification). Local
     // dev clusters usually have ssl off, so don't demand it there.
     sslmode: isProd ? 'require' : 'prefer',
+    verified: verifiedEndpoint(region),
   }
 }
 
@@ -166,9 +316,32 @@ function buildCredential(
   schema: string,
   target: ConnectionTarget,
 ): DirectAccessCredential {
-  const { host, port, database, sslmode } = target
+  const { host, port, database, sslmode, verified } = target
   const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
-  const connectionString = `postgresql://${row.roleName}:${password}@${host}:${port}/${database}?sslmode=${sslmode}`
+  const login = `${row.roleName}:${password}`
+  // The RDS certificate names only the instance's own endpoint, so verify-full
+  // needs that name as the host and the endpoint's address as hostaddr, which
+  // only libpq understands. Clients that implement verify-ca verify the chain
+  // on the endpoint's own name (owner's decision, 2026-11-17). node-postgres
+  // does neither: it gets settings that verify in full (nodePostgres).
+  const connectionString = verified
+    ? `postgresql://${login}@${verified.tlsHost}:${port}/${database}?hostaddr=${verified.hostaddr}&sslmode=verify-full&sslrootcert=${CA_BUNDLE_FILE}`
+    : `postgresql://${login}@${host}:${port}/${database}?sslmode=${sslmode}`
+  const caUrl = `${resolvePublicBaseUrl({ headers: new Headers() })}${CA_BUNDLE_PATH}`
+  const otherClients = verified
+    ? {
+        verifyCaConnectionString: `postgresql://${login}@${host}:${port}/${database}?sslmode=verify-ca&sslrootcert=${CA_BUNDLE_FILE}`,
+        nodePostgres: {
+          host: verified.hostaddr,
+          port,
+          database,
+          user: row.roleName,
+          password,
+          ssl: { servername: verified.tlsHost, caFile: CA_BUNDLE_FILE, caUrl },
+        },
+        caBundle: { file: CA_BUNDLE_FILE, url: caUrl },
+      }
+    : {}
   return {
     mode: row.mode as DirectAccessMode,
     roleName: row.roleName,
@@ -177,6 +350,7 @@ function buildCredential(
     port,
     database,
     connectionString,
+    ...otherClients,
     // search_path is pinned per-role server-side, so plain psql lands in the
     // project's schema — `\dt` just works.
     psqlCommand: `psql "${connectionString}"`,
@@ -256,6 +430,8 @@ async function withSchemaChanges(projectId: string, credential: DirectAccessCred
  */
 export async function setSchemaChanges(projectId: string, allowed: boolean): Promise<DirectAccessCredential> {
   assertValidProjectId(projectId)
+  // A login nothing can connect with has no schema changes to allow.
+  const target = await connectionTarget(projectId)
   const existing = await prisma.databaseCredential.findUnique({ where: { projectId_mode: { projectId, mode: 'READ_WRITE' } } })
   if (!existing) throw new Error('This project has no read-write login to change.')
   if (allowed) {
@@ -282,7 +458,7 @@ export async function setSchemaChanges(projectId: string, allowed: boolean): Pro
       timestamp: new Date(),
     },
   }).catch(() => {})
-  const [schema, target] = await Promise.all([resolveWorkspaceSchema(projectId), connectionTarget(projectId)])
+  const schema = await resolveWorkspaceSchema(projectId)
   return withSchemaChanges(projectId, buildCredential(existing, schema, target))
 }
 
@@ -292,6 +468,8 @@ export async function setSchemaChanges(projectId: string, allowed: boolean): Pro
  * in its region: a role anywhere else could never reach the schema.
  */
 async function provisionRole(projectId: string, mode: DirectAccessMode, schema: string) {
+  // Creating or re-keying a login gives it LOGIN: not while the project is paused.
+  await refuseWhilePaused(projectId)
   const db = await workspaceRawClient(projectId)
   const names = directAccessRoleNames(projectId)
   const roleName = mode === 'READ_ONLY' ? names.ro : names.rw
@@ -300,6 +478,8 @@ async function provisionRole(projectId: string, mode: DirectAccessMode, schema: 
   // Definer function validates names server-side and is idempotent (re-keys if
   // the role already exists — recovers cleanly from a half-finished provision).
   await db.$queryRaw`SELECT public.backenly_direct_create_role(${roleName}, ${password}, ${schema}, ${mode})`
+  // The plan's number of connections at once, from the login's first moment.
+  await applyConnectionLimit(projectId, [roleName])
 
   const enc = encryptValue(password)
   const row = await prisma.databaseCredential.upsert({
@@ -369,6 +549,7 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
   // The role lives on the project's database, in its region.
   const db = await workspaceRawClient(projectId)
   await db.$queryRaw`SELECT public.backenly_direct_set_password(${existing.roleName}, ${password})`
+  await applyConnectionLimit(projectId, [existing.roleName])
 
   const enc = encryptValue(password)
   const row = await prisma.databaseCredential.update({
@@ -405,6 +586,13 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
     where: { projectId_mode: { projectId, mode } },
   })
   if (!existing) return
+  // A login a pause stopped is brought back on resume only while its row
+  // carries the pause's mark (lib/projects/paused-logins.ts). Cleared first,
+  // so a revocation that stops part-way, its row kept to be retried, leaves
+  // a login nothing brings back.
+  if (existing.stoppedForPauseAt) {
+    await prisma.databaseCredential.update({ where: { id: existing.id }, data: { stoppedForPauseAt: null } })
+  }
 
   // Terminates live sessions, drops policies naming the role, reassigns any
   // tables it created to the platform role, then drops it. On the project's
@@ -490,13 +678,126 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
     // Counted in the project's region, where the capture trigger records them.
     projectDriftEvents(projectId).then((events) => events.count({ where: { projectId, status: 'pending' } })),
   ])
-  // Only a project that has credentials needs to know where they connect.
-  const target = rows.length > 0 ? await connectionTarget(projectId) : null
-  return {
-    schema,
-    credentials: target ? await Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))) : [],
-    pendingDriftEvents,
+  let target: ConnectionTarget
+  try {
+    target = await connectionTarget(projectId)
+  } catch (err) {
+    if (!(err instanceof DirectAccessUnavailableError)) throw err
+    // Nothing outside can connect: no strings, and the logins that exist by
+    // name only, so they can still be revoked.
+    return {
+      schema,
+      available: false,
+      unavailable: err.message,
+      credentials: [],
+      logins: rows.map((r) => ({
+        mode: r.mode as DirectAccessMode,
+        roleName: r.roleName,
+        createdAt: r.createdAt.toISOString(),
+        rotatedAt: r.rotatedAt ? r.rotatedAt.toISOString() : null,
+      })),
+      pendingDriftEvents,
+    }
   }
+  const [credentials, allowlist, connectionLimit] = await Promise.all([
+    Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))),
+    allowlistState(projectId),
+    // Every read of the credentials applies the plan's limit, so a plan
+    // change reaches the logins at the next one (applyConnectionLimit).
+    applyConnectionLimit(projectId, rows.map((r) => r.roleName)),
+  ])
+  return { schema, available: true, credentials, allowlist, connectionLimit, pendingDriftEvents }
+}
+
+// ── Connections at once, by plan ──────────────────────────────────────────────
+//
+// Each of a project's logins may hold its plan's number of connections at once
+// (lib/entitlements/direct-postgres.ts: Free 2, Pro 5, Enterprise 20), set
+// through the definer helper (scripts/setup-direct-access.sql, 3b) where it
+// differs. When a login is created, on every read of its credentials (the
+// console's Postgres tab, MCP database_credentials, a rotation), and every hour
+// for every project with a login (reconcileDirectConnectionLimits): a plan
+// changes in Backenly Cloud's billing, which has no hook into this repository,
+// so the hourly pass is what brings a new plan's limit to logins nobody reads.
+
+const limitHelperMissingSaid = new Set<CloudRegionId>()
+
+/**
+ * The plan's limit set on these logins of the project, and how many changed.
+ * The limit is null where the region's helpers predate 3b (said once per
+ * region). Never throws: on any failure the logins keep the limit they have,
+ * and the next read or the hourly pass tries again.
+ */
+async function setConnectionLimits(projectId: string, roleNames: string[]): Promise<{ limit: number | null; changed: number }> {
+  try {
+    const { connectionLimit } = await directPostgresAllowanceFor(projectId)
+    const region = await projectRegion(projectId)
+    const db = await workspaceRawClient(projectId)
+    const [probe] = await db.$queryRaw<Array<{ present: boolean }>>`
+      SELECT to_regprocedure('public.backenly_direct_set_connection_limit(text,integer)') IS NOT NULL AS present`
+    if (!probe?.present) {
+      if (!limitHelperMissingSaid.has(region)) {
+        limitHelperMissingSaid.add(region)
+        console.warn(
+          `[DirectAccess] region=${region}: the database's direct-access helpers predate per-plan connection limits; ` +
+            'logins keep the limits they were created with until scripts/setup-direct-access.sql is installed again',
+        )
+      }
+      return { limit: null, changed: 0 }
+    }
+    if (roleNames.length === 0) return { limit: connectionLimit, changed: 0 }
+    const logins = await db.$queryRaw<Array<{ rolname: string; rolconnlimit: number }>>`
+      SELECT rolname::text AS rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(${roleNames}::text[])`
+    let changed = 0
+    for (const login of logins) {
+      if (login.rolconnlimit !== connectionLimit) {
+        await db.$queryRaw`SELECT public.backenly_direct_set_connection_limit(${login.rolname}, ${connectionLimit}::int)`
+        changed += 1
+      }
+    }
+    return { limit: connectionLimit, changed }
+  } catch (err) {
+    console.warn(
+      `[DirectAccess] project=${projectId}: the plan's connection limit was not applied (${err instanceof Error ? err.name : 'Error'}); the next read tries again`,
+    )
+    return { limit: null, changed: 0 }
+  }
+}
+
+/**
+ * Set these logins of the project to its plan's number of connections at once,
+ * where it differs. Answers the limit, or null where the region's helpers
+ * predate per-plan limits. Never throws.
+ */
+export async function applyConnectionLimit(projectId: string, roleNames: string[]): Promise<number | null> {
+  return (await setConnectionLimits(projectId, roleNames)).limit
+}
+
+/**
+ * The same for every login the project has: for a caller that knows only the
+ * project, such as Cloud's plan-change handlers, which may call it to apply a
+ * new plan's limit at once rather than at the next hourly pass. Never throws.
+ */
+export async function applyPlanConnectionLimits(projectId: string): Promise<number | null> {
+  const rows = await prisma.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } }).catch(() => [])
+  return applyConnectionLimit(projectId, rows.map((r) => r.roleName))
+}
+
+/**
+ * The hourly pass (instrumentation.ts, on the home region's scheduler): every
+ * project with a login, its logins set to its plan's limit where they differ,
+ * so a plan change reaches them within the hour. One project at a time; a
+ * project that fails is logged by setConnectionLimits and left for the next
+ * pass. Says how many logins changed, and only when some did.
+ */
+export async function reconcileDirectConnectionLimits(): Promise<{ projects: number; changed: number }> {
+  const rows = await prisma.databaseCredential.findMany({ select: { projectId: true, roleName: true } }).catch(() => [])
+  const byProject = new Map<string, string[]>()
+  for (const r of rows) byProject.set(r.projectId, [...(byProject.get(r.projectId) ?? []), r.roleName])
+  let changed = 0
+  for (const [projectId, roleNames] of byProject) changed += (await setConnectionLimits(projectId, roleNames)).changed
+  if (changed > 0) console.log(`[DirectAccess] set ${changed} login(s) in ${byProject.size} project(s) to their plan's connection limit`)
+  return { projects: byProject.size, changed }
 }
 
 // ── Grants sync — the hook called after DDL, for every project ───────────────

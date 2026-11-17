@@ -20,7 +20,7 @@ import { emit } from '@/lib/events/bus'
 import { prisma } from '@/lib/db/prisma'
 import { enforceDbStorage } from '@/lib/quota/kernel'
 import { snapshotProjectDbStorage } from '@/lib/usage/db-storage'
-import { getProjectServingState, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
+import { getProjectServingState, pausedMessage } from '@/lib/projects/serving-state'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -79,7 +79,7 @@ export async function runMutation<T>(
   // steps, which need the same database and will report their own failure.
   const serving = await getProjectServingState(projectId)
   if (serving.kind === 'paused') {
-    return { ok: false, paused: true, error: PAUSED_MESSAGE }
+    return { ok: false, paused: true, error: pausedMessage(serving.reason) }
   }
 
   // ── 0b. Plan storage gate ─────────────────────────────────────────────────

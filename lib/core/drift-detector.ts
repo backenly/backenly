@@ -347,8 +347,16 @@ export async function detectMissingFkIndexes(
     schema,
   ).catch(probeQueryFailed('detectMissingFkIndexes'))
 
-  const hits: Array<{ table_name: string; column_name: string; has_fk: boolean }> =
+  const found: Array<{ table_name: string; column_name: string; has_fk: boolean }> =
     rows?.rows ?? rows ?? []
+
+  // A table declared in SQL is asked about the keys it declares, never about a
+  // column only named like one (session_id, ext_id): it has the indexes its SQL
+  // declares (lib/ai/minimal-executor.ts, executeCreateTable). Unreadable marks
+  // leave every candidate in, as before.
+  const { tablesDeclaredInSql } = await import('@/lib/db/declared-tables')
+  const declared = await tablesDeclaredInSql(projectId).catch(() => new Set<string>())
+  const hits = found.filter((r) => r.has_fk || !declared.has(r.table_name))
 
   return hits.map((r) => ({
     type: 'missing_fk_index' as const,
@@ -378,11 +386,20 @@ export async function detectMissingFkIndexes(
  * protected, but the policy makes it a no-op. This is a common, high-impact
  * misconfiguration that a missing-RLS check cannot catch (RLS *is* enabled).
  *
- * Scoped to tables that have a user/owner column, so tightening to the
- * `own_rows` template is the correct remediation rather than a false positive
- * on intentionally-public lookup tables. Maps to the existing
- * `rls_expression_invalid` type → the kernel already repairs it via
- * SET_PERMISSION(own_rows). Deterministic; no LLM.
+ * A policy that only opens READS is flagged on tables that have a user/owner
+ * column, where tightening to the `own_rows` template is the correct
+ * remediation; on a table with none it is usually a public catalog read on
+ * purpose (Supabase's linter leaves SELECT USING (true) alone for the same
+ * reason, supabase/splinter lint 0024). Maps to `rls_expression_invalid`, which
+ * the kernel repairs via SET_PERMISSION(own_rows).
+ *
+ * A policy that opens WRITES (INSERT, UPDATE, DELETE or ALL, always true) is
+ * flagged on every table, as splinter's 0024 does: it lets everyone it covers
+ * change any row, whatever the table holds. It was skipped when the table had
+ * no owner column, so a table anyone could rewrite read as protected. With no
+ * column saying whose a row is, there is no rule Backenly can choose, so that
+ * finding is the owner's to answer (rlsBasis 'undecidable': notify-only, with
+ * the question in the hint). Deterministic; no LLM.
  */
 export async function detectOverPermissiveRls(
   projectId: string,
@@ -392,7 +409,13 @@ export async function detectOverPermissiveRls(
   const rows = await queryWorkspaceSchema(
     projectId,
     `
-    SELECT DISTINCT p.tablename, p.policyname, p.cmd
+    SELECT DISTINCT p.tablename, p.policyname, p.cmd,
+           EXISTS (
+             SELECT 1 FROM information_schema.columns col
+             WHERE col.table_schema = $1
+               AND col.table_name   = p.tablename
+               AND col.column_name IN ('user_id', 'userId', 'owner_id')
+           ) AS has_owner
     FROM pg_policies p
     JOIN pg_class c     ON c.relname = p.tablename
     JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
@@ -432,18 +455,22 @@ export async function detectOverPermissiveRls(
         WHERE pr.role <> 'backenly_external'
           AND pr.role NOT LIKE 'bkn\\_%' ESCAPE '\\'
       )
-      AND EXISTS (
-        SELECT 1 FROM information_schema.columns col
-        WHERE col.table_schema = $1
-          AND col.table_name   = p.tablename
-          AND col.column_name IN ('user_id', 'userId', 'owner_id')
+      -- Reads only where a column says whose a row is; writes everywhere.
+      AND (
+        p.cmd <> 'SELECT'
+        OR EXISTS (
+          SELECT 1 FROM information_schema.columns col
+          WHERE col.table_schema = $1
+            AND col.table_name   = p.tablename
+            AND col.column_name IN ('user_id', 'userId', 'owner_id')
+        )
       )
     ORDER BY p.tablename
     `,
     schema,
   ).catch(probeQueryFailed('detectOverPermissiveRls'))
 
-  const hits: Array<{ tablename: string; policyname: string; cmd: string }> =
+  const hits: Array<{ tablename: string; policyname: string; cmd: string; has_owner: boolean }> =
     rows?.rows ?? rows ?? []
 
   // One finding per table (collapse multiple permissive policies).
@@ -460,6 +487,26 @@ export async function detectOverPermissiveRls(
       cmd === 'SELECT' ? 'every row is readable by every caller'
       : cmd === 'ALL'  ? 'every row is readable and writable by every caller'
       : `every row is open to ${cmd} by every caller`
+    const reason = `RLS is enabled on "${r.tablename}" but policy "${r.policyname}" (FOR ${cmd}) matches unconditionally — ${surface}, so protection is effectively off`
+    if (!r.has_owner) {
+      // Only a write policy reaches here without an owner column (above).
+      out.push({
+        type: 'rls_expression_invalid' as const,
+        severity: 'warning' as const,
+        details: {
+          tableName: r.tablename,
+          policyName: r.policyname,
+          policyCommand: cmd,
+          schemaName: schema,
+          reason,
+          openWrites: true,
+          rlsBasis: 'undecidable',
+          rlsRationale: `No column on "${r.tablename}" says whose a row is, so Backenly will not choose who may change rows.`,
+        },
+        autoFixable: false,
+      })
+      continue
+    }
     out.push({
       type: 'rls_expression_invalid' as const,
       severity: 'warning' as const,
@@ -468,12 +515,129 @@ export async function detectOverPermissiveRls(
         policyName: r.policyname,
         policyCommand: cmd,
         schemaName: schema,
-        reason: `RLS is enabled on "${r.tablename}" but policy "${r.policyname}" (FOR ${cmd}) matches unconditionally — ${surface}, so protection is effectively off`,
+        reason,
       },
       autoFixable: true,
     })
   }
   return out
+}
+
+/**
+ * Column names that mark a credential, a personal identifier, financial,
+ * health or device data, or a key. Supabase's database linter, lint 0023
+ * sensitive_columns_exposed (github.com/supabase/splinter,
+ * lints/0023_sensitive_columns_exposed.sql, Apache-2.0), taken as published.
+ * Matched as it matches them: the column's name in lower case, with "-" read
+ * as "_", equal to an entry.
+ */
+export const SENSITIVE_COLUMN_NAMES: readonly string[] = [
+  // Authentication and credentials
+  'password', 'passwd', 'pwd', 'passphrase',
+  'secret', 'secret_key', 'private_key', 'api_key', 'apikey',
+  'auth_key', 'token', 'jwt', 'access_token', 'refresh_token',
+  'oauth_token', 'session_token', 'bearer_token', 'auth_code',
+  'session_id', 'session_key', 'session_secret',
+  'recovery_code', 'backup_code', 'verification_code',
+  'otp', 'two_factor', '2fa_secret', '2fa_code',
+  // Personal identifiers
+  'ssn', 'social_security', 'social_security_number',
+  'driver_license', 'drivers_license', 'license_number',
+  'passport_number', 'passport_id', 'national_id', 'tax_id',
+  // Financial information
+  'credit_card', 'card_number', 'cvv', 'cvc', 'cvn',
+  'bank_account', 'account_number', 'routing_number',
+  'iban', 'swift_code', 'bic',
+  // Health and medical
+  'health_record', 'medical_record', 'patient_id',
+  'insurance_number', 'health_insurance', 'medical_insurance',
+  'treatment',
+  // Device identifiers
+  'mac_address', 'macaddr', 'imei', 'device_uuid',
+  // Digital keys and certificates
+  'pgp_key', 'gpg_key', 'ssh_key', 'certificate',
+  'license_key', 'activation_key',
+  // Biometric data
+  'facial_recognition',
+]
+
+/**
+ * Tables anyone holding the publishable key can read in full that have a
+ * column named on SENSITIVE_COLUMN_NAMES: row-level security is on, and a
+ * permissive SELECT (or ALL) policy for everyone (PUBLIC) or for the
+ * publishable key's role (anon) is always true.
+ *
+ * Production QA (2026-11-16): `product_views` came out of a build with
+ * `backenly_public_read_select` (SELECT USING (true)), and an anonymous request
+ * read its session ids. detectOverPermissiveRls looks only at tables with an
+ * owner column and detectMissingRls only at tables with RLS off, so neither
+ * said a word. Splinter's 0023 flags such columns when RLS is off; RLS on with
+ * an always-true read is the same exposure, and the case Backenly's templates
+ * produce.
+ *
+ * Notify-only (fix-classifier.ts): whether those rows should be public is the
+ * owner's call, and narrowing the read would break an app that reads them in
+ * the open. The hint says what to ask the coding agent. Critical, as splinter
+ * rates 0023: the publishable key ships in the frontend, so "anyone" is
+ * literal.
+ */
+export async function detectSensitiveColumnsAnyoneCanRead(projectId: string): Promise<RawFinding[]> {
+  const schema = `workspace_${projectId}`
+  const rows = await queryWorkspaceSchema(
+    projectId,
+    `
+    SELECT p.tablename,
+           array_agg(DISTINCT p.policyname::text ORDER BY p.policyname::text) AS policies,
+           (
+             SELECT array_agg(a.attname::text ORDER BY a.attname)
+             FROM pg_attribute a
+             WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+               AND replace(lower(a.attname), '-', '_') = ANY($2::text[])
+           ) AS columns
+    FROM pg_policies p
+    JOIN pg_class c     ON c.relname = p.tablename AND c.relkind = 'r'
+    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
+    WHERE p.schemaname = $1
+      AND c.relrowsecurity
+      AND ${notReservedTableSql('p.tablename')}
+      AND p.permissive = 'PERMISSIVE'
+      AND p.cmd IN ('SELECT', 'ALL')
+      -- Normalised as splinter normalises it: no whitespace, lower case.
+      AND replace(replace(replace(lower(coalesce(p.qual, '')), ' ', ''), E'\\n', ''), E'\\t', '')
+          IN ('true', '(true)', '1=1', '(1=1)')
+      AND p.roles && ARRAY['public', 'anon']::name[]
+      -- The publishable key's role can read the table at all. Guarded: the
+      -- REST API's roles may not exist in a dev database, and
+      -- has_table_privilege errors on an unknown role.
+      AND CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')
+               THEN has_table_privilege('anon', c.oid, 'SELECT')
+               ELSE false END
+    GROUP BY p.tablename, c.oid
+    ORDER BY p.tablename
+    `,
+    schema,
+    [...SENSITIVE_COLUMN_NAMES],
+  ).catch(probeQueryFailed('detectSensitiveColumnsAnyoneCanRead'))
+
+  const hits: Array<{ tablename: string; policies: string[]; columns: string[] | null }> =
+    rows?.rows ?? rows ?? []
+  return hits
+    .filter((r) => Array.isArray(r.columns) && r.columns.length > 0)
+    .map((r) => ({
+      type: 'sensitive_columns_exposed' as const,
+      severity: 'critical' as const,
+      details: {
+        tableName: r.tablename,
+        columnNames: r.columns!,
+        policyNames: r.policies,
+        schemaName: schema,
+        category: 'security',
+        reason:
+          `Anyone with the publishable key can read every row of "${r.tablename}", including ` +
+          `${r.columns!.join(', ')}: policy ${r.policies.map((p) => `"${p}"`).join(', ')} allows every read.`,
+      },
+      autoFixable: false,
+    }))
 }
 
 // ─── 3.2 Auth Integrity ───────────────────────────────────────────────────────

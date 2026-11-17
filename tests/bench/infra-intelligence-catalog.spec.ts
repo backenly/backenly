@@ -20,11 +20,17 @@
  * and EXECUTES it against Postgres — the only authority on whether a column
  * exists. Any future catalog-name mistake in this file fails here, not silently
  * in production six days later.
+ *
+ * A query built from the shared statement-attribution conditions has `${…}` in
+ * its text, so it is not SQL as written. It is executed as the module sends it:
+ * its template evaluated with those helpers in scope (asSentSql), and its
+ * parameters bound by type (emptyParams).
  */
 
 import * as fs from 'fs'
 import * as path from 'path'
 import { Pool } from 'pg'
+import * as attribution from '@/lib/autonomy/statement-attribution'
 
 const SOURCE = path.join(process.cwd(), 'lib', 'ai', 'infra-intelligence.ts')
 const CONN = process.env.BENCH_DATABASE_URL || process.env.DATABASE_URL || ''
@@ -81,6 +87,28 @@ function extractPgStatQueries(src: string): string[] {
   return out
 }
 
+/**
+ * The SQL a template built from the attribution conditions
+ * (lib/autonomy/statement-attribution.ts) sends: the template evaluated as the
+ * module evaluates it, with those helpers in scope. A template that interpolates
+ * anything else throws a ReferenceError here, so it cannot go unexecuted.
+ */
+function asSentSql(template: string): string {
+  const names = Object.keys(attribution)
+  const helpers = names.map((n) => (attribution as Record<string, unknown>)[n])
+  return new Function(...names, 'return `' + template + '`')(...helpers) as string
+}
+
+/**
+ * A value for each placeholder that matches nothing, of the type the SQL reads:
+ * an array where it casts one (`$2::text[]`), else a schema name no project has.
+ */
+function emptyParams(sql: string): unknown[] {
+  const count = Math.max(0, ...[...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])))
+  const arrays = new Set([...sql.matchAll(/\$(\d+)::text\[\]/g)].map((m) => Number(m[1])))
+  return Array.from({ length: count }, (_, i) => (arrays.has(i + 1) ? ['no_such_role'] : 'no_such_schema'))
+}
+
 describe('infra-intelligence pg_stat queries', () => {
   const src = fs.readFileSync(SOURCE, 'utf8')
   const queries = extractPgStatQueries(src)
@@ -89,6 +117,17 @@ describe('infra-intelligence pg_stat queries', () => {
     // If this drops to zero the extractor silently stopped guarding anything —
     // a green suite proving nothing, which is the exact failure class above.
     expect(queries.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('reads a built query as the SQL it sends', () => {
+    // The slow-query and filter-column reads are built from the attribution
+    // conditions. Evaluated, each is plain SQL that binds the role arrays.
+    const built = queries.filter((q) => q.includes('${'))
+    expect(built.length).toBeGreaterThanOrEqual(2)
+    for (const sql of built.map(asSentSql)) {
+      expect(sql).not.toContain('${')
+      expect(emptyParams(sql)).toContainEqual(['no_such_role'])
+    }
   })
 
   it('never selects `tablename` from a pg_stat_* view', () => {
@@ -120,16 +159,13 @@ describe('infra-intelligence pg_stat queries', () => {
     const pool = new Pool({ connectionString: CONN, max: 2 })
     const columnErrors: string[] = []
     try {
-      for (const q of queries) {
-        // Bind every placeholder with a schema that matches nothing: the
-        // assertion is that Postgres ACCEPTS the statement, not that it returns
-        // rows.
-        const params = Math.max(
-          0,
-          ...[...q.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])),
-        )
+      for (const written of queries) {
+        // Bind every placeholder with values that match nothing: the assertion
+        // is that Postgres ACCEPTS the statement, not that it returns rows. A
+        // built query runs as the SQL it sends.
+        const q = written.includes('${') ? asSentSql(written) : written
         try {
-          await pool.query(q, Array.from({ length: params }, () => 'no_such_schema'))
+          await pool.query(q, emptyParams(q))
         } catch (err: any) {
           // 42P01 undefined_table is ACCEPTABLE and only for optional
           // extensions: `pg_stat_statements` is not installed everywhere, and

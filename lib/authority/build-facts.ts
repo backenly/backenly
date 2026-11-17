@@ -23,9 +23,25 @@
  * index's 90%: a one-column index is not larger than its table's heap / 0.9.
  * When the planner has no statistics (a table never analyzed), that bound is
  * the estimate.
+ *
+ * ── A column's width under row-level security ───────────────────────────────
+ *
+ * `pg_stats` leaves out every table on which row-level security is active for
+ * the reader (PostgreSQL 16 system_views.sql: `NOT row_security_active(c.oid)`),
+ * so the planner's statistics stay out of the policies' reach. Every workspace
+ * table is FORCE ROW LEVEL SECURITY and the application role is NOBYPASSRLS, so
+ * in production `avg_width` was always null and every estimate was the whole
+ * heap. For a 1,000,002-row table that read about twice the real size and took
+ * the account past the 90% of storage Backenly leaves to a person (production
+ * QA, 2026-11-16). The width is then measured instead: the average stored size
+ * of the column over a page sample of about 2,000 rows, read as the service
+ * role, whose escape every Backenly policy carries. Only the average leaves the
+ * database. A table whose policies admit no service role gives no sample, and
+ * the bound stands.
  */
 
 import type { BuildFacts } from './decision'
+import { quoteIdent } from '@/lib/security/workspace-schema'
 
 const PAGE = 8192
 /** Page minus its 24-byte header and the btree's 16-byte special space. */
@@ -46,6 +62,34 @@ export function estimateBtreeBytes(rows: number, avgWidth: number): number {
 /** The most a one-column index over a heap of this size can take. */
 export function heapBoundBytes(heapBytes: number): number {
   return Math.ceil(heapBytes / LEAF_FILL) + 2 * PAGE
+}
+
+/** Rows a width sample aims for: enough for an average, few enough to be cheap. */
+const SAMPLE_ROWS = 2_000
+
+/** The share of pages, in percent, that holds about SAMPLE_ROWS rows. */
+export function samplePercent(rows: number): number {
+  if (!(rows > 0)) return 100
+  return Math.min(100, Math.max(0.01, (100 * SAMPLE_ROWS) / rows))
+}
+
+/**
+ * The column's average stored width, measured on a page sample read as the
+ * service role, or null when nothing could be sampled. Used only when pg_stats
+ * hides the column (see the header).
+ */
+async function sampledWidth(projectId: string, schema: string, table: string, column: string, rows: number): Promise<number | null> {
+  const { queryWorkspaceAsOwner } = await import('@/lib/services/workspace-pool')
+  const sample = await queryWorkspaceAsOwner<{ width: number | null; sampled: number }>(
+    projectId,
+    `SELECT avg(pg_column_size(s.v))::float8 AS width, count(*)::int AS sampled
+       FROM (SELECT t.${quoteIdent(column)} AS v
+               FROM ${quoteIdent(schema)}.${quoteIdent(table)} t TABLESAMPLE SYSTEM ($1)
+              LIMIT ${SAMPLE_ROWS}) s`,
+    [samplePercent(rows)],
+  )
+  const w = sample[0]
+  return w && w.sampled > 0 && w.width !== null && Number.isFinite(Number(w.width)) ? Number(w.width) : null
 }
 
 export async function readIndexBuildFacts(projectId: string, table: string, column: string | null): Promise<BuildFacts> {
@@ -77,7 +121,13 @@ export async function readIndexBuildFacts(projectId: string, table: string, colu
       if (!Number.isFinite(tableBytes)) tableBytes = null
       if (tableBytes !== null) {
         const bound = heapBoundBytes(tableBytes)
-        const fromStats = r.width !== null && Number(r.reltuples) >= 0 ? estimateBtreeBytes(Number(r.reltuples), Number(r.width)) : null
+        const reltuples = Number(r.reltuples)
+        let width = r.width === null ? null : Number(r.width)
+        // Hidden by row-level security, not absent: measure it (see the header).
+        if (width === null && column && reltuples > 0) {
+          width = await sampledWidth(projectId, schema, table, column, reltuples).catch(() => null)
+        }
+        const fromStats = width !== null && reltuples >= 0 ? estimateBtreeBytes(reltuples, width) : null
         estimatedBytes = fromStats === null ? bound : Math.min(fromStats, bound)
       }
     }

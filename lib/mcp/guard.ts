@@ -36,7 +36,7 @@ import {
 import {
   getProjectServingState,
   PAUSED_CODE,
-  PAUSED_MESSAGE,
+  pausedMessage,
   pausedDetails,
 } from '@/lib/projects/serving-state'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -80,7 +80,7 @@ export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
       response: NextResponse.json(
         {
           ok: false,
-          error: PAUSED_MESSAGE,
+          error: pausedMessage(serving.reason),
           code: PAUSED_CODE,
           ...pausedDetails(auth.projectId!, serving),
         },

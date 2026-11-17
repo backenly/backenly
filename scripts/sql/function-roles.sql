@@ -172,11 +172,84 @@ $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_fn_role_drop(text) FROM PUBLIC;
 
+-- Retire the login at once, when its project's deletion drops its schema later
+-- (lib/postgrest/retire-schema.ts) and the login with it: NOLOGIN with no
+-- password, and its sessions ended. It cannot be dropped first, for the reason
+-- public.backenly_direct_retire_role gives in scripts/setup-direct-access.sql,
+-- which this follows: the privileges taken to end the sessions are given back,
+-- compared before and after, and the caller calls again after its commit.
+-- True means the login cannot log in, or does not exist.
+CREATE OR REPLACE FUNCTION public.backenly_fn_role_retire(p_role text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $fn$
+DECLARE
+  granted    boolean := false;
+  v_before   jsonb;
+  v_after    jsonb;
+  v_key      text;
+  back_login boolean := false;
+  login_i    boolean;
+  login_s    boolean;
+BEGIN
+  IF p_role IS NULL OR p_role !~ '^bkn_fn_[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'not a function role: %', p_role USING ERRCODE = '22023';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+    RETURN true;
+  END IF;
+
+  EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', p_role);
+
+  IF NOT pg_has_role(current_user, p_role, 'USAGE') THEN
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                        THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
+                        ELSE 'GRANT %I TO %I' END, p_role, current_user);
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+      granted := true;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        back_login := true;
+        login_i := (v_before -> v_key ->> 0)::boolean;
+        login_s := (v_before -> v_key ->> 1)::boolean;
+      END IF;
+    END IF;
+  END IF;
+
+  PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = p_role;
+
+  IF granted THEN
+    EXECUTE format('REVOKE %I FROM %I', p_role, current_user);
+  ELSIF back_login THEN
+    EXECUTE format('GRANT %I TO %I WITH INHERIT %s, SET %s', p_role, current_user,
+                   CASE WHEN coalesce(login_i, false) THEN 'TRUE' ELSE 'FALSE' END,
+                   CASE WHEN coalesce(login_s, false) THEN 'TRUE' ELSE 'FALSE' END);
+  END IF;
+  RETURN true;
+END;
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_fn_role_retire(text) FROM PUBLIC;
+
 DO $$
 DECLARE r text := public.backenly_app_role();
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_fn_role_sync(text, text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_fn_role_drop(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_fn_role_retire(text) TO %I', r);
   END IF;
 END $$;

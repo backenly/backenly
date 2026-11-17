@@ -35,7 +35,8 @@ import {
   readImport,
   startImport,
 } from '@/lib/import/client'
-import { deleteProject } from '@/lib/api/projects'
+import { DeleteRefusedError, deleteProject, type Reauthentication } from '@/lib/api/projects'
+import { SignInAgain } from '@/components/console/SignInAgain'
 import { FREE_INCLUDED, PRO_PRICE } from '@/lib/pricing/plan-rows'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { OrgShell } from '@/components/shell/OrgShell'
@@ -150,6 +151,8 @@ export function ImportFlow({
   const [stopError, setStopError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  // Set when the server asks for a sign-in from the last ten minutes first.
+  const [deleteReauth, setDeleteReauth] = useState<Reauthentication | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const lastGood = useRef<number | null>(null)
 
@@ -362,13 +365,21 @@ export function ImportFlow({
 
   const removeProject = async () => {
     if (!job) return
+    if (!project.name) {
+      // The server deletes only with the project's name, read when the page opened.
+      setDeleteError('The project’s name has not loaded yet. Try again in a moment.')
+      return
+    }
     setDeleting(true)
     setDeleteError(null)
+    setDeleteReauth(null)
     try {
-      await deleteProject(job.projectId)
+      // The name the person typed; the dialog does not confirm until it matches.
+      await deleteProject(job.projectId, project.name)
       router.push(projectsHref)
-    } catch {
-      setDeleteError('The project could not be deleted. Try again.')
+    } catch (err) {
+      if (err instanceof DeleteRefusedError && err.code === 'REAUTH_REQUIRED' && err.reauth) setDeleteReauth(err.reauth)
+      else setDeleteError('The project could not be deleted. Try again.')
       setDeleting(false)
     }
   }
@@ -572,6 +583,7 @@ export function ImportFlow({
           onStartAgain={startAgain}
           onDelete={() => {
             setDeleteError(null)
+            setDeleteReauth(null)
             setConfirmDelete(true)
           }}
         />
@@ -673,12 +685,14 @@ export function ImportFlow({
         confirmLabel="Delete project"
         danger
         busy={deleting}
+        requireText={project.name ?? undefined}
       >
         {deleteError && (
           <KitNote icon={AlertTriangle} tone="danger">
             {deleteError}
           </KitNote>
         )}
+        {deleteReauth && <SignInAgain reauth={deleteReauth} onSignedIn={() => void removeProject()} />}
       </KitConfirmDialog>
     </OrgShell>
   )

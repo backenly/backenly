@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server'
+import { v1ErrorBody } from '@/lib/api/v1/error-shape'
+import { v1DbDeprecationHeaders } from '@/lib/api/v1/deprecation'
+import { postgrestErrorBody } from '@/lib/api/v2/error-shape'
 import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
@@ -283,7 +286,7 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
     ? 'Content-Type, Authorization, X-Requested-With, X-User-Id, X-Project-Id, X-User-Token, x-api-key, Prefer, Range, Range-Unit, Accept-Profile, Content-Profile'
     : 'Content-Type, Authorization, X-Requested-With'
   /** Response headers cross-origin JavaScript is permitted to read. */
-  const exposedHeaders = 'Content-Range, Content-Location, Location, Range-Unit, Preference-Applied, X-Backenly-Environment'
+  const exposedHeaders = 'Content-Range, Content-Location, Location, Range-Unit, Preference-Applied, X-Backenly-Environment, Retry-After, Deprecation, Link'
 
   // SDK (/api/v1/*) auth is via x-api-key in headers, NOT cookies. Don't
   // advertise credentials — that prevents browsers from sending cookies and
@@ -354,6 +357,13 @@ export async function middleware(request: NextRequest) {
       response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
       const allowedHeaders = corsResponse.headers.get('Access-Control-Allow-Headers')
       if (allowedHeaders) response.headers.set('Access-Control-Allow-Headers', allowedHeaders)
+      // The headers a cross-origin app may read (Content-Range, Retry-After…),
+      // which handleCORS names for the SDK routes. They were left off every
+      // answer but the preflight, and the forwarder drops the runtime's own
+      // CORS headers (lib/runtime/forward-to-runtime.ts), so an app reading a
+      // count through this server found none.
+      const exposedHeaders = corsResponse.headers.get('Access-Control-Expose-Headers')
+      if (exposedHeaders) response.headers.set('Access-Control-Expose-Headers', exposedHeaders)
     }
     return response
   }
@@ -370,11 +380,18 @@ export async function middleware(request: NextRequest) {
     const message = upload
       ? `An upload through the server carries at most ${MAX_BUFFERED_UPLOAD_FILE_BYTES / (1024 * 1024)} MB. Use a multipart upload for larger files.`
       : `Request body is larger than the ${exceeded / (1024 * 1024)} MB this endpoint accepts.`
-    // Each surface's own error shape: v1 clients read { error: { code, message } }.
-    const body = pathname.startsWith('/api/v1/')
-      ? { error: { code, message } }
-      : { success: false, code, message }
-    return applyCorsHeaders(NextResponse.json(body, { status: 413 }))
+    // Each door's own error shape: v1's keeps the nested error its clients
+    // read and adds the top-level code and message every v1 error carries;
+    // v2's is PostgREST's { code, message, details, hint }.
+    const refusal = { error: { code, message } }
+    const body = pathname.startsWith('/api/v2/')
+      ? postgrestErrorBody(413, refusal)
+      : pathname.startsWith('/api/v1/')
+        ? v1ErrorBody(413, refusal)
+        : { success: false, code, message }
+    // A /db route answered here says it is deprecated, as every /db response
+    // does (lib/api/v1/deprecation.ts).
+    return applyCorsHeaders(NextResponse.json(body, { status: 413, headers: v1DbDeprecationHeaders(pathname) ?? undefined }))
   }
 
   // ✅ Public API routes

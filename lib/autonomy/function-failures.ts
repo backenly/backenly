@@ -19,6 +19,7 @@
 import { prisma } from '@/lib/db/prisma'
 import type { RawFinding } from '@/lib/core/types'
 import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
+import { NOT_A_RUN } from '@/lib/services/ai-functions/record-kinds'
 import { readsWithheldEnv, WITHHELD_ENV_NAMES } from '@/lib/services/ai-functions/route-module-runner'
 
 export const FAILING_WINDOW_MS = 24 * 60 * 60_000
@@ -53,6 +54,9 @@ export async function detectFailingFunctions(projectId: string): Promise<RawFind
       FROM ai_function_logs
      WHERE "projectId" = ${projectId}
        AND "createdAt" >= (${since}::timestamptz AT TIME ZONE 'UTC')
+       -- Records of runs that did not happen, and notices, say nothing about
+       -- the code (record-kinds.ts): a function at its monthly cap is not failing.
+       AND "triggerType" <> ALL(${[...NOT_A_RUN]}::text[])
      GROUP BY "functionId"`
 
   const failing = counts.filter(
@@ -79,7 +83,7 @@ async function failingRuns(projectId: string, failing: RunCounts[]): Promise<Raw
     const fn = byId.get(c.functionId)
     if (!fn || isFunctionSwitchedOff(fn.status)) continue
     const last = await prisma.aiFunctionLog.findFirst({
-      where: { functionId: c.functionId, success: false },
+      where: { functionId: c.functionId, success: false, triggerType: { notIn: [...NOT_A_RUN] } },
       orderBy: { createdAt: 'desc' },
       select: { error: true },
     })

@@ -24,7 +24,10 @@ let projectId: string
 let schema: string
 let pool: Pool
 
-const openRows = (type: string) => prisma.healthFinding.findMany({ where: { projectId, type, status: 'open' } })
+// Raised means in front of someone: open, or waiting for a person's approval,
+// where a hot table with a measured column is filed
+// (tests/core/hot-table-findings-follow-their-class.test.ts).
+const openRows = (type: string) => prisma.healthFinding.findMany({ where: { projectId, type, status: { in: ['open', 'pending_approval'] } } })
 
 beforeAll(async () => {
   userId = (await prisma.user.create({ data: { email: `hot-reaper-${Date.now()}@example.test`, password: 'x', name: 'hot' } })).id

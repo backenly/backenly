@@ -34,6 +34,7 @@ import { ClipboardCopy } from 'lucide-react'
 import { groupFindings, CATEGORY_LABEL, type FindingGroup, type GroupableFinding } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { decisionLabels } from '@/lib/core/finding-summaries'
+import { findingOriginLabel } from '@/lib/core/finding-origin'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
 import { approvalTitle } from '@/lib/mcp/approval-title'
@@ -142,7 +143,7 @@ const GUARDRAIL_GATED_TYPES = new Set([
   'broken_webhook', 'broken_auth', 'integration_key_invalid',
   'integration_webhook_failing', 'integration_smtp_unreachable',
   'oauth_config_invalid', 'oauth_redirect_uri_missing', 'dead_api_endpoint',
-  'deploy_failure', 'auth_spike', 'auth_jwt_missing', 'auth_users_table_missing',
+  'deploy_failure', 'auth_jwt_missing', 'auth_users_table_missing',
 ])
 
 /**
@@ -178,10 +179,16 @@ function heldKindLabel(p: PendingApproval): string | null {
   }
 }
 
-/** Diagnosis written by the escalation pass, when one exists. */
+/**
+ * Diagnosis written by the escalation pass, when one exists. A hypothesis that
+ * failed the investigator's own checks (it cited evidence that never ran, or
+ * named a column that does not exist) is not shown: the card says what it says
+ * without one.
+ */
 function diagnosisOf(p: PendingApproval): FindingDiagnosis | null {
   const d = (p.details as Record<string, any> | null)?.diagnosis
   if (!d || typeof d !== 'object') return null
+  if (d.validation && typeof d.validation === 'object' && d.validation.ok === false) return null
   const rootCause = typeof d.rootCause === 'string' ? d.rootCause : undefined
   const recommendation = typeof d.recommendation === 'string' ? d.recommendation : undefined
   if (!rootCause && !recommendation) return null
@@ -298,7 +305,9 @@ export function ReviewQueuePanel({
       // 409 = lock contention (a scan/auto-fix holds the project lock). The
       // server already waits ~30s per attempt, so each retry here rides a
       // fresh server-side wait — three of them outlasts any normal scan.
-      if (res.status === 409 && retriesLeft > 0) {
+      // EXISTING_ROWS: rows already in the table break the rule; asking again
+      // changes nothing, so the reason is shown at once.
+      if (res.status === 409 && j?.code !== 'EXISTING_ROWS' && retriesLeft > 0) {
         await new Promise(r => { timers.current.push(setTimeout(r, 2500)) })
         return approveOne(findingId, retriesLeft - 1)
       }
@@ -1109,9 +1118,8 @@ function ApprovalRow({
         {critical && <Fact strong><span className="font-medium text-zinc-50">Critical</span></Fact>}
         <Fact>{CATEGORY_LABEL[g.category]}</Fact>
         {!many && head.resource && <Fact><MetaCode>{head.resource}</MetaCode></Fact>}
-        {head.source && head.source !== 'autonomy' && (
-          <Fact>{head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}</Fact>
-        )}
+        {/* Who raised it, only when someone other than Backenly's own checks did. */}
+        {findingOriginLabel(head.source) && <Fact>{findingOriginLabel(head.source)}</Fact>}
         {proposal && <Fact>AI-proposed, recorded as fixed only if a re-check confirms it</Fact>}
         {!fixable && <Fact>No automatic fix</Fact>}
         <Fact><Time iso={head.detectedAt} /></Fact>

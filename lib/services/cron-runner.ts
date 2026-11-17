@@ -195,6 +195,13 @@ export async function runRegionalSystemTasks(now: Date = new Date()): Promise<vo
     console.error('[SystemTasks] purge processing failed:', err?.message)
   )
 
+  // Schemas this region's PostgREST stopped serving at least two minutes ago
+  // (a merged or discarded branch's, a deleted project's) are dropped now that
+  // no cache rebuild can still be reading them (lib/postgrest/retire-schema.ts).
+  await import('@/lib/postgrest/retire-schema')
+    .then(({ dropRetiredSchemas }) => dropRetiredSchemas(serviceRegion(), now))
+    .catch(err => console.error('[SystemTasks] retired schema drop failed:', err?.message))
+
   // This region's projects' customer data on platform rows is kept 30 days
   // in its own database (lib/data-plane/regional-bodies.ts). Hourly is ample for a 30-day
   // retention; the home region keeps none there, so this is a no-op at home.

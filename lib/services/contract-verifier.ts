@@ -28,6 +28,7 @@
 
 import { prisma } from '@/lib/db'
 import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
+import { purgeAgainLater, sweepStaleCheckAccounts } from '@/lib/services/check-account-cleanup'
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import type { RawFinding } from '@/lib/core/types'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
@@ -187,6 +188,9 @@ async function probeAuth(projectId: string, base: string): Promise<ProbeResult> 
   const startedAt = Date.now()
   const email = `__cv_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}@backenly.internal`
   const password = `Cv!${Math.random().toString(36).slice(2)}Aa1`
+  // Whether the sign-up answered. One that did not (a timeout, a dropped
+  // connection) may still create the account after the purge below.
+  let signupAnswered = false
 
   try {
     const signup = await probeFetch(`${base}/api/v1/${projectId}/auth/signup`, {
@@ -194,6 +198,7 @@ async function probeAuth(projectId: string, base: string): Promise<ProbeResult> 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, name: 'Contract Probe' }),
     })
+    signupAnswered = true
     if (signup.status !== 201) {
       // 503 = auth not configured for this project — a setup state, not an
       // outage. Only report when a configured surface misbehaves.
@@ -230,6 +235,7 @@ async function probeAuth(projectId: string, base: string): Promise<ProbeResult> 
     // round-trip created for it (email-verification token, blacklisted jti).
     // Targeted by email + service-role (users is RLS-FORCED) inside the helper.
     await purgeSyntheticAuthArtifacts(projectId, { email }).catch(() => {})
+    if (!signupAnswered) purgeAgainLater(projectId, email)
   }
 }
 
@@ -315,6 +321,11 @@ export async function runContractVerification(projectId: string): Promise<ProbeR
     select: { anonKey: true, jwtSecret: true },
   })
   if (!project) return []
+
+  // Check accounts a check could not remove itself (a sign-up that completed
+  // after the check gave up, a process stopped mid-check) go here, at most
+  // once an hour per project (lib/services/check-account-cleanup.ts).
+  await sweepStaleCheckAccounts(projectId)
 
   // Probe a real CRUD-exposable table — NOT the auth `users` table (managed via
   // /auth/*, intentionally 404 on /db/users) nor reserved plumbing. Probing

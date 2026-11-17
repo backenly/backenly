@@ -18,6 +18,7 @@ import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
 import { postgrestErrorShape } from './lib/v2-error-shape'
 import { v1ErrorShape } from './lib/v1-error-shape'
+import { v1DbDeprecationHeaders } from '@/lib/api/v1/deprecation'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
@@ -102,8 +103,11 @@ app.use(cors({
   // half a fix: PostgREST answers the count in that header, and cross-origin
   // JavaScript cannot see a response header unless it is named here. The client
   // would send a correct request and get a body with no way to read the total.
-  // `Location` is the same story for a created row's URI.
-  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied', 'X-Backenly-Environment'],
+  // `Location` is the same story for a created row's URI, and `Retry-After` for
+  // when to send again after a 503 the data plane could not serve yet, or a 429.
+  // `Deprecation` and `Link` say a /db route is deprecated and where its
+  // successor on /api/v2 is (lib/api/v1/deprecation.ts).
+  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied', 'X-Backenly-Environment', 'Retry-After', 'Deprecation', 'Link'],
   maxAge: 86400,
 }))
 
@@ -119,6 +123,17 @@ app.use('/api/v2', postgrestErrorShape)
 // is a contract apps read. Before the gates, so their refusals are covered too.
 // lib/api/v1/error-shape.ts.
 app.use('/api/v1', v1ErrorShape)
+
+// ── /db is deprecated: /api/v2 is the REST API ───────────────────────────────────
+// Every /api/v1/{projectId}/db response says so, a gate's refusal included, so
+// this runs before the gates: Deprecation (RFC 9745) and a Link to the same table
+// on /api/v2 (rel="successor-version"). Nothing else about /db changes.
+// lib/api/v1/deprecation.ts.
+app.use('/api/v1', (req, res, next) => {
+  const headers = v1DbDeprecationHeaders(req.originalUrl)
+  if (headers) for (const [name, value] of Object.entries(headers)) res.setHeader(name, value)
+  next()
+})
 
 // ── Traffic ─────────────────────────────────────────────────────────────────────
 // Every request to a project's runtime API is recorded once it finishes, first
