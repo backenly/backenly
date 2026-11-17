@@ -77,10 +77,10 @@ type ProjectResponseRow = {
  * this server has no API address for that region: the console then shows none,
  * rather than the home address, which customers would copy and keep.
  */
-function apiBaseUrl(projectId: string, recordedRegion: string | null, homeOrigin: string): string | null {
+function apiBaseUrl(projectId: string, recordedRegion: string | null, homeOrigin: string, version: 'v1' | 'v2' = 'v1'): string | null {
   try {
     const origin = regionApiOrigin(regionOfRecord(projectId, recordedRegion), homeOrigin, { projectId })
-    return `${origin}/api/v1/${projectId}`
+    return `${origin}/api/${version}/${projectId}`
   } catch (err) {
     if (isRegionError(err)) return null
     throw err
@@ -92,6 +92,9 @@ async function serializeProject(project: ProjectResponseRow, projectId: string, 
   return {
     ...fields,
     apiBaseUrl: apiBaseUrl(projectId, project.region, homeOrigin),
+    // The REST API's base: {restBaseUrl}/{table}, in PostgREST's grammar. /db
+    // under apiBaseUrl is kept for existing apps only (lib/api/v1/deprecation.ts).
+    restBaseUrl: apiBaseUrl(projectId, project.region, homeOrigin, 'v2'),
     storageUsed: Number(project.storageUsed),
     // The plan's effective cap, not the unused Project.storageLimit column.
     storageLimit: Number((await getProjectQuota(projectId)).limit),

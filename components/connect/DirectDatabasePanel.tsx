@@ -5,15 +5,44 @@
  *
  *   Logins
  *   Read-only                                                                 ⋯
+ *   For psql, pg_dump and other libpq tools
+ *   [postgresql://bkn_ro_edc2…:•••@<instance>:5432/backenly?hostaddr=…  ◉ Copy]
+ *   For Go (pgx), Python (asyncpg), Rust (sqlx) and other verify-ca clients
  *   [postgresql://bkn_ro_edc2…:•••@<DIRECT_DB_HOST>:5432/backenly…     ◉ Copy]
+ *   For Node.js (node-postgres, and Drizzle or Prisma on it)
+ *   [new pg.Client({ host: '<address>', …, ssl: { ca, servername } })  ◉ Copy]
  *   bkn_ro_edc2173ce55c   Created Nov 11       Copy psql command  Copy pg_dump command
  *   Read-write                                                    [Create login]
  *   Reads and writes rows. Schema changes are refused unless you allow them.
- *   Each login reaches only this project's schema, over TLS. …
+ *   Each login reaches only this project's schema, over TLS, with up to 2
+ *   connections at once. …
+ *   The strings and the Node.js settings check the server's certificate
+ *   against Backenly's CA bundle. Download rds-ca-cloud-regions.pem …
+ *
+ *   The three are where the region's endpoint fronts its RDS instance
+ *   (lib/services/direct-access.ts); elsewhere there is one string, as before.
+ *   node-postgres verifies the host name even under verify-ca, so it gets
+ *   settings rather than a string: the endpoint's address as host, and the
+ *   instance's name as ssl.servername.
  *
  *   Where the region has no developer-facing host (status.available false),
  *   one sentence says direct connections aren't available there, no login is
  *   offered, and the logins that exist are listed by name with Revoke.
+ *
+ *   Allowed addresses                                    (where the region's
+ *   The database endpoint is shared by the projects in   endpoint admits only
+ *   this region and admits only the addresses they allow. allowed addresses)
+ *   [203.0.113.7 or 203.0.113.0/24        ] [Allow]
+ *   203.0.113.7/32        Added Nov 17                ⋯
+ *   1 of 2 on the Free plan.
+ *
+ *   Until one is allowed, the section comes first and says so ("Allow an
+ *   address first"), with "Allow my address", the address the request came
+ *   from as the load balancer saw it. The endpoint holds every project's
+ *   addresses in the region, so nothing here claims an address is the only
+ *   way in: the login's password is what reaches this project. An address
+ *   past the plan's number (after a restore, or a move to a smaller plan) is
+ *   listed as not admitted.
  *
  *   Backups
  *   [Full backup (.sql)]  Schema only  Data only
@@ -39,15 +68,18 @@ import {
   CopyButton,
   KitButton,
   KitConfirmDialog,
+  KitInput,
   KitNote,
   OverflowMenu,
 } from '@/components/inspector/kit'
-import { Panel, Row, RowList, RowSkeleton, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { ErrorRow, RefusedLine } from '@/components/console/states'
 import { EDGE, FOCUS, R_CONTROL, WELL } from '@/components/console/tokens'
 import { formatTime } from '@/components/console/format'
 import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import { findRegion, HOME_REGION } from '@/lib/regions'
+import { addressInRange } from '@/lib/security/allowed-address'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 type Mode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -59,6 +91,17 @@ interface Credential {
   port: number
   database: string
   connectionString: string
+  /** Where the region's endpoint fronts RDS: the string for clients that implement verify-ca. */
+  verifyCaConnectionString?: string
+  /** Where the region's endpoint fronts RDS: settings for node-postgres. */
+  nodePostgres?: {
+    host: string
+    port: number
+    database: string
+    user: string
+    ssl: { servername: string; caFile: string; caUrl: string }
+  }
+  caBundle?: { file: string; url: string }
   psqlCommand: string
   pgDumpCommand: string
   createdAt: string
@@ -69,6 +112,26 @@ interface Credential {
   schemaChangesUnavailable?: 'shared_database' | 'helpers_outdated'
 }
 
+/** The addresses this project lets connect (lib/services/direct-access-addresses.ts). */
+interface Allowlist {
+  /** The region's endpoint admits only the addresses its projects allow. */
+  enforced: boolean
+  /** Earliest first; one past the plan's number is not admitted. */
+  addresses: Array<{ cidr: string; createdAt: string; admitted?: boolean }>
+  limit: number
+  planCode: string
+  planName: string
+  /** Beside an address that is not admitted: what to do. */
+  notAdmitted?: string
+}
+
+/** The address this request came from, and whether "Allow my address" can allow it. */
+interface CallerAddress {
+  address: string
+  allowable: boolean
+  reason?: string
+}
+
 interface Status {
   schema: string
   /** False where nothing outside Backenly can reach this project's database. */
@@ -77,6 +140,10 @@ interface Status {
   credentials: Credential[]
   /** Where connections cannot be made: the logins that exist, by name, for revoking. */
   logins?: Array<{ mode: Mode; roleName: string; createdAt: string; rotatedAt: string | null }>
+  allowlist?: Allowlist
+  you?: CallerAddress | null
+  /** Connections each login may hold at once, by the plan. */
+  connectionLimit?: number | null
   pendingDriftEvents: number
 }
 
@@ -107,16 +174,24 @@ function saveFile(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-function masked(c: Credential): string {
-  return c.connectionString.replace(`:${c.password}@`, ':••••••••@')
+function masked(value: string, password: string): string {
+  return value.replace(`:${password}@`, ':••••••••@')
 }
 
-/** The connection string, masked until shown; Copy always copies the real one. */
-function ConnectionString({ c }: { c: Credential }) {
+/** A connection string, masked until shown; Copy always copies the real one. */
+function ConnectionString({
+  value,
+  password,
+  copyLabel = 'Copy connection string',
+}: {
+  value: string
+  password: string
+  copyLabel?: string
+}) {
   const [shown, setShown] = useState(false)
   return (
     <div className={`mt-[10px] flex h-[34px] min-w-0 items-center gap-[4px] ${WELL} border ${EDGE} ${R_CONTROL} pl-[12px] pr-[4px]`}>
-      <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-300">{shown ? c.connectionString : masked(c)}</code>
+      <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-300">{shown ? value : masked(value, password)}</code>
       <button
         type="button"
         onClick={() => setShown((s) => !s)}
@@ -127,7 +202,44 @@ function ConnectionString({ c }: { c: Credential }) {
       >
         {shown ? <EyeOff className="h-3.5 w-3.5" strokeWidth={1.75} /> : <Eye className="h-3.5 w-3.5" strokeWidth={1.75} />}
       </button>
-      <CopyButton value={c.connectionString} label="Copy connection string" />
+      <CopyButton value={value} label={copyLabel} />
+    </div>
+  )
+}
+
+/** node-postgres settings that verify the server in full, as code to paste. */
+function nodePostgresSnippet(n: NonNullable<Credential['nodePostgres']>, password: string): string {
+  return [
+    'new pg.Client({',
+    `  host: '${n.host}',`,
+    `  port: ${n.port},`,
+    `  database: '${n.database}',`,
+    `  user: '${n.user}',`,
+    `  password: '${password}',`,
+    `  ssl: { ca: fs.readFileSync('${n.ssl.caFile}', 'utf8'), servername: '${n.ssl.servername}' },`,
+    '})',
+  ].join('\n')
+}
+
+/** Code to paste, with the password masked until shown; Copy always copies the real one. */
+function CodeWithPassword({ value, password, copyLabel }: { value: string; password: string; copyLabel: string }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <div className={`mt-[10px] flex min-w-0 items-start gap-[4px] ${WELL} border ${EDGE} ${R_CONTROL} py-[6px] pl-[12px] pr-[4px]`}>
+      <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre py-[2px] font-mono text-[12px] leading-[18px] text-zinc-300">
+        {shown ? value : value.replace(`'${password}'`, "'••••••••'")}
+      </pre>
+      <button
+        type="button"
+        onClick={() => setShown((s) => !s)}
+        aria-pressed={shown}
+        aria-label={shown ? 'Hide password' : 'Show password'}
+        title={shown ? 'Hide password' : 'Show password'}
+        className={`inline-flex h-[26px] w-[26px] flex-shrink-0 items-center justify-center ${R_CONTROL} text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 ${FOCUS}`}
+      >
+        {shown ? <EyeOff className="h-3.5 w-3.5" strokeWidth={1.75} /> : <Eye className="h-3.5 w-3.5" strokeWidth={1.75} />}
+      </button>
+      <CopyButton value={value} label={copyLabel} />
     </div>
   )
 }
@@ -151,6 +263,194 @@ function CopyCommand({ value, label }: { value: string; label: string }) {
     >
       <span aria-live="polite">{copied ? 'Copied' : label}</span>
     </KitButton>
+  )
+}
+
+/**
+ * Where the region's endpoint admits only allowed addresses: the addresses this
+ * project lets connect, a field to allow one, and "Allow my address". Each add
+ * and remove is a change in History (lib/changes/resources/addresses.ts).
+ */
+function AllowedAddresses({
+  projectId,
+  allowlist,
+  you,
+  onChanged,
+}: {
+  projectId: string
+  allowlist: Allowlist
+  you: CallerAddress | null | undefined
+  onChanged: () => Promise<void>
+}) {
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [note, setNote] = useState<{ text: string; refused: boolean } | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const url = `/api/projects/${projectId}/database-access/allowed-addresses`
+  const count = allowlist.addresses.length
+  const mineListed = !!you?.allowable && allowlist.addresses.some((a) => addressInRange(you.address, a.cidr))
+
+  async function allow(body: { address: string } | { mine: true }, key: string) {
+    setBusy(key)
+    setNote(null)
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'That did not work. Try again.')
+      const cidr: string = data.address?.cidr ?? ''
+      setValue('')
+      setNote({
+        text: !data.added
+          ? `${cidr} was already allowed.`
+          : data.applied === false
+            ? `${cidr} is allowed. The database endpoint takes it within five minutes.`
+            : `${cidr} is allowed.`,
+        refused: false,
+      })
+      await onChanged()
+    } catch (err) {
+      setNote({ text: err instanceof Error ? err.message : 'That did not work. Try again.', refused: true })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function remove(cidr: string) {
+    setBusy(`remove:${cidr}`)
+    setNote(null)
+    try {
+      const res = await fetch(`${url}?address=${encodeURIComponent(cidr)}`, { method: 'DELETE', credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'That did not work. Try again.')
+      setNote({ text: `${cidr} removed.`, refused: false })
+      await onChanged()
+    } catch (err) {
+      setNote({ text: err instanceof Error ? err.message : 'That did not work. Try again.', refused: true })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const mine =
+    you?.allowable && !mineListed ? (
+      <KitButton
+        size="sm"
+        variant={count === 0 ? 'secondary' : 'ghost'}
+        loading={busy === 'mine'}
+        disabled={busy !== null}
+        onClick={() => void allow({ mine: true }, 'mine')}
+      >
+        Allow my address ({you.address})
+      </KitButton>
+    ) : null
+
+  return (
+    <Section
+      id="postgres-addresses"
+      title="Allowed addresses"
+      count={count}
+      description="The database endpoint is shared by the projects in this region and admits only the addresses they allow. Allow the ones you connect from; a login's password is what lets a connection into this project."
+    >
+      <Panel clip={false}>
+        {count === 0 && (
+          <div className="border-b border-white/[0.06] px-[20px] py-[14px]">
+            <p className={ROW_TITLE}>Allow an address first</p>
+            <p className={ROW_TEXT}>
+              The endpoint refuses an address no project in this region allows. Allow the one you connect from.
+            </p>
+            {mine ? (
+              <div className="mt-[10px]">{mine}</div>
+            ) : you && !you.allowable && you.reason ? (
+              <p className="mt-[8px] text-[12.5px] leading-[18px] text-faint">{you.reason}</p>
+            ) : null}
+          </div>
+        )}
+        <form
+          className="flex flex-wrap gap-[8px] px-[20px] py-[14px]"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (value.trim()) void allow({ address: value.trim() }, 'add')
+          }}
+        >
+          <KitInput
+            name="postgres-address"
+            autoComplete="off"
+            spellCheck={false}
+            inputMode="decimal"
+            aria-label="Address or range to allow"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="203.0.113.7 or 203.0.113.0/24"
+            disabled={busy !== null}
+            className="min-w-0 flex-[1_1_220px]"
+          />
+          <KitButton type="submit" loading={busy === 'add'} disabled={!value.trim() || busy !== null}>
+            Allow
+          </KitButton>
+          {count > 0 && mine}
+        </form>
+        {note && (
+          <div className="border-t border-white/[0.06] px-[20px] py-[10px]">
+            {note.refused ? (
+              <RefusedLine>{note.text}</RefusedLine>
+            ) : (
+              <p role="status" className="text-[12.5px] leading-[18px] text-zinc-300">
+                {note.text}
+              </p>
+            )}
+          </div>
+        )}
+        {count > 0 && (
+          <div className="border-t border-white/[0.06]">
+            <RowList>
+              {allowlist.addresses.map((a) => (
+                <Row
+                  key={a.cidr}
+                  lead="none"
+                  title={<p className={`font-mono !text-[12.5px] ${ROW_TITLE}`}>{a.cidr}</p>}
+                  actions={
+                    <OverflowMenu
+                      label={`Actions for ${a.cidr}`}
+                      disabled={busy !== null}
+                      items={[{ label: 'Remove', danger: true, onClick: () => setRemoving(a.cidr) }]}
+                    />
+                  }
+                >
+                  <Facts className="!mt-[4px]">
+                    <Fact>Added {formatTime(a.createdAt, 'date')}</Fact>
+                    {you?.allowable && addressInRange(you.address, a.cidr) && <Fact>Your address</Fact>}
+                    {a.admitted === false && <Fact strong>{allowlist.notAdmitted ?? `Not admitted on the ${planDisplayName(allowlist.planCode)} plan.`}</Fact>}
+                  </Facts>
+                </Row>
+              ))}
+            </RowList>
+          </div>
+        )}
+      </Panel>
+      <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
+        {count} of {allowlist.limit} on the {planDisplayName(allowlist.planCode)} plan.
+      </p>
+
+      <KitConfirmDialog
+        open={removing !== null}
+        onCancel={() => setRemoving(null)}
+        onConfirm={() => {
+          const cidr = removing
+          setRemoving(null)
+          if (cidr) void remove(cidr)
+        }}
+        danger
+        title={`Remove ${removing ?? 'this address'}?`}
+        description="New connections from it are refused, unless another project in this region allows it too. Connections already open stay open: rotate a login's password to end them."
+        undoable
+        confirmLabel="Remove address"
+      />
+    </Section>
   )
 }
 
@@ -329,7 +629,28 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
           <p className={`!mt-[4px] ${ROW_TEXT}`}>{LOGIN_BODY[mode]}</p>
         ) : (
           <>
-            <ConnectionString c={c} />
+            {c.verifyCaConnectionString && c.nodePostgres ? (
+              <>
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For psql, pg_dump and other libpq tools</p>
+                <ConnectionString value={c.connectionString} password={c.password} />
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">
+                  For Go (pgx), Python (asyncpg), Rust (sqlx) and other verify-ca clients
+                </p>
+                <ConnectionString
+                  value={c.verifyCaConnectionString}
+                  password={c.password}
+                  copyLabel="Copy the connection string for verify-ca clients"
+                />
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For Node.js (node-postgres, and Drizzle or Prisma on it)</p>
+                <CodeWithPassword
+                  value={nodePostgresSnippet(c.nodePostgres, c.password)}
+                  password={c.password}
+                  copyLabel="Copy the node-postgres settings"
+                />
+              </>
+            ) : (
+              <ConnectionString value={c.connectionString} password={c.password} />
+            )}
             <div className="mt-[8px] flex flex-wrap items-center justify-between gap-x-[16px] gap-y-[6px]">
               <span className="flex flex-wrap items-center gap-x-[16px] gap-y-[4px] text-[12px] leading-[16px] text-faint">
                 <code className="font-mono text-[11.5px] text-zinc-400">{c.roleName}</code>
@@ -421,8 +742,13 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
     </KitButton>
   )
 
+  const allowlist = status?.available !== false && status?.allowlist?.enforced ? status.allowlist : null
+  const caBundle = status?.available !== false ? status?.credentials.find((c) => c.caBundle)?.caBundle ?? null : null
+
   return (
     <div className="space-y-[36px]">
+      {allowlist && <AllowedAddresses projectId={projectId} allowlist={allowlist} you={status?.you} onChanged={read} />}
+
       <Section id="postgres-logins" title="Logins">
         <Panel clip={false}>
           {load === 'loading' ? (
@@ -453,8 +779,23 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
         </Panel>
         {status?.available !== false && (
           <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
-            Each login reaches only this project&apos;s schema, over TLS. Every change to a login is recorded; rotate at once if a
-            connection string leaks.
+            Each login reaches only this project&apos;s schema, over TLS
+            {typeof status?.connectionLimit === 'number' &&
+              `, with up to ${status.connectionLimit} ${status.connectionLimit === 1 ? 'connection' : 'connections'} at once`}
+            . Every change to a login is recorded; rotate at once if a connection string leaks.
+          </p>
+        )}
+        {caBundle && (
+          <p className="mt-[6px] text-[12.5px] leading-[18px] text-faint">
+            The strings and the Node.js settings check the server&apos;s certificate against Backenly&apos;s CA bundle.{' '}
+            <a
+              href={caBundle.url}
+              download={caBundle.file}
+              className={`rounded-[3px] text-zinc-300 underline decoration-zinc-300/40 underline-offset-2 hover:text-zinc-50 ${FOCUS}`}
+            >
+              Download {caBundle.file}
+            </a>{' '}
+            and keep it in the folder you connect from, or give its full path.
           </p>
         )}
       </Section>

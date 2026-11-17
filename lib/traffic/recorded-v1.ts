@@ -38,6 +38,7 @@ import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 import { servingRefusal } from '@/lib/projects/serving-response'
 import { v1ErrorBody } from '@/lib/api/v1/error-shape'
 import { postgrestErrorBody } from '@/lib/api/v2/error-shape'
+import { v1DbDeprecationHeaders } from '@/lib/api/v1/deprecation'
 
 /** A project id, as the runtime gate requires before it looks one up. */
 const PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -57,6 +58,26 @@ export function markAsWritten<T extends Response>(response: T): T {
 }
 
 type ErrorShape = (status: number, body: unknown) => unknown
+
+/**
+ * A /db response, from a route here or forwarded from the runtime, says /db is
+ * deprecated and names its successor on /api/v2 (lib/api/v1/deprecation.ts).
+ * The runtime has already set both on what it answered; those are left as
+ * they are, so neither header is ever sent twice.
+ */
+function withDeprecation<T extends Response>(response: T, pathname: string): T {
+  const headers = v1DbDeprecationHeaders(pathname)
+  if (!headers || response.headers.has('Deprecation')) return response
+  try {
+    for (const [name, value] of Object.entries(headers)) response.headers.set(name, value)
+    return response
+  } catch {
+    // Headers a fetch response holds cannot be changed: answer a copy.
+    const copy = new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers })
+    for (const [name, value] of Object.entries(headers)) copy.headers.set(name, value)
+    return copy as unknown as T
+  }
+}
 
 /**
  * The error shape of the door a request came through. /api/v2 answers in
@@ -114,7 +135,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
         const misdirected = await misdirectedResponse(requestedProject, resolvePublicBaseUrl(request))
         if (misdirected) {
           statusCode = misdirected.status
-          return await shapedError(misdirected as unknown as T, shape)
+          return withDeprecation(await shapedError(misdirected as unknown as T, shape), url.pathname)
         }
         // Then a project that is locked, paused or unreadable is not served
         // either, by any route here: the same gate, codes and words as the
@@ -125,7 +146,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
           const refused = await servingRefusal(requestedProject)
           if (refused) {
             statusCode = refused.status
-            return await shapedError(refused as unknown as T, shape)
+            return withDeprecation(await shapedError(refused as unknown as T, shape), url.pathname)
           }
         }
       }
@@ -134,9 +155,9 @@ export function recordedV1<R extends Request, C, T extends Response>(
         (await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url))
       if (refusal) {
         statusCode = refusal.status
-        return NextResponse.json(shape(refusal.status, refusal.body), { status: refusal.status }) as unknown as T
+        return withDeprecation(NextResponse.json(shape(refusal.status, refusal.body), { status: refusal.status }) as unknown as T, url.pathname)
       }
-      const response = await shapedError(await handler(request, context), shape)
+      const response = withDeprecation(await shapedError(await handler(request, context), shape), url.pathname)
       statusCode = response.status
       // Backenly's own synthetic requests are neither recorded nor metered.
       if (isInternalTraffic(internalHeader)) return response

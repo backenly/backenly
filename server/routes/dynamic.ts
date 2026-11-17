@@ -585,9 +585,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
       // A route module answers for itself: its status, its body and its
       // content type, as it wrote them (lib/services/ai-functions/reply.ts).
+      // A Response's text, such as new Response('pong'), goes out as that text.
       if (result.answer) {
-        const { status, body, headers } = result.answer
-        markAsWritten(res).status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers)).json(body ?? null)
+        const { status, body, headers, text } = result.answer
+        const out = markAsWritten(res).status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers))
+        if (text && typeof body === 'string') out.send(body)
+        else out.json(body ?? null)
         return
       }
 
@@ -716,8 +719,8 @@ async function handleDynamicRequest(req: Request, res: Response) {
     error:
       `No data-plane route for ${req.method} /${path.join('/')}. ` +
       (notFound.hint ? `${notFound.hint} ` : '') +
-      `For richer queries — joins, aggregates, embedded resources — use ` +
-      `/api/v2/{projectId}/{table}, which speaks PostgREST grammar directly.`,
+      `/db is deprecated, kept for existing apps: /api/v2/{projectId}/{table} is the REST API, in ` +
+      `PostgREST's grammar, with joins, aggregates and embedded resources.`,
     code: 'ROUTE_NOT_SUPPORTED',
     availableRoutes: notFound.availableRoutes,
     docs: notFound.docs,
@@ -776,6 +779,9 @@ async function serveProjectDiscovery(projectId: string, req: Request, res: Respo
               || req.headers.host
               || 'backenly.com'
     const baseUrl = project.publicUrl || `${proto}://${host}/api/v1/${projectId}`
+    // The REST API: /api/v2 on this host. /db under the base is deprecated,
+    // kept for existing apps (lib/api/v1/deprecation.ts).
+    const restUrl = `${proto}://${host}/api/v2/${projectId}`
 
     // Read the CATALOG — the twin of the Next-side document in
     // app/api/v1/[projectId]/route.ts, and it had the same defect.
@@ -794,8 +800,8 @@ async function serveProjectDiscovery(projectId: string, req: Request, res: Respo
       .sort((a, b) => a.localeCompare(b))
       .map(name => ({
         resource: name,
-        url: `${baseUrl}/db/${name}`,
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        url: `${restUrl}/${name}`,
+        methods: ['GET', 'POST', 'PATCH', 'DELETE'],
         authRequired: true,
       }))
 
@@ -805,6 +811,7 @@ async function serveProjectDiscovery(projectId: string, req: Request, res: Respo
       status: isLive ? 'live' : 'inactive',
       environment: project.environment ?? 'production',
       baseUrl,
+      restUrl,
       authentication: {
         scheme: 'apiKey',
         header: 'x-api-key',
@@ -821,7 +828,7 @@ async function serveProjectDiscovery(projectId: string, req: Request, res: Respo
           signUp: `POST ${baseUrl}/auth/signup`,
           signIn: `POST ${baseUrl}/auth/signin`,
         },
-        database: resources.length > 0 ? resources : `POST ${baseUrl}/db/{table}`,
+        database: resources.length > 0 ? resources : `POST ${restUrl}/{table}`,
         storage: {
           upload: `POST ${baseUrl}/storage/upload`,
           list:   `GET  ${baseUrl}/storage/files`,

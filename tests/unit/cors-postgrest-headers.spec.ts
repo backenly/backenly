@@ -22,9 +22,11 @@ const NEXT_MW = readFileSync(join(ROOT, 'middleware.ts'), 'utf8')
 const REQUIRED_REQUEST_HEADERS = ['Prefer', 'Range', 'Range-Unit']
 /**
  * Headers a browser cannot READ unless they are explicitly exposed. Retry-After
- * says when to send again after the data plane's 503 or a rate limit's 429.
+ * says when to send again after the data plane's 503 or a rate limit's 429;
+ * Deprecation and Link, that a /db route is deprecated and where its successor
+ * on /api/v2 is (lib/api/v1/deprecation.ts).
  */
-const REQUIRED_EXPOSED = ['Content-Range', 'Retry-After']
+const REQUIRED_EXPOSED = ['Content-Range', 'Retry-After', 'Deprecation', 'Link']
 
 describe('CORS allows the PostgREST control headers (P0)', () => {
   it.each(REQUIRED_REQUEST_HEADERS)('the Express runtime allows %s', (h) => {

@@ -345,20 +345,18 @@ function buildJobEndpoints(
     name: `${tbl}-create`,
     method: 'POST',
     description: `Create a new ${tbl} job — checks credit balance, reserves credits, emits realtime event`,
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+    code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 const JOB_COST = 1  // credits consumed per job — override as needed
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     // ── Auth ───────────────────────────────────────────────────────────────
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
     if (!payload?.userId) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+      return Response.json({ error: 'Authentication required' }, { status: 401 })
     }
 
     // ── Parse & validate body ──────────────────────────────────────────────
@@ -371,15 +369,15 @@ export async function POST(req: NextRequest) {
     if (prompt !== undefined && typeof prompt !== 'string') validationErrors.push('prompt must be a string')
     if (input_data !== undefined && typeof input_data !== 'object') validationErrors.push('input_data must be an object')
     if (validationErrors.length > 0) {
-      return NextResponse.json({ error: 'Validation failed', details: validationErrors }, { status: 422 })
+      return Response.json({ error: 'Validation failed', details: validationErrors }, { status: 422 })
     }
 
     // ── #52/#54 Atomic credit check + reservation ──────────────────────────
 ${hasCredits ? `
     // Atomic balance check with pessimistic lock to prevent double-spend
-    await prisma.$executeRawUnsafe('BEGIN')
+    await db.$executeRawUnsafe('BEGIN')
     try {
-      const balRows = await prisma.$queryRawUnsafe<any[]>(
+      const balRows = await db.$queryRawUnsafe<any[]>(
         \`SELECT COALESCE(SUM(amount), 0)::numeric AS balance
            FROM "\${SCHEMA}"."${creditTable}"
            WHERE user_id = $1
@@ -388,15 +386,15 @@ ${hasCredits ? `
       )
       const balance = Number(balRows[0]?.balance ?? 0)
       if (balance < JOB_COST) {
-        await prisma.$executeRawUnsafe('ROLLBACK')
-        return NextResponse.json(
+        await db.$executeRawUnsafe('ROLLBACK')
+        return Response.json(
           { error: 'Insufficient credits', balance, required: JOB_COST },
           { status: 402 },
         )
       }
 
       // Debit credits atomically
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${creditTable}"
             (id, user_id, amount, type, description, "createdAt")
            VALUES (gen_random_uuid(), $1, $2, 'consume', $3, NOW())\`,
@@ -405,17 +403,17 @@ ${hasCredits ? `
         \`Reserved for ${tbl} job\`,
       )
     } catch (txErr: any) {
-      await prisma.$executeRawUnsafe('ROLLBACK')
+      await db.$executeRawUnsafe('ROLLBACK')
       throw txErr
     }
-    await prisma.$executeRawUnsafe('COMMIT')
+    await db.$executeRawUnsafe('COMMIT')
 ` : '    // No credit table detected — skipping credit check'}
 
     // ── Create job row ─────────────────────────────────────────────────────
     const jobId = crypto.randomUUID()
     const now = new Date().toISOString()
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`INSERT INTO "\${SCHEMA}"."${tbl}"
           (id, user_id, status, type, input_data, model, prompt, progress, "createdAt", "updatedAt")
          VALUES ($1, $2, 'pending', $3, $4::jsonb, $5, $6, 0, NOW(), NOW())
@@ -428,7 +426,7 @@ ${hasCredits ? `
       prompt ?? null,
     ).catch(async () => {
       // Fallback for tables that don't have all columns
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${tbl}" (id, user_id, status, "createdAt", "updatedAt")
            VALUES ($1, $2, 'pending', NOW(), NOW()) ON CONFLICT (id) DO NOTHING\`,
         jobId, payload.userId,
@@ -438,7 +436,7 @@ ${hasCredits ? `
     // ── #54 Side effects ───────────────────────────────────────────────────
 ${hasNotif ? `
     // Create notification (non-blocking)
-    prisma.$executeRawUnsafe(
+    db.$executeRawUnsafe(
       \`INSERT INTO "\${SCHEMA}"."${notifTable}"
           (id, user_id, title, body, type, is_read, "createdAt")
          VALUES (gen_random_uuid(), $1, $2, $3, 'info', false, NOW())\`,
@@ -448,20 +446,20 @@ ${hasNotif ? `
     ).catch(() => { /* non-fatal */ })
 ` : ''}
     // Emit realtime event via pg_notify (non-blocking)
-    prisma.$executeRawUnsafe(
+    db.$executeRawUnsafe(
       \`SELECT pg_notify($1, $2)\`,
       \`workspace_${projectId}_changes\`,
       JSON.stringify({ event: '${tbl}.created', jobId, userId: payload.userId }),
     ).catch(() => { /* non-fatal */ })
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       jobId,
       status: 'pending',
       message: 'Job queued successfully',
     }, { status: 201 })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -471,49 +469,47 @@ ${hasNotif ? `
     name: `${tbl}-cancel`,
     method: 'POST',
     description: `Cancel a running ${tbl} job (transitions pending/running → cancelled)`,
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+    code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 const TERMINAL = ['completed', 'cancelled', 'failed']
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { id } = await req.json().catch(() => ({}))
-    if (!id) return NextResponse.json({ error: '"id" is required' }, { status: 400 })
+    if (!id) return Response.json({ error: '"id" is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status, user_id FROM "\${SCHEMA}"."${tbl}" WHERE id = $1 LIMIT 1\`, id,
     )
-    if (!rows.length) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Job not found' }, { status: 404 })
 
     const job = rows[0]
     if (String(job.user_id) !== String(payload.userId)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+      return Response.json({ error: 'Forbidden' }, { status: 403 })
     }
     if (TERMINAL.includes(job.status)) {
-      return NextResponse.json({ error: \`Cannot cancel a job with status "\${job.status}"\` }, { status: 409 })
+      return Response.json({ error: \`Cannot cancel a job with status "\${job.status}"\` }, { status: 409 })
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}" SET status = 'cancelled', "updatedAt" = NOW() WHERE id = $1\`, id,
     )
 
     // Emit realtime event
-    prisma.$executeRawUnsafe(
+    db.$executeRawUnsafe(
       \`SELECT pg_notify($1, $2)\`,
       \`workspace_${projectId}_changes\`,
       JSON.stringify({ event: '${tbl}.cancelled', jobId: id }),
     ).catch(() => {})
 
-    return NextResponse.json({ success: true, id, status: 'cancelled' })
+    return Response.json({ success: true, id, status: 'cancelled' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -523,46 +519,44 @@ export async function POST(req: NextRequest) {
     name: `${tbl}-retry`,
     method: 'POST',
     description: `Retry a failed ${tbl} job (increments attempts, resets to pending)`,
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+    code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 const MAX_ATTEMPTS = 3
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { id } = await req.json().catch(() => ({}))
-    if (!id) return NextResponse.json({ error: '"id" is required' }, { status: 400 })
+    if (!id) return Response.json({ error: '"id" is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status, user_id, COALESCE(attempts, 0) AS attempts FROM "\${SCHEMA}"."${tbl}" WHERE id = $1 LIMIT 1\`, id,
     ).catch(() =>
-      prisma.$queryRawUnsafe<any[]>(
+      db.$queryRawUnsafe<any[]>(
         \`SELECT id, status, user_id FROM "\${SCHEMA}"."${tbl}" WHERE id = $1 LIMIT 1\`, id,
       )
     )
-    if (!rows.length) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Job not found' }, { status: 404 })
 
     const job = rows[0]
     if (String(job.user_id) !== String(payload.userId)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+      return Response.json({ error: 'Forbidden' }, { status: 403 })
     }
     if (job.status === 'running') {
-      return NextResponse.json({ error: 'Job is still running — cancel it first' }, { status: 409 })
+      return Response.json({ error: 'Job is still running — cancel it first' }, { status: 409 })
     }
     if (Number(job.attempts ?? 0) >= MAX_ATTEMPTS) {
-      return NextResponse.json(
+      return Response.json(
         { error: \`Job has reached the maximum retry limit (\${MAX_ATTEMPTS})\` },
         { status: 429 },
       )
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}"
           SET status = 'pending',
               attempts = COALESCE(attempts, 0) + 1,
@@ -571,14 +565,14 @@ export async function POST(req: NextRequest) {
         WHERE id = $1\`,
       id,
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`UPDATE "\${SCHEMA}"."${tbl}" SET status = 'pending', "updatedAt" = NOW() WHERE id = $1\`, id,
       )
     )
 
-    return NextResponse.json({ success: true, id, status: 'pending', attempts: Number(job.attempts ?? 0) + 1 })
+    return Response.json({ success: true, id, status: 'pending', attempts: Number(job.attempts ?? 0) + 1 })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -588,22 +582,20 @@ export async function POST(req: NextRequest) {
     name: `${tbl}-progress`,
     method: 'GET',
     description: `Get real-time status and progress percentage for a ${tbl} job`,
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+    code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const id = new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: '"id" query param is required' }, { status: 400 })
+    if (!id) return Response.json({ error: '"id" query param is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status, progress, error_message, output_url, output_data,
               started_at, completed_at, "createdAt", "updatedAt"
          FROM "\${SCHEMA}"."${tbl}"
@@ -611,16 +603,16 @@ export async function GET(req: NextRequest) {
         LIMIT 1\`,
       id, payload.userId,
     ).catch(() =>
-      prisma.$queryRawUnsafe<any[]>(
+      db.$queryRawUnsafe<any[]>(
         \`SELECT id, status, "createdAt", "updatedAt" FROM "\${SCHEMA}"."${tbl}"
           WHERE id = $1 AND user_id = $2 LIMIT 1\`,
         id, payload.userId,
       )
     )
-    if (!rows.length) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Job not found' }, { status: 404 })
 
     const job = rows[0]
-    return NextResponse.json({
+    return Response.json({
       success: true,
       id: job.id,
       status: job.status,
@@ -634,7 +626,7 @@ export async function GET(req: NextRequest) {
       updatedAt: job.updatedAt,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -653,33 +645,31 @@ function buildWalletEndpoints(tbl: string, schema: string): GeneratedEndpoint[] 
       name: `${tbl}-balance`,
       method: 'GET',
       description: `Get the authenticated user's credit balance`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COALESCE(SUM(amount), 0)::numeric AS balance FROM "\${SCHEMA}"."${tbl}" WHERE user_id = $1\`,
       payload.userId,
     ).catch(() =>
-      prisma.$queryRawUnsafe<any[]>(
+      db.$queryRawUnsafe<any[]>(
         \`SELECT balance FROM "\${SCHEMA}"."${tbl}" WHERE user_id = $1 LIMIT 1\`, payload!.userId,
       )
     )
-    return NextResponse.json({
+    return Response.json({
       success: true,
       balance: Number(rows[0]?.balance ?? 0),
       userId: payload.userId,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -689,33 +679,31 @@ export async function GET(req: NextRequest) {
       name: `${tbl}-deduct`,
       method: 'POST',
       description: `Atomically deduct credits (SELECT FOR UPDATE prevents double-spend under concurrency)`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { amount, reason } = await req.json()
 
     // ── #55 Validation ─────────────────────────────────────────────────────
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-      return NextResponse.json({ error: '"amount" must be a positive number' }, { status: 422 })
+      return Response.json({ error: '"amount" must be a positive number' }, { status: 422 })
     }
     if (Number(amount) > 1_000_000) {
-      return NextResponse.json({ error: '"amount" exceeds maximum deduction limit' }, { status: 422 })
+      return Response.json({ error: '"amount" exceeds maximum deduction limit' }, { status: 422 })
     }
 
     // ── #52 Atomic balance check + debit (BEGIN / SELECT FOR UPDATE / INSERT / COMMIT) ──
-    await prisma.$executeRawUnsafe('BEGIN')
+    await db.$executeRawUnsafe('BEGIN')
     try {
       // Acquire a row-level lock on this user's ledger rows
-      const balRows = await prisma.$queryRawUnsafe<any[]>(
+      const balRows = await db.$queryRawUnsafe<any[]>(
         \`SELECT COALESCE(SUM(amount), 0)::numeric AS balance
            FROM "\${SCHEMA}"."${tbl}"
           WHERE user_id = $1
@@ -725,14 +713,14 @@ export async function POST(req: NextRequest) {
       const currentBalance = Number(balRows[0]?.balance ?? 0)
 
       if (currentBalance < Number(amount)) {
-        await prisma.$executeRawUnsafe('ROLLBACK')
-        return NextResponse.json(
+        await db.$executeRawUnsafe('ROLLBACK')
+        return Response.json(
           { error: 'Insufficient credits', balance: currentBalance, required: Number(amount) },
           { status: 402 },
         )
       }
 
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${tbl}"
             (id, user_id, amount, type, description, balance_after, "createdAt")
            VALUES (gen_random_uuid(), $1, $2, 'consume', $3, $4, NOW())\`,
@@ -742,31 +730,31 @@ export async function POST(req: NextRequest) {
         currentBalance - Math.abs(Number(amount)),
       ).catch(() =>
         // Fallback for simpler schemas (no balance_after column)
-        prisma.$executeRawUnsafe(
+        db.$executeRawUnsafe(
           \`INSERT INTO "\${SCHEMA}"."${tbl}" (id, user_id, amount, type, "createdAt")
              VALUES (gen_random_uuid(), $1, $2, 'consume', NOW())\`,
           payload.userId, -Math.abs(Number(amount)),
         )
       )
 
-      await prisma.$executeRawUnsafe('COMMIT')
+      await db.$executeRawUnsafe('COMMIT')
     } catch (txErr: any) {
-      await prisma.$executeRawUnsafe('ROLLBACK')
+      await db.$executeRawUnsafe('ROLLBACK')
       throw txErr
     }
 
-    const newBalance = (await prisma.$queryRawUnsafe<any[]>(
+    const newBalance = (await db.$queryRawUnsafe<any[]>(
       \`SELECT COALESCE(SUM(amount), 0)::numeric AS balance FROM "\${SCHEMA}"."${tbl}" WHERE user_id = $1\`,
       payload.userId,
     ).catch(() => [{ balance: 0 }]))[0]?.balance ?? 0
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       deducted: Number(amount),
       newBalance: Number(newBalance),
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -776,29 +764,27 @@ export async function POST(req: NextRequest) {
       name: `${tbl}-topup`,
       method: 'POST',
       description: `Add credits to the authenticated user's balance (topup / purchase)`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 const MAX_SINGLE_TOPUP = 100_000
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { amount, reason, reference_id } = await req.json()
 
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-      return NextResponse.json({ error: '"amount" must be a positive number' }, { status: 422 })
+      return Response.json({ error: '"amount" must be a positive number' }, { status: 422 })
     }
     if (Number(amount) > MAX_SINGLE_TOPUP) {
-      return NextResponse.json({ error: \`Single topup may not exceed \${MAX_SINGLE_TOPUP}\` }, { status: 422 })
+      return Response.json({ error: \`Single topup may not exceed \${MAX_SINGLE_TOPUP}\` }, { status: 422 })
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`INSERT INTO "\${SCHEMA}"."${tbl}"
           (id, user_id, amount, type, description, reference_id, "createdAt")
          VALUES (gen_random_uuid(), $1, $2, 'purchase', $3, $4, NOW())\`,
@@ -807,24 +793,24 @@ export async function POST(req: NextRequest) {
       reason || 'topup',
       reference_id ?? null,
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${tbl}" (id, user_id, amount, type, "createdAt")
            VALUES (gen_random_uuid(), $1, $2, 'purchase', NOW())\`,
         payload.userId, Math.abs(Number(amount)),
       )
     )
 
-    const balRows = await prisma.$queryRawUnsafe<any[]>(
+    const balRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COALESCE(SUM(amount), 0)::numeric AS balance FROM "\${SCHEMA}"."${tbl}" WHERE user_id = $1\`,
       payload.userId,
     )
-    return NextResponse.json({
+    return Response.json({
       success: true,
       added: Number(amount),
       newBalance: Number(balRows[0]?.balance ?? 0),
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -841,23 +827,21 @@ function buildSubscriptionEndpoints(tbl: string, schema: string): GeneratedEndpo
       name: `${tbl}-subscribe`,
       method: 'POST',
       description: `Create a new subscription for the authenticated user`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { plan_id, plan, stripe_subscription_id } = await req.json().catch(() => ({}))
-    if (!plan_id && !plan) return NextResponse.json({ error: '"plan_id" or "plan" is required' }, { status: 422 })
+    if (!plan_id && !plan) return Response.json({ error: '"plan_id" or "plan" is required' }, { status: 422 })
 
     // Cancel existing active subscription first (one active at a time)
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}" SET status = 'cancelled', "updatedAt" = NOW()
          WHERE user_id = $1 AND status = 'active'\`,
       payload.userId,
@@ -867,23 +851,23 @@ export async function POST(req: NextRequest) {
     const periodEnd = new Date()
     periodEnd.setMonth(periodEnd.getMonth() + 1)
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`INSERT INTO "\${SCHEMA}"."${tbl}"
           (id, user_id, plan_id, plan, status, stripe_subscription_id, current_period_end, "createdAt", "updatedAt")
          VALUES ($1, $2, $3, $4, 'active', $5, $6, NOW(), NOW())\`,
       id, payload.userId, plan_id ?? null, plan ?? null,
       stripe_subscription_id ?? null, periodEnd.toISOString(),
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${tbl}" (id, user_id, status, "createdAt", "updatedAt")
            VALUES ($1, $2, 'active', NOW(), NOW())\`,
         id, payload.userId,
       )
     )
 
-    return NextResponse.json({ success: true, subscriptionId: id, status: 'active' }, { status: 201 })
+    return Response.json({ success: true, subscriptionId: id, status: 'active' }, { status: 201 })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -891,31 +875,29 @@ export async function POST(req: NextRequest) {
       name: `${tbl}-cancel`,
       method: 'POST',
       description: `Cancel a subscription at the end of the current billing period`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { id: subId } = await req.json().catch(() => ({}))
     const id = subId || new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: '"id" is required' }, { status: 400 })
+    if (!id) return Response.json({ error: '"id" is required' }, { status: 400 })
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}"
           SET cancel_at_period_end = true, "updatedAt" = NOW()
         WHERE id = $1 AND user_id = $2\`,
       id, payload.userId,
     )
-    return NextResponse.json({ success: true, message: 'Subscription will cancel at end of billing period.' })
+    return Response.json({ success: true, message: 'Subscription will cancel at end of billing period.' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -923,24 +905,22 @@ export async function POST(req: NextRequest) {
       name: `${tbl}-upgrade`,
       method: 'POST',
       description: `Upgrade or switch the subscription plan immediately`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { id: subId, new_plan_id, new_plan } = await req.json().catch(() => ({}))
     const id = subId || new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: '"id" is required' }, { status: 400 })
-    if (!new_plan_id && !new_plan) return NextResponse.json({ error: '"new_plan_id" or "new_plan" is required' }, { status: 422 })
+    if (!id) return Response.json({ error: '"id" is required' }, { status: 400 })
+    if (!new_plan_id && !new_plan) return Response.json({ error: '"new_plan_id" or "new_plan" is required' }, { status: 422 })
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}"
           SET plan_id = COALESCE($3, plan_id),
               plan = COALESCE($4, plan),
@@ -949,14 +929,14 @@ export async function POST(req: NextRequest) {
         WHERE id = $1 AND user_id = $2\`,
       id, payload.userId, new_plan_id ?? null, new_plan ?? null,
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`UPDATE "\${SCHEMA}"."${tbl}" SET "updatedAt" = NOW() WHERE id = $1 AND user_id = $2\`,
         id, payload.userId,
       )
     )
-    return NextResponse.json({ success: true, message: 'Plan upgraded.' })
+    return Response.json({ success: true, message: 'Plan upgraded.' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -977,33 +957,32 @@ function buildAuthEndpoints(tbl: string, schema: string): GeneratedEndpoint[] {
       name: 'auth-forgot-password',
       method: 'POST',
       description: 'Initiate a password-reset flow — generates a time-limited token',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 import crypto from 'crypto'
 
 const SCHEMA = '${schema}'
 const TOKEN_TTL_HOURS = 2
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const { email } = await req.json().catch(() => ({}))
     if (!email || !/^[^@]+@[^@]+\.[^@]+$/.test(email)) {
-      return NextResponse.json({ error: 'A valid email address is required' }, { status: 422 })
+      return Response.json({ error: 'A valid email address is required' }, { status: 422 })
     }
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id FROM "\${SCHEMA}"."${tbl}" WHERE email = $1 LIMIT 1\`, email,
     )
 
     // Always return 200 to prevent user enumeration
     if (!rows.length) {
-      return NextResponse.json({ success: true, message: 'If that email exists, a reset link has been sent.' })
+      return Response.json({ success: true, message: 'If that email exists, a reset link has been sent.' })
     }
 
     const token = crypto.randomBytes(32).toString('hex')
     const expiresAt = new Date(Date.now() + TOKEN_TTL_HOURS * 60 * 60 * 1000).toISOString()
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}"
           SET reset_token = $1, reset_token_expires_at = $2, "updatedAt" = NOW()
         WHERE email = $3\`,
@@ -1011,14 +990,14 @@ export async function POST(req: NextRequest) {
     ).catch(() => { /* table may not have reset columns — non-fatal */ })
 
     // In production: send email via /api/v1/{projectId}/fn/send-email or Resend integration
-    return NextResponse.json({
+    return Response.json({
       success: true,
       message: 'If that email exists, a reset link has been sent.',
       // Only expose token in non-production for testing
       ...(process.env.NODE_ENV !== 'production' ? { resetToken: token } : {}),
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -1026,46 +1005,45 @@ export async function POST(req: NextRequest) {
       name: 'auth-reset-password',
       method: 'POST',
       description: 'Complete password reset using the token from the forgot-password flow',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 import bcrypt from 'bcryptjs'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const { token, newPassword } = await req.json().catch(() => ({}))
-    if (!token) return NextResponse.json({ error: '"token" is required' }, { status: 400 })
+    if (!token) return Response.json({ error: '"token" is required' }, { status: 400 })
     if (!newPassword || newPassword.length < 8) {
-      return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 422 })
+      return Response.json({ error: 'Password must be at least 8 characters' }, { status: 422 })
     }
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, reset_token_expires_at FROM "\${SCHEMA}"."${tbl}"
         WHERE reset_token = $1 LIMIT 1\`,
       token,
     ).catch(() => [] as any[])
 
     if (!rows.length) {
-      return NextResponse.json({ error: 'Invalid or expired token' }, { status: 400 })
+      return Response.json({ error: 'Invalid or expired token' }, { status: 400 })
     }
 
     const user = rows[0]
     if (user.reset_token_expires_at && new Date(user.reset_token_expires_at) < new Date()) {
-      return NextResponse.json({ error: 'Reset token has expired' }, { status: 400 })
+      return Response.json({ error: 'Reset token has expired' }, { status: 400 })
     }
 
     const hash = await bcrypt.hash(newPassword, 12)
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."${tbl}"
           SET password_hash = $1, reset_token = NULL, reset_token_expires_at = NULL, "updatedAt" = NOW()
         WHERE id = $2\`,
       hash, user.id,
     )
 
-    return NextResponse.json({ success: true, message: 'Password updated successfully.' })
+    return Response.json({ success: true, message: 'Password updated successfully.' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -1100,7 +1078,7 @@ function buildNestedResponseEndpoints(
     const fkGuess = `${tbl.toLowerCase().replace(/s$/, '')}_id`
     return `
     // ${child}
-    const ${child}Rows = await prisma.$queryRawUnsafe<any[]>(
+    const ${child}Rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT * FROM "\${SCHEMA}"."${child}" WHERE ${fkGuess} = $1 ORDER BY "createdAt" DESC LIMIT 100\`,
       id,
     ).catch(() => [] as any[])`
@@ -1113,31 +1091,29 @@ function buildNestedResponseEndpoints(
       name: `${tbl}-full`,
       method: 'GET',
       description: `Get a ${tbl} record with all nested related data (${childCandidates.join(', ')})`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const id = new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: '"id" query param is required' }, { status: 400 })
+    if (!id) return Response.json({ error: '"id" query param is required' }, { status: 400 })
 
     // Fetch parent row (ownership-scoped)
-    const parentRows = await prisma.$queryRawUnsafe<any[]>(
+    const parentRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT * FROM "\${SCHEMA}"."${tbl}" WHERE id = $1 AND user_id = $2 LIMIT 1\`,
       id, payload.userId,
     ).catch(() =>
-      prisma.$queryRawUnsafe<any[]>(
+      db.$queryRawUnsafe<any[]>(
         \`SELECT * FROM "\${SCHEMA}"."${tbl}" WHERE id = $1 LIMIT 1\`, id,
       )
     )
-    if (!parentRows.length) return NextResponse.json({ error: '${tbl} not found' }, { status: 404 })
+    if (!parentRows.length) return Response.json({ error: '${tbl} not found' }, { status: 404 })
 
     // Fetch all child tables in parallel (non-blocking)
     const [${childCandidates.join(', ')}Rows] = await Promise.all([${childFetches.join(',\n')}
@@ -1145,15 +1121,15 @@ export async function GET(req: NextRequest) {
     // reassign per table
     ${childCandidates.map((c, i) => `const ${c}Rows_r = (await Promise.all([${childFetches.join(',')}]) as any[])[${i}] ?? []`).join('\n    ')}
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       ${tbl.replace(/s$/, '')}: {
         ...parentRows[0],
-${childCandidates.map(c => `        ${c}: (await prisma.$queryRawUnsafe<any[]>(\`SELECT * FROM "\${SCHEMA}"."${c}" WHERE ${tbl.toLowerCase().replace(/s$/, '')}_id = $1 ORDER BY "createdAt" DESC LIMIT 100\`, id).catch(() => [])),`).join('\n')}
+${childCandidates.map(c => `        ${c}: (await db.$queryRawUnsafe<any[]>(\`SELECT * FROM "\${SCHEMA}"."${c}" WHERE ${tbl.toLowerCase().replace(/s$/, '')}_id = $1 ORDER BY "createdAt" DESC LIMIT 100\`, id).catch(() => [])),`).join('\n')}
       },
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -1170,24 +1146,22 @@ function buildPaymentEndpoints(tbl: string, schema: string): GeneratedEndpoint[]
       name: `${tbl}-create`,
       method: 'POST',
       description: `Create a payment record with idempotency key support (safe to retry)`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     // ── #56 Idempotency key ────────────────────────────────────────────────
     const idempotencyKey = req.headers.get('idempotency-key') ?? req.headers.get('x-idempotency-key')
 
     // If key provided, check if this request was already processed
     if (idempotencyKey) {
-      const existing = await prisma.$queryRawUnsafe<any[]>(
+      const existing = await db.$queryRawUnsafe<any[]>(
         \`SELECT id, status, amount FROM "\${SCHEMA}"."${tbl}"
            WHERE idempotency_key = $1 AND user_id = $2 LIMIT 1\`,
         idempotencyKey, payload.userId,
@@ -1195,7 +1169,7 @@ export async function POST(req: NextRequest) {
 
       if (existing.length > 0) {
         // Return the original result — idempotent
-        return NextResponse.json({
+        return Response.json({
           success: true,
           idempotent: true,
           payment: existing[0],
@@ -1208,28 +1182,28 @@ export async function POST(req: NextRequest) {
 
     // ── #55 Validation ─────────────────────────────────────────────────────
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-      return NextResponse.json({ error: '"amount" must be a positive number' }, { status: 422 })
+      return Response.json({ error: '"amount" must be a positive number' }, { status: 422 })
     }
     if (!['usd', 'eur', 'gbp', 'jpy', 'cad', 'aud'].includes(currency.toLowerCase())) {
-      return NextResponse.json({ error: \`Unsupported currency: "\${currency}"\` }, { status: 422 })
+      return Response.json({ error: \`Unsupported currency: "\${currency}"\` }, { status: 422 })
     }
 
     const id = crypto.randomUUID()
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`INSERT INTO "\${SCHEMA}"."${tbl}"
           (id, user_id, amount, currency, status, description, metadata, idempotency_key, "createdAt", "updatedAt")
          VALUES ($1, $2, $3, $4, 'pending', $5, $6::jsonb, $7, NOW(), NOW())\`,
       id, payload.userId, Number(amount), currency,
       description ?? null, JSON.stringify(metadata ?? {}), idempotencyKey ?? null,
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${tbl}" (id, user_id, amount, status, "createdAt", "updatedAt")
            VALUES ($1, $2, $3, 'pending', NOW(), NOW())\`,
         id, payload.userId, Number(amount),
       )
     )
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       paymentId: id,
       status: 'pending',
@@ -1237,7 +1211,7 @@ export async function POST(req: NextRequest) {
       currency,
     }, { status: 201 })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -1247,14 +1221,13 @@ export async function POST(req: NextRequest) {
       name: `${tbl}-webhook`,
       method: 'POST',
       description: `Payment webhook handler with signature verification and idempotency (safe against duplicate delivery)`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 import crypto from 'crypto'
 
 const SCHEMA = '${schema}'
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? process.env.PAYMENT_WEBHOOK_SECRET ?? ''
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const rawBody = await req.text()
     const sig = req.headers.get('stripe-signature') ?? req.headers.get('x-webhook-signature') ?? ''
@@ -1274,7 +1247,7 @@ export async function POST(req: NextRequest) {
           .update(\`\${ts}.\${rawBody}\`)
           .digest('hex')
         if (expected !== v1) {
-          return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 400 })
+          return Response.json({ error: 'Invalid webhook signature' }, { status: 400 })
         }
       }
     }
@@ -1284,12 +1257,12 @@ export async function POST(req: NextRequest) {
     // ── #56 Idempotency: skip if we already processed this event ──────────
     const eventId = event.id ?? event.event_id ?? event.webhookId
     if (eventId) {
-      const already = await prisma.$queryRawUnsafe<any[]>(
+      const already = await db.$queryRawUnsafe<any[]>(
         \`SELECT id FROM "\${SCHEMA}"."${tbl}" WHERE provider_payment_id = $1 LIMIT 1\`,
         eventId,
       ).catch(() => [] as any[])
       if (already.length > 0) {
-        return NextResponse.json({ success: true, idempotent: true })
+        return Response.json({ success: true, idempotent: true })
       }
     }
 
@@ -1298,7 +1271,7 @@ export async function POST(req: NextRequest) {
     const obj = data?.object ?? data ?? {}
 
     if (eventType === 'payment_intent.succeeded' || eventType === 'payment.success') {
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         \`UPDATE "\${SCHEMA}"."${tbl}"
             SET status = 'completed', provider_payment_id = $1, "updatedAt" = NOW()
           WHERE (id = $2 OR provider_payment_id = $2)\`,
@@ -1307,7 +1280,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (eventType === 'payment_intent.payment_failed' || eventType === 'payment.failed') {
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         \`UPDATE "\${SCHEMA}"."${tbl}"
             SET status = 'failed', "updatedAt" = NOW()
           WHERE (id = $1 OR provider_payment_id = $1)\`,
@@ -1315,9 +1288,9 @@ export async function POST(req: NextRequest) {
       ).catch(() => {})
     }
 
-    return NextResponse.json({ success: true, received: true })
+    return Response.json({ success: true, received: true })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     },
@@ -1355,15 +1328,13 @@ function buildAdminEndpoints(schema: string, allTables: string[]): GeneratedEndp
     name: 'admin-users-list',
     method: 'GET',
     description: 'Admin: paginated user list with search (requires x-admin-key header)',
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+    code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url = new URL(req.url)
     const limit  = Math.min(Number(url.searchParams.get('limit')  || 50), 500)
@@ -1377,19 +1348,19 @@ export async function GET(req: NextRequest) {
     if (role)   { where.push(\`role = $\${args.push(role)}\`) }
     const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : ''
 
-    const users = await prisma.$queryRawUnsafe<any[]>(
+    const users = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, email, name, role, "createdAt", "updatedAt"
          FROM "\${SCHEMA}"."users" \${whereSQL}
          ORDER BY "createdAt" DESC LIMIT $1 OFFSET $2\`,
       ...args,
     )
-    const countRows = await prisma.$queryRawUnsafe<any[]>(
+    const countRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(*) AS total FROM "\${SCHEMA}"."users" \${whereSQL}\`,
       ...(args.slice(2)),
     )
-    return NextResponse.json({ success: true, users, total: Number(countRows[0]?.total ?? 0), limit, offset })
+    return Response.json({ success: true, users, total: Number(countRows[0]?.total ?? 0), limit, offset })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -1399,20 +1370,18 @@ export async function GET(req: NextRequest) {
     name: 'admin-users-suspend',
     method: 'POST',
     description: 'Admin: suspend or unsuspend a user account by ID',
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+    code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const { userId, suspended = true, reason } = await req.json().catch(() => ({}))
-    if (!userId) return NextResponse.json({ error: '"userId" is required' }, { status: 400 })
+    if (!userId) return Response.json({ error: '"userId" is required' }, { status: 400 })
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${SCHEMA}"."users"
           SET suspended = $1,
               suspension_reason = $2,
@@ -1421,14 +1390,14 @@ export async function POST(req: NextRequest) {
         WHERE id = $3\`,
       Boolean(suspended), reason ?? null, userId,
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`UPDATE "\${SCHEMA}"."users" SET "updatedAt" = NOW() WHERE id = $1\`, userId,
       )
     )
 
-    return NextResponse.json({ success: true, userId, suspended: Boolean(suspended) })
+    return Response.json({ success: true, userId, suspended: Boolean(suspended) })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -1439,21 +1408,19 @@ export async function POST(req: NextRequest) {
       name: 'admin-revenue',
       method: 'GET',
       description: 'Admin: revenue summary — total purchased credits, by date range',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+      code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url = new URL(req.url)
     const from = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
     const to   = url.searchParams.get('to')   ?? new Date().toISOString()
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT
           COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0)::numeric AS total_purchased,
           COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END), 0)::numeric AS total_consumed,
@@ -1463,7 +1430,7 @@ export async function GET(req: NextRequest) {
       from, to,
     )
 
-    const daily = await prisma.$queryRawUnsafe<any[]>(
+    const daily = await db.$queryRawUnsafe<any[]>(
       \`SELECT DATE_TRUNC('day', "createdAt") AS day,
                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0)::numeric AS purchased,
                COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END), 0)::numeric AS consumed
@@ -1473,14 +1440,14 @@ export async function GET(req: NextRequest) {
       from, to,
     )
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       period: { from, to },
       summary: rows[0],
       daily,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -1490,38 +1457,36 @@ export async function GET(req: NextRequest) {
       name: 'admin-credits-refund',
       method: 'POST',
       description: 'Admin: manually refund/add credits to a user account',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+      code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const { userId, amount, reason } = await req.json().catch(() => ({}))
-    if (!userId) return NextResponse.json({ error: '"userId" is required' }, { status: 400 })
+    if (!userId) return Response.json({ error: '"userId" is required' }, { status: 400 })
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-      return NextResponse.json({ error: '"amount" must be a positive number' }, { status: 422 })
+      return Response.json({ error: '"amount" must be a positive number' }, { status: 422 })
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`INSERT INTO "\${SCHEMA}"."${creditTable}"
           (id, user_id, amount, type, description, "createdAt")
          VALUES (gen_random_uuid(), $1, $2, 'refund', $3, NOW())\`,
       userId, Math.abs(Number(amount)), reason || 'admin refund',
     ).catch(() =>
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`INSERT INTO "\${SCHEMA}"."${creditTable}" (id, user_id, amount, type, "createdAt")
            VALUES (gen_random_uuid(), $1, $2, 'refund', NOW())\`,
         userId, Math.abs(Number(amount)),
       )
     )
 
-    return NextResponse.json({ success: true, userId, refunded: Number(amount) })
+    return Response.json({ success: true, userId, refunded: Number(amount) })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -1533,16 +1498,14 @@ export async function POST(req: NextRequest) {
       name: 'admin-jobs-list',
       method: 'GET',
       description: 'Admin: list all jobs across all users with filter by status',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+      code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 const VALID_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled']
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url    = new URL(req.url)
     const limit  = Math.min(Number(url.searchParams.get('limit')  || 50), 200)
@@ -1550,26 +1513,26 @@ export async function GET(req: NextRequest) {
     const status = url.searchParams.get('status') || ''
 
     if (status && !VALID_STATUSES.includes(status)) {
-      return NextResponse.json({ error: \`status must be one of: \${VALID_STATUSES.join(', ')}\` }, { status: 422 })
+      return Response.json({ error: \`status must be one of: \${VALID_STATUSES.join(', ')}\` }, { status: 422 })
     }
 
     const whereSQL = status ? 'WHERE status = $3' : ''
     const args: any[] = status ? [limit, offset, status] : [limit, offset]
 
-    const jobs = await prisma.$queryRawUnsafe<any[]>(
+    const jobs = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, user_id, status, type, progress, error_message, "createdAt", "updatedAt"
          FROM "\${SCHEMA}"."${jobTable}" \${whereSQL}
          ORDER BY "createdAt" DESC LIMIT $1 OFFSET $2\`,
       ...args,
     )
-    const countRows = await prisma.$queryRawUnsafe<any[]>(
+    const countRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(*) AS total FROM "\${SCHEMA}"."${jobTable}" \${whereSQL}\`,
       ...(status ? [status] : []),
     )
 
-    return NextResponse.json({ success: true, jobs, total: Number(countRows[0]?.total ?? 0), limit, offset })
+    return Response.json({ success: true, jobs, total: Number(countRows[0]?.total ?? 0), limit, offset })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -1581,15 +1544,13 @@ export async function GET(req: NextRequest) {
       name: 'admin-audit-logs',
       method: 'GET',
       description: 'Admin: query the audit log for any actor / resource / action',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+      code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url       = new URL(req.url)
     const limit     = Math.min(Number(url.searchParams.get('limit')  || 100), 500)
@@ -1605,15 +1566,15 @@ export async function GET(req: NextRequest) {
     if (resource) where.push(\`resource_type = $\${args.push(resource)}\`)
     const whereSQL = where.length ? 'WHERE ' + where.join(' AND ') : ''
 
-    const logs = await prisma.$queryRawUnsafe<any[]>(
+    const logs = await db.$queryRawUnsafe<any[]>(
       \`SELECT * FROM "\${SCHEMA}"."${auditTable}" \${whereSQL}
          ORDER BY "createdAt" DESC LIMIT $1 OFFSET $2\`,
       ...args,
     )
 
-    return NextResponse.json({ success: true, logs, limit, offset })
+    return Response.json({ success: true, logs, limit, offset })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -1624,22 +1585,20 @@ export async function GET(req: NextRequest) {
     name: 'admin-usage-dashboard',
     method: 'GET',
     description: 'Admin: aggregate usage metrics — total users, DAU/MAU, credits sold, jobs completed, revenue, storage',
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+    code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url = new URL(req.url)
     const from = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
     const to   = url.searchParams.get('to')   ?? new Date().toISOString()
 
     // Total users
-    const totalUsersRows = await prisma.$queryRawUnsafe<any[]>(
+    const totalUsersRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE "createdAt" BETWEEN $1 AND $2)::int AS new_in_period
          FROM "\${SCHEMA}"."users"\`,
@@ -1647,21 +1606,21 @@ export async function GET(req: NextRequest) {
     ).catch(() => [{ total: 0, new_in_period: 0 }])
 
     // DAU — distinct users active in last 24 h (by updatedAt)
-    const dauRows = await prisma.$queryRawUnsafe<any[]>(
+    const dauRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(DISTINCT id)::int AS dau
          FROM "\${SCHEMA}"."users"
         WHERE "updatedAt" >= NOW() - INTERVAL '24 hours'\`,
     ).catch(() => [{ dau: 0 }])
 
     // MAU — distinct users active in last 30 days
-    const mauRows = await prisma.$queryRawUnsafe<any[]>(
+    const mauRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(DISTINCT id)::int AS mau
          FROM "\${SCHEMA}"."users"
         WHERE "updatedAt" >= NOW() - INTERVAL '30 days'\`,
     ).catch(() => [{ mau: 0 }])
 
     // Credits sold in period
-    const creditsRows = ${hasCredits} ? await prisma.$queryRawUnsafe<any[]>(
+    const creditsRows = ${hasCredits} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0)::numeric AS credits_sold,
           COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) END), 0)::numeric AS credits_used,
@@ -1672,7 +1631,7 @@ export async function GET(req: NextRequest) {
     ).catch(() => []) : []
 
     // Jobs metrics
-    const jobsRows = ${hasJobs} ? await prisma.$queryRawUnsafe<any[]>(
+    const jobsRows = ${hasJobs} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           COUNT(*)::int AS total,
           COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
@@ -1683,7 +1642,7 @@ export async function GET(req: NextRequest) {
       from, to,
     ).catch(() => []) : []
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       period: { from, to },
       users: {
@@ -1696,7 +1655,7 @@ export async function GET(req: NextRequest) {
       jobs: jobsRows[0] ?? null,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   })
@@ -1708,22 +1667,20 @@ export async function GET(req: NextRequest) {
       name: 'admin-marketplace-revenue',
       method: 'GET',
       description: 'Admin: marketplace GMV, AOV, and order count by date range — queries existing orders/sales tables',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+      code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url  = new URL(req.url)
     const from = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
     const to   = url.searchParams.get('to')   ?? new Date().toISOString()
 
     // Revenue from orders (uses total_amount / amount / price — whichever column exists)
-    const revenueRows = ${hasOrders} ? await prisma.$queryRawUnsafe<any[]>(
+    const revenueRows = ${hasOrders} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           COALESCE(
             SUM(CASE WHEN total_amount IS NOT NULL THEN total_amount
@@ -1742,7 +1699,7 @@ export async function GET(req: NextRequest) {
     ).catch(() => [{ gmv: 0, order_count: 0, aov: 0 }]) : []
 
     // Revenue from sales table (if present)
-    const salesRows = ${hasSales} ? await prisma.$queryRawUnsafe<any[]>(
+    const salesRows = ${hasSales} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           COALESCE(SUM(COALESCE(amount, total, revenue, 0)), 0)::numeric AS sales_revenue,
           COUNT(*)::int AS sale_count
@@ -1752,7 +1709,7 @@ export async function GET(req: NextRequest) {
     ).catch(() => [{ sales_revenue: 0, sale_count: 0 }]) : []
 
     // Revenue over time (daily buckets)
-    const dailyRows = ${hasOrders} ? await prisma.$queryRawUnsafe<any[]>(
+    const dailyRows = ${hasOrders} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           DATE_TRUNC('day', "createdAt") AS date,
           COUNT(*)::int AS orders,
@@ -1765,7 +1722,7 @@ export async function GET(req: NextRequest) {
 
     const r = revenueRows[0] ?? {}
     const s = salesRows[0] ?? {}
-    return NextResponse.json({
+    return Response.json({
       success: true,
       period: { from, to },
       gmv: Number(r.gmv ?? 0),
@@ -1776,7 +1733,7 @@ export async function GET(req: NextRequest) {
       daily: dailyRows,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -1787,15 +1744,13 @@ export async function GET(req: NextRequest) {
         name: 'admin-seller-analytics',
         method: 'GET',
         description: 'Admin: per-seller revenue, order count, and top performers — queries sellers + orders tables',
-        code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+        code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url    = new URL(req.url)
     const from   = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
@@ -1803,7 +1758,7 @@ export async function GET(req: NextRequest) {
     const limit  = Math.min(Number(url.searchParams.get('limit') || 20), 100)
 
     // Per-seller revenue — join sellers → orders on seller_id
-    const sellerRows = await prisma.$queryRawUnsafe<any[]>(
+    const sellerRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT
           s.id,
           COALESCE(s.name, s.email, s.id::text) AS seller,
@@ -1818,18 +1773,18 @@ export async function GET(req: NextRequest) {
       from, to, limit,
     )
 
-    const total_sellers = await prisma.$queryRawUnsafe<any[]>(
+    const total_sellers = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(*)::int AS cnt FROM "\${SCHEMA}"."${sellersTable}"\`,
     ).then(r => Number(r[0]?.cnt ?? 0)).catch(() => 0)
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       period: { from, to },
       total_sellers,
       sellers: sellerRows,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
       })
@@ -1841,15 +1796,13 @@ export async function GET(req: NextRequest) {
         name: 'admin-product-analytics',
         method: 'GET',
         description: 'Admin: product performance — order count, revenue per product, inventory status',
-        code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { isAdminRequest } from '@/lib/auth/jwt'
+        code: `import { db, isAdminRequest } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 
     const url    = new URL(req.url)
     const from   = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
@@ -1857,7 +1810,7 @@ export async function GET(req: NextRequest) {
     const limit  = Math.min(Number(url.searchParams.get('limit') || 20), 200)
 
     // Products with order revenue (join on product_id)
-    const productRows = ${hasOrders} ? await prisma.$queryRawUnsafe<any[]>(
+    const productRows = ${hasOrders} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           p.id,
           COALESCE(p.name, p.title, p.id::text) AS product,
@@ -1871,7 +1824,7 @@ export async function GET(req: NextRequest) {
         ORDER BY revenue DESC
         LIMIT $3\`,
       from, to, limit,
-    ).catch(() => []) : await prisma.$queryRawUnsafe<any[]>(
+    ).catch(() => []) : await db.$queryRawUnsafe<any[]>(
       \`SELECT id, COALESCE(name, title, id::text) AS product, COALESCE(price, 0)::numeric AS unit_price
          FROM "\${SCHEMA}"."${productsTable}"
         ORDER BY "createdAt" DESC LIMIT $1\`,
@@ -1879,7 +1832,7 @@ export async function GET(req: NextRequest) {
     ).catch(() => [])
 
     // Inventory status (if inventory table exists)
-    const inventoryRows = ${hasInventory} ? await prisma.$queryRawUnsafe<any[]>(
+    const inventoryRows = ${hasInventory} ? await db.$queryRawUnsafe<any[]>(
       \`SELECT
           product_id,
           COALESCE(SUM(quantity), 0)::int AS stock,
@@ -1896,14 +1849,14 @@ export async function GET(req: NextRequest) {
       out_of_stock: inventoryMap[p.id]?.out_of_stock === 1,
     }))
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       period: { from, to },
       products,
       total: products.length,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
       })
@@ -1922,15 +1875,14 @@ function buildValidationSchemaEndpoint(tbl: string, schema: string): GeneratedEn
     name: `${tbl}-schema`,
     method: 'GET',
     description: `Return the runtime validation schema for ${tbl} (field types, enums, required fields, formats)`,
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+    code: `import { db } from '@backenly/functions'
 
 const SCHEMA = '${schema}'
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
     // Introspect the real table definition from information_schema
-    const columns = await prisma.$queryRawUnsafe<any[]>(
+    const columns = await db.$queryRawUnsafe<any[]>(
       \`SELECT
           c.column_name AS name,
           c.data_type   AS db_type,
@@ -1989,7 +1941,7 @@ export async function GET(req: NextRequest) {
       }
     })
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       table: '${tbl}',
       schema: SCHEMA,
@@ -2010,7 +1962,7 @@ export async function GET(req: NextRequest) {
       }).join(',\\n'),
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
   }

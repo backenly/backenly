@@ -1162,8 +1162,12 @@ export interface RevertEligibility {
  *     anyone made since. Format 3 records the governed changes the fix made, and
  *     undoes exactly those (lib/changes/recovery.ts).
  */
-/** A format-3 fix whose governed changes were recorded: undone by restoring exactly those. */
-function recordedChanges(rollbackData: Record<string, unknown>): boolean {
+/**
+ * A format-3 fix whose governed changes were recorded: undone by restoring
+ * exactly those. Exported so the approve route's admin gate reads the same
+ * predicate as the undo it guards.
+ */
+export function recordedChanges(rollbackData: Record<string, unknown>): boolean {
   return rollbackData.rollbackFormat === 3 && Array.isArray(rollbackData.changeIds) && rollbackData.changeIds.length > 0
 }
 

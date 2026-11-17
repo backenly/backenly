@@ -73,12 +73,13 @@ describe('listExposedResources excludes auth-managed tables', () => {
     expect(await countExposedResources('p1')).toBe(0)
   })
 
-  it('reports real tables, and never /db/users alongside them', async () => {
+  it('reports real tables, and never the users table alongside them', async () => {
     const { listExposedResources } = await load(['users', 'notes'])
     const resources = await listExposedResources('p1')
 
-    expect(resources).toEqual([{ name: 'notes', basePath: '/db/notes' }])
-    expect(resources.some(r => r.basePath === '/db/users')).toBe(false)
+    // Served on /api/v2, the REST API; /db is deprecated (lib/api/v1/deprecation.ts).
+    expect(resources).toEqual([{ name: 'notes', basePath: '/api/v2/p1/notes' }])
+    expect(resources.some(r => r.name === 'users')).toBe(false)
   })
 
   it('still counts a genuinely built backend', async () => {

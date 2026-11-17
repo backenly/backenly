@@ -184,6 +184,25 @@ describe('the daily purge', () => {
     await purgeDeletedProjects(new Date(Date.now() + 30 * DAY))
     expect(await row(p.id)).toMatchObject({ deletedAt: null })
   })
+
+  // The purge lists every project past its date and removes them one by one, so
+  // a restore in between was reported done and then undone, part of it already
+  // dropped. Past its date a project is the purge's and is not restored.
+  it('does not restore a project past its date, and the purge still removes it', async () => {
+    const { restoreDeletedProject } = await import('@/lib/projects/deletion')
+    const p = await project()
+    await deleteProject(p)
+    const purgeAfter = (await row(p.id))!.purgeAfter!
+    const pastDue = new Date(purgeAfter.getTime() + 60_000)
+
+    const answer = await restoreDeletedProject(p.id, { kind: 'user', userId: ownerId, email }, pastDue)
+    expect(answer).toEqual({ restored: false, due: true })
+    expect(await row(p.id)).toMatchObject({ deletedAt: expect.any(Date), purgeAfter })
+
+    const due = await purgeDeletedProjects(pastDue)
+    expect(due.purged).toContain(p.id)
+    expect(await row(p.id)).toBeNull()
+  })
 })
 
 describe('an import that never finished', () => {

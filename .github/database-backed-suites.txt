@@ -45,6 +45,21 @@ tests/integration/mcp-direct-access-url.spec.ts
 # that exist stay listed by name to be revoked (production QA re-test,
 # 2026-11-16, N4).
 tests/integration/direct-postgres-only-where-reachable.spec.ts
+
+# Where a region's database endpoint admits only allowed addresses, each
+# project keeps its own (public IPv4, at most /16, the plan's number), every
+# add and remove is a History entry with a restore, and the region's prefix
+# list is kept equal to the union of every project's addresses there, never
+# dropping one another project still allows. EC2 is a stand-in; no AWS call.
+tests/integration/direct-postgres-allowed-addresses.spec.ts
+tests/integration/direct-postgres-allowed-addresses-history.spec.ts
+tests/integration/direct-postgres-allowlist-sync.spec.ts
+
+# Where the endpoint fronts RDS, each login has a libpq string (verify-full
+# through hostaddr) and one for every other client (verify-ca), both naming the
+# published RDS CA bundle; each login holds its plan's connections at once,
+# set at creation and at every read of its credentials, enforced by Postgres.
+tests/integration/direct-postgres-verified-strings-and-limits.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
@@ -852,6 +867,11 @@ tests/integration/runtime-serving-gate.spec.ts
 # unspent, and the mutation kernel refusing a paused project. Mutation-checked:
 # dropping the activity guard or the job filter fails the matching tests.
 tests/integration/project-pause-lifecycle.spec.ts
+# Pausing a project, or asking for it to be deleted, stops its direct Postgres
+# logins (NOLOGIN, sessions ended); resuming or restoring it brings them back
+# with the same passwords; none is created while paused; an hourly pass repairs
+# what a failed hook left.
+tests/integration/paused-projects-stop-direct-logins.spec.ts
 
 # The inactivity clock (Project.lastActivityAt), which decides who Backenly
 # Cloud pauses: first use, the hourly write ceiling, a paused project's clock
@@ -2162,6 +2182,13 @@ tests/integration/function-redeploy-in-history.spec.ts
 # update and still reaches nothing outside the project. Real policies and role.
 tests/integration/function-trusted-work.spec.ts
 
+# A function that imports only @backenly/functions and answers with
+# Response.json deploys through deploy_code and answers at /fn as its caller
+# (db, asService, verifyToken, isAdminRequest, createSession, a text Response);
+# one written with next/server and @/lib/* still answers the same, and its
+# receipt names the module. Real runtime, API key, policies and role.
+tests/integration/functions-import-backenly-functions.spec.ts
+
 # The release step for stored functions that read the withheld variables:
 # reports every one, rewrites only Backenly's template code as governed
 # changes History can restore, and deploy says when code runs as the service
@@ -2432,3 +2459,7 @@ tests/integration/receipts-say-what-delete-does.spec.ts
 # An approval card says a deleted function, schedule or trigger can be undone
 # when History restores it, and that what nothing keeps cannot. Real rows.
 tests/integration/approval-cards-know-what-history-restores.spec.ts
+# Every /api/v1/{projectId}/db response says /db is deprecated (RFC 9745
+# Deprecation, Link rel="successor-version" to the table on /api/v2), from the
+# runtime over a real socket and from Next's handlers; /api/v2 says neither (#22).
+tests/integration/v1-db-deprecated-on-both-servers.spec.ts

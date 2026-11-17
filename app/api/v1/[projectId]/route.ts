@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { projectApiOrigin } from '@/lib/data-plane/regional'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 
 /**
  * Base project API info endpoint.
@@ -9,7 +11,7 @@ import { recordedV1 } from '@/lib/traffic/recorded-v1'
  * Example: GET https://backenly.com/api/v1/{projectId}
  */
 async function handleGET(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ projectId: string }> }
 ) {
   const { projectId } = (await context.params)
@@ -45,6 +47,10 @@ async function handleGET(
 
     const isLive = project.isDeployed && project.publicEnabled && project.projectStatus === 'LIVE'
     const baseUrl = project.publicUrl || `https://backenly.com/api/v1/${projectId}`
+    // The REST API: /api/v2 at the project's own API address. /db under the
+    // base is deprecated, kept for existing apps (lib/api/v1/deprecation.ts).
+    const publicBase = resolvePublicBaseUrl(request)
+    const restUrl = `${await projectApiOrigin(projectId, publicBase).catch(() => publicBase)}/api/v2/${projectId}`
 
     // Resources come from the live ApiDefinition catalogue, not from a fixed
     // list. The previous version advertised cart, checkout and stats endpoints
@@ -73,9 +79,9 @@ async function handleGET(
       .sort((a, b) => a.localeCompare(b))
       .map(name => ({
         resource: name,
-        url: `${baseUrl}/db/${name}`,
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-        // Every /db/* request is key- or JWT-authenticated; row visibility is
+        url: `${restUrl}/${name}`,
+        methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+        // Every REST request is key- or JWT-authenticated; row visibility is
         // then decided by RLS rather than by a per-endpoint flag.
         authRequired: true,
       }))
@@ -88,6 +94,7 @@ async function handleGET(
       status: isLive ? 'live' : 'inactive',
       environment: project.environment ?? 'production',
       baseUrl,
+      restUrl,
       // How to authenticate was not stated anywhere. Every resource below
       // requires a key, so omitting this guaranteed a first 401.
       authentication: {
@@ -120,7 +127,7 @@ async function handleGET(
           signIn: `POST ${baseUrl}/auth/signin`,
         },
         // Only what this project actually exposes.
-        database: resources.length > 0 ? resources : `No REST resources generated yet. POST ${baseUrl}/db/{table} once a table exists.`,
+        database: resources.length > 0 ? resources : `No tables yet. Once one exists: POST ${restUrl}/{table}.`,
         storage: {
           upload: `POST ${baseUrl}/storage/upload`,
           files:  `GET  ${baseUrl}/storage/files`,
