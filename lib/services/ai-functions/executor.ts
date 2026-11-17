@@ -83,11 +83,12 @@ export interface FunctionExecutionResult {
    */
   httpStatus?: number
   /**
-   * For a route module (a function written as a Next.js route handler), its
-   * answer as it wrote it: status, body and headers. /fn/{name} sends exactly
-   * this (lib/services/ai-functions/reply.ts). Absent for any other function.
+   * For a route module (an http function), its answer as it wrote it: status,
+   * body and headers, and `text` when the body is a Response's text rather
+   * than JSON. /fn/{name} sends exactly this (lib/services/ai-functions/reply.ts).
+   * Absent for any other function.
    */
-  answer?: { status: number; body: unknown; headers: Record<string, string> }
+  answer?: { status: number; body: unknown; headers: Record<string, string>; text?: true }
   error?: string
   /**
    * The function did not run, and it is not the function's fault: its state
@@ -896,7 +897,7 @@ export async function executeAiFunction(
   // correct behaviour, not a failure). Only thrown errors / timeouts fail.
   if (isRouteModuleFunction(fn.generatedCode)) {
     try {
-      const { logs, returnValue, headers } = await executeRouteModuleFunction(
+      const { logs, returnValue, headers, text } = await executeRouteModuleFunction(
         fn.generatedCode,
         projectId,
         event,
@@ -932,7 +933,7 @@ export async function executeAiFunction(
         logs,
         returnValue,
         httpStatus: returnValue?.status,
-        answer: { status: returnValue.status, body: returnValue.body, headers: headers ?? {} },
+        answer: { status: returnValue.status, body: returnValue.body, headers: headers ?? {}, ...(text ? { text } : {}) },
         durationMs,
       }
     } catch (err: any) {
