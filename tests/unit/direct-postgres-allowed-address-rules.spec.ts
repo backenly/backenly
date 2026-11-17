@@ -1,11 +1,12 @@
 /**
- * WHAT A PROJECT MAY ALLOW TO CONNECT TO ITS DATABASE, AND HOW MANY
- * ================================================================
+ * WHAT A PROJECT MAY ALLOW TO CONNECT TO ITS DATABASE, AND HOW MUCH
+ * =================================================================
  *
  * The region's database endpoint is shared by every project there, so an
  * allowed address is one public IPv4 address or a range no wider than /16,
  * normalised to the network it names (lib/security/allowed-address.ts); and a
- * project may allow up to its plan's number: Free 2, Pro 10, Enterprise 50
+ * project may allow up to its plan's number: Free 2, Pro 10, Enterprise 50;
+ * each login holds at most Free 2, Pro 5, Enterprise 20 connections at once
  * (lib/entitlements/direct-postgres.ts; owner's decision, 2026-11-17).
  */
 
@@ -83,7 +84,17 @@ describe('how many a plan allows', () => {
   })
 
   it('gives a plan it does not know, or none, the least', () => {
-    expect(directPostgresAllowance('SOMETHING_NEW')).toEqual({ planName: 'SANDBOX', allowedAddresses: 2 })
-    expect(directPostgresAllowance(null)).toEqual({ planName: 'SANDBOX', allowedAddresses: 2 })
+    expect(directPostgresAllowance('SOMETHING_NEW')).toEqual({ planName: 'SANDBOX', allowedAddresses: 2, connectionLimit: 2 })
+    expect(directPostgresAllowance(null)).toEqual({ planName: 'SANDBOX', allowedAddresses: 2, connectionLimit: 2 })
+  })
+
+  it.each([
+    ['SANDBOX', 2],
+    ['BUILDER', 5],
+    ['PRO', 5],
+    ['SCALE', 20],
+    ['SELF_HOSTED', 20],
+  ])('%s: %i connections at once per login', (plan, limit) => {
+    expect(directPostgresAllowance(plan).connectionLimit).toBe(limit)
   })
 })

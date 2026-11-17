@@ -3773,7 +3773,18 @@ export async function dispatchTool(
         ok: true as const,
         summary: clip([
           ...addressLines,
-          `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (TLS required, search_path pinned to ${status.schema}).`,
+          `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (${c.caBundle ? 'TLS, the server verified with the CA bundle' : 'TLS required'}, search_path pinned to ${status.schema}).`,
+          ...(c.verifyCaConnectionString && c.nodePostgres && c.caBundle
+            ? [
+                'data.connectionString is for psql, pg_dump, psycopg and other libpq tools (verify-full through hostaddr); ' +
+                  'data.verifyCaConnectionString for Go (pgx), Python (asyncpg), Rust (sqlx) and other clients that read sslmode=verify-ca. ' +
+                  `Both name the CA bundle as sslrootcert=${c.caBundle.file}: download it from ${c.caBundle.url} into the folder the client runs in, or give its full path.`,
+                'node-postgres (and Drizzle or Prisma on it) checks the host name even under verify-ca, so give it data.nodePostgres ' +
+                  "instead of a string: its host is the endpoint's address, and pass ssl as { ca: <the CA file's contents>, servername: " +
+                  'data.nodePostgres.ssl.servername }, which verifies the server in full.',
+              ]
+            : []),
+          ...(typeof status.connectionLimit === 'number' ? [`Each login may hold ${status.connectionLimit} connections at once on this project's plan.`] : []),
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
             : c.schemaChanges === 'allowed'
@@ -3782,7 +3793,7 @@ export async function dispatchTool(
                 ? 'Rows only: schema changes over it are refused (permission denied), and cannot be allowed on this database, which other projects share. Change the schema with apply_migration, which is governed, verified and reversible.'
                 : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
-        ].join('\n'), 1600),
+        ].join('\n'), 2000),
         data: {
           mode: c.mode,
           ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
@@ -3793,6 +3804,10 @@ export async function dispatchTool(
           database: c.database,
           schema: status.schema,
           connectionString: c.connectionString,
+          ...(c.verifyCaConnectionString ? { verifyCaConnectionString: c.verifyCaConnectionString } : {}),
+          ...(c.nodePostgres ? { nodePostgres: c.nodePostgres } : {}),
+          ...(c.caBundle ? { caBundle: c.caBundle } : {}),
+          ...(typeof status.connectionLimit === 'number' ? { connectionLimit: status.connectionLimit } : {}),
           psqlCommand: c.psqlCommand,
           pgDumpCommand: c.pgDumpCommand,
         },

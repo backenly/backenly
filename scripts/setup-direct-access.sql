@@ -23,6 +23,8 @@
 --                                     (hardened: connection limit, timeouts,
 --                                     search_path pinned to the one schema).
 --   3. backenly_direct_set_password — rotate.
+--   3b. backenly_direct_set_connection_limit — how many connections a login
+--                                     may hold at once: its project's plan's.
 --   4. backenly_direct_drop_role    — take the role's privileges, terminate
 --                                     sessions, strip policies, reassign owned
 --                                     objects, drop; or, when another database
@@ -159,10 +161,10 @@ BEGIN
     EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', p_role, p_password);
   ELSE
     -- Low per-role connection caps are a shared-cluster self-own guard: the app,
-    -- every tenant's runtime, AND these direct roles all draw from one Postgres
-    -- (max_connections=100). A burst of direct connections must never starve the
-    -- app's own pool. ro 3 / rw 2 is ample for psql/BI/migrations at this scale;
-    -- raise per-role once the cluster is per-tenant isolated.
+    -- every tenant's runtime, AND these direct roles all draw from one Postgres.
+    -- A burst of direct connections must never starve the app's own pool. ro 3 /
+    -- rw 2 is what a login starts with; the application then sets its project's
+    -- plan's number (section 3b).
     EXECUTE format(
       'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS CONNECTION LIMIT %s',
       p_role, p_password, CASE WHEN p_mode = 'READ_ONLY' THEN 3 ELSE 2 END
@@ -220,6 +222,42 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_set_password(text, text) FROM PUBLIC;
+-- ── 3b. How many connections a login may hold at once ────────────────────────
+--
+-- By the project's plan (lib/entitlements/direct-postgres.ts): the application
+-- sets it when it creates a login and again whenever it reads the login's
+-- credentials, so a plan change applies at the next read. PostgreSQL enforces
+-- CONNECTION LIMIT for every role that is not a superuser, and none of these
+-- is. Bounded here as well as in the application: 1 to 100, never unlimited
+-- (-1), whatever the caller passes. The definer created the login, so it holds
+-- ADMIN on it, which is what ALTER ROLE ... CONNECTION LIMIT needs from a role
+-- that is not a superuser (PostgreSQL 16, ALTER ROLE). Sessions already open
+-- are not ended: a lower limit refuses new connections until enough close.
+-- Returns false, changing nothing, when the login does not exist.
+CREATE OR REPLACE FUNCTION public.backenly_direct_set_connection_limit(
+  p_role  text,
+  p_limit integer
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+AS $fn$
+BEGIN
+  IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'backenly_direct_set_connection_limit: invalid role name %', p_role;
+  END IF;
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
+    RAISE EXCEPTION 'backenly_direct_set_connection_limit: limit % is outside 1 to 100', p_limit;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+    RETURN false;
+  END IF;
+  IF (SELECT rolconnlimit FROM pg_roles WHERE rolname = p_role) IS DISTINCT FROM p_limit THEN
+    EXECUTE format('ALTER ROLE %I CONNECTION LIMIT %s', p_role, p_limit);
+  END IF;
+  RETURN true;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_set_connection_limit(text, integer) FROM PUBLIC;
 -- ── 4. Drop a role cleanly ────────────────────────────────────────────────────
 --
 -- The definer needs the PRIVILEGES of the role it drops, not only ADMIN over
@@ -1693,6 +1731,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_create_role(text, text, text, text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_connection_limit(text, integer) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_retire_role(text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
