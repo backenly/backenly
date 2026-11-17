@@ -154,6 +154,23 @@ describe('deleteAccount', () => {
     expect(b.store.get('auth-token')).toBe('jwt-1')
     expect(b.replace).not.toHaveBeenCalled()
   })
+
+  it('sends the email the person typed, and says how to sign in again when the server asks', async () => {
+    const reauth = { email: 'a@b.c', password: true, provider: null }
+    const b = browser({
+      token: 'jwt-1',
+      reply: async () => ({
+        ok: false,
+        status: 403,
+        json: async () => ({ error: 'Deleting your account needs a sign-in from the last 10 minutes.', code: 'REAUTH_REQUIRED', reauth }),
+      }),
+    })
+    const refused = await deleteAccount('a@b.c').catch((e) => e)
+    expect(JSON.parse(String(b.requests[0].init?.body))).toEqual({ confirm: 'a@b.c' })
+    expect(refused).toMatchObject({ code: 'REAUTH_REQUIRED', reauth })
+    expect(b.store.get('auth-token')).toBe('jwt-1')
+    expect(b.replace).not.toHaveBeenCalled()
+  })
 })
 
 describe('sign-out stays in one place', () => {

@@ -66,6 +66,7 @@ describe('instrumentation.ts', () => {
     'evaluateUsageAlerts',
     'closePreviousPeriod',
     'pruneAppliedBatches',
+    'purgeDeletedProjects',
   ]
 
   // A region's own projects, seen through the fleet scheduler or skipUnreachable,

@@ -132,8 +132,11 @@ export function isReservedTestEmail(email: string | null | undefined): boolean {
  *   - `{ email }` → targeted: delete exactly one account's rows. Race-free, so
  *     a verifier can call it in its own `finally` without clobbering a
  *     concurrently-running verifier's in-flight synthetic user.
- *   - no email → sweep: delete every reserved-internal account in the project
- *     (used by the one-time backfill).
+ *   - no email → sweep: delete Backenly's own check accounts in the project,
+ *     matched by their exact addresses (lib/services/check-accounts.ts), never
+ *     every `.internal` address: people have those. With `olderThanMinutes`,
+ *     only accounts created longer ago than that, so a check still in
+ *     progress keeps its own (lib/services/check-account-cleanup.ts).
  *
  * `_token_blacklist` is keyed by `jti`, not email, so it is only reachable in
  * sweep mode: expired entries are always dropped (the token is already dead),
@@ -145,17 +148,19 @@ export function isReservedTestEmail(email: string | null | undefined): boolean {
  */
 export async function purgeSyntheticAuthArtifacts(
   projectId: string,
-  opts?: { email?: string },
+  opts?: { email?: string; olderThanMinutes?: number },
 ): Promise<{ table: string; deleted: number }[]> {
   const schemaName = `workspace_${projectId}`
   const { executeWithUserContext } = await import('./workspace-rls')
+  const { CHECK_ACCOUNT_SQL } = await import('./check-accounts')
   const results: { table: string; deleted: number }[] = []
 
   // Case-insensitive exact match for targeted mode (ILIKE would treat the `_`
-  // in `__http_bv_…` as a wildcard); the reserved-internal pattern for sweeps.
+  // in `__http_bv_…` as a wildcard); Backenly's exact check-account addresses
+  // for sweeps.
   const match = opts?.email
     ? { where: 'LOWER(email) = LOWER($1)', params: [opts.email] as unknown[] }
-    : { where: SYNTHETIC_USER_SQL, params: [] as unknown[] }
+    : { where: CHECK_ACCOUNT_SQL, params: [] as unknown[] }
 
   // Which optional auth side-tables actually exist here. Without this
   // pre-check, every absent table still issued a DELETE that Prisma logged as
@@ -206,7 +211,20 @@ export async function purgeSyntheticAuthArtifacts(
     }
   }
 
-  await purge('users', match.where, match.params)
+  // A sweep limited by age reads it from the users table's created-at column.
+  // A table without one is left alone: its accounts' age cannot be told.
+  let usersMatch: { where: string; params: unknown[] } | null = match
+  if (!opts?.email && opts?.olderThanMinutes !== undefined) {
+    const created = (await introspectAuthUsersTable(projectId).catch(() => null))?.createdAtColumn ?? null
+    const ageParam = match.params.length + 1
+    usersMatch = created
+      ? {
+          where: `${match.where} AND "${created}" < now() - make_interval(mins => $${ageParam}::int)`,
+          params: [...match.params, Math.max(0, Math.floor(opts.olderThanMinutes))],
+        }
+      : null
+  }
+  if (usersMatch) await purge('users', usersMatch.where, usersMatch.params)
   await purge('_email_verifications', match.where, match.params)
   await purge('_magic_links', match.where, match.params)
   await purge('_password_resets', match.where, match.params)

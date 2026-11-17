@@ -10,6 +10,7 @@
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
+import { postgresWords } from '@/lib/db/existing-rows'
 import { ruleChecksFor, uniqueByName } from '@/lib/db/name-rules'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withoutTables } from '@/lib/orchestration/graph-tables'
@@ -33,6 +34,25 @@ import { chat } from '@/lib/ai/llm/chat'
 async function projectDb(projectId: string) {
   const { workspaceRawClient } = await import('@/lib/data-plane/regional')
   return workspaceRawClient(projectId)
+}
+
+/** A foreign key added to, or validated over, a populated table reads all of it. */
+const CONSTRAINT_SCAN_TIMEOUT_MS = 10 * 60_000
+
+/** The columns, lower-cased, that some index on the table leads with. */
+async function leadingIndexColumns(
+  db: { $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T> },
+  schema: string,
+  table: string,
+): Promise<string[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ col: string }>>(
+    `SELECT lower(a.attname) AS col
+       FROM pg_index i
+       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+      WHERE i.indrelid = to_regclass($1)`,
+    `"${schema}"."${table}"`,
+  ).catch(() => [] as Array<{ col: string }>)
+  return rows.map((r) => r.col)
 }
 
 export interface AIAction {
@@ -4504,6 +4524,13 @@ async function executeCreateTable(
     // ── Auto-create indexes for FK columns and common filter columns (#93) ────
     // Every FK column (_id suffix), status, type, email, slug, created_at gets
     // an index automatically. This prevents full-table scans at scale.
+    //
+    // Only for a table Backenly designs. A table declared in SQL gets the
+    // indexes its SQL declares and no others: production QA (2026-11-16) found
+    // a 7-column table with 7 guessed btree indexes, one beside its own unique
+    // index on the same column. A foreign key it declares is indexed after the
+    // migration by the relationships_are_indexed guarantee, which then sees a
+    // composite index the same migration declared.
     const INDEX_EXACT_NAMES = new Set([
       // Timestamps (always)
       'createdat', 'updatedat', 'deleted_at', 'deletedat',
@@ -4531,8 +4558,8 @@ async function executeCreateTable(
     ])
 
     // Build list of column names to index
-    const colsToIndex: string[] = ['createdAt', 'updatedAt', 'deleted_at']
-    for (const col of safeColumns) {
+    const colsToIndex: string[] = asWritten ? [] : ['createdAt', 'updatedAt', 'deleted_at']
+    for (const col of asWritten ? [] : safeColumns) {
       if (!col?.name) continue
       const rawLower = col.name.toLowerCase()
       const normalizedLower = rawLower.replace(/_/g, '')
@@ -4549,8 +4576,10 @@ async function executeCreateTable(
       }
     }
 
-    // Deduplicate and create indexes
-    const seenIndexCols = new Set<string>()
+    // Deduplicate and create indexes. A column an index already leads with (the
+    // UNIQUE its email rule made) gets no second one: products.slug and
+    // admins.user_id were each indexed twice.
+    const seenIndexCols = new Set<string>(colsToIndex.length ? await leadingIndexColumns(db, postgresSchema, tableName) : [])
     for (const col of colsToIndex) {
       if (seenIndexCols.has(col.toLowerCase())) continue
       seenIndexCols.add(col.toLowerCase())
@@ -4606,7 +4635,7 @@ async function executeCreateTable(
 
     console.log(`✅ [AI Executor] Table metadata saved`)
 
-    // ── Realtime: follow the project, never opt it in ─────────────────────────
+    // ── Realtime: a new table streams only when it is named ───────────────────
     //
     // This used to install a NOTIFY trigger on EVERY table it created,
     // unconditionally. The intent was "so .subscribe() works immediately"; the
@@ -4619,25 +4648,23 @@ async function executeCreateTable(
     // was scoped correctly the whole time; table creation was the one adding
     // them.
     //
-    // The rule now: a NEW table inherits whatever the project already decided.
-    // If realtime is on, a new table joins it (otherwise new tables silently
-    // never stream, which is its own trap). If realtime was never enabled,
-    // nothing is installed and the write path stays clean.
+    // The next rule had a new table join realtime whenever any table streamed.
+    // A merge replays create_table on production, so a merged table started
+    // streaming that nobody had named: History said only "Created table", and
+    // turning realtime on for it afterwards changed nothing and was recorded
+    // nowhere (production QA, 2026-11-16). Realtime is per table, as
+    // enable_realtime says: a new table streams once realtime is turned on for
+    // it by name. So that a quiet new table is noticed, the result names the
+    // tables that stream and the call that adds this one.
+    let realtimeNote: string | null = null
     try {
-      const { installRealtimeTrigger, listTablesWithRealtimeTriggers } =
-        await import('@/lib/services/realtimeTriggers')
-      const alreadyStreaming = await listTablesWithRealtimeTriggers(projectId).catch(() => [])
-      if (alreadyStreaming.length > 0) {
-        await installRealtimeTrigger(projectId, tableName)
-        console.log(`⚡ [AI Executor] Realtime is on for this project — trigger installed on "${tableName}"`)
-      } else {
-        console.log(`[AI Executor] Realtime not enabled for this project — no trigger on "${tableName}" (enable_realtime turns it on)`)
-      }
+      const { realtimeForNewTables } = await import('@/lib/services/realtimeTriggers')
+      realtimeNote = (await realtimeForNewTables(projectId, [tableName]))?.note ?? null
     } catch (rtErr: any) {
-      console.warn(`[AI Executor] Realtime trigger install failed (non-fatal):`, rtErr?.message)
+      console.warn(`[AI Executor] Could not read which tables stream (non-fatal):`, rtErr?.message)
     }
 
-    // ── Webhook row-capture follows the project, like realtime above ─────────
+    // ── Webhook row-capture follows the project ───────────────────────────────
     // syncWebhookCapture's contract says it runs "after a table is added", but
     // nothing on the creation path ever called it, so a webhook saved on
     // Monday never saw rows written to a table created on Tuesday — while the
@@ -4990,9 +5017,11 @@ async function executeCreateTable(
       message:
         (asWritten
           ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
-            `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
+            `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (set by the SDK's ` +
+            `delete(); a DELETE on /db or /api/v2 removes the row).`
           : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`) +
-        (rlsNotice ? `\n\n${rlsNotice}` : ''),
+        (rlsNotice ? `\n\n${rlsNotice}` : '') +
+        (realtimeNote ? `\n\n${realtimeNote}` : ''),
       ...(rlsNotice ? { rlsNotice } : {}),
       data: {
         tableName,
@@ -6067,8 +6096,10 @@ async function addColumns(
         }
         throw err
       }
-      // A foreign key is indexed, as addColumnToTable and create_table do.
-      if (referencesSql) {
+      // A foreign key is indexed, as addColumnToTable and create_table do. One
+      // declared in SQL is indexed after the migration by relationships_are_indexed,
+      // which sees any index the migration itself made for it.
+      if (referencesSql && params.asWritten !== true && !(await leadingIndexColumns(db, postgresSchema, tableName)).includes(name.toLowerCase())) {
         const indexName = `idx_${tableName}_${name.toLowerCase()}`.slice(0, 63)
         await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
       }
@@ -6430,9 +6461,11 @@ async function addColumnToTable(
     // Found by the `relationships_are_indexed` probe: adding `widget_id` via
     // this path made it fire immediately. That probe had never produced a
     // finding before, so this inconsistency had never been visible.
+    // Not for a column declared in SQL, which gets what it declares (see the
+    // index pass in executeCreateTable), nor beside an index that leads with it.
     const lower = column.name.toLowerCase()
     const isFkColumn = (lower.endsWith('_id') || /[a-z]id$/.test(lower)) && lower !== 'id'
-    if (isFkColumn) {
+    if (isFkColumn && !asWritten && !(await leadingIndexColumns(db, postgresSchema, tableName)).includes(lower)) {
       const indexName = `idx_${tableName}_${lower.replace(/[^a-z0-9]/g, '_')}`.slice(0, 63)
       try {
         await db.$executeRawUnsafe(
@@ -7734,7 +7767,7 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
             data: { enabled: false, table: tableName, reason: result.reason },
           }
         }
-        installedTables.push(tableName)
+        if (!result.alreadyStreaming) installedTables.push(tableName)
       } catch (err: any) {
         console.warn(`[enableRealtime] Failed to install trigger on ${tableName}:`, err?.message)
         return {
@@ -7775,6 +7808,16 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
 
     // ── Verify which tables actually have NOTIFY triggers ──────────────────
     const verifiedTables = await listTablesWithRealtimeTriggers(projectId).catch(() => installedTables)
+
+    // Already streaming: its trigger was left as it was, so nothing changed and
+    // History records nothing. Saying "Enabled by this call" here was false.
+    if (tableName && installedTables.length === 0 && verifiedTables.includes(tableName)) {
+      return {
+        success: true,
+        message: `Realtime is already on for \`${tableName}\`; this call changed nothing.`,
+        data: { enabled: true, table: tableName, enabledNow: [], alreadyEnabled: verifiedTables, watchedTables: verifiedTables },
+      }
+    }
 
     // ── Optionally persist to BackendGraph if one exists ──────────────────
     try {
@@ -8619,16 +8662,23 @@ async function executeGetMetrics(params: any, projectId: string): Promise<Execut
     const range = windowMinutes <= 60 ? '1h' : windowMinutes <= 24 * 60 ? '24h' : windowMinutes <= 7 * 24 * 60 ? '7d' : '30d'
     const endpoints = await getPerformanceBreakdown(range, 'api', projectId).catch(() => [])
 
+    // An error is a 5xx (lib/services/metrics.ts). A 4xx is the backend
+    // refusing or not finding what a client asked for, often a stranger's wrong
+    // key, and is said as its own number.
     const top = endpoints
       .slice(0, 10)
-      .map((e) => `📈 **${e.id}** — ${e.requests} req · avg ${Math.round(e.avgResponseTime)}ms · p95 ${Math.round(e.p95)}ms · ${e.errorRate.toFixed(1)}% errors`)
+      .map((e) =>
+        `📈 **${e.id}** — ${e.requests} req · avg ${Math.round(e.avgResponseTime)}ms · p95 ${Math.round(e.p95)}ms · ${e.errorRate.toFixed(1)}% 5xx` +
+        (e.clientErrorRate > 0 ? ` · ${e.clientErrorRate.toFixed(1)}% 4xx` : ''),
+      )
       .join('\n')
 
     return {
       success: true,
       message:
         `📊 **API Metrics (last ${windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`}):**\n\n` +
-        `${stats.count} requests · error rate ${stats.errorRatePct.toFixed(1)}% (${stats.serverErrorCount} × 5xx)\n` +
+        `${stats.count} requests · error rate ${stats.errorRatePct.toFixed(1)}% (${stats.serverErrorCount} × 5xx) · ` +
+        `${stats.clientErrorCount} × 4xx (refused keys, bad requests, rows not found; not counted as errors)\n` +
         `latency p50 ${Math.round(stats.p50)}ms · p95 ${Math.round(stats.p95)}ms · p99 ${Math.round(stats.p99)}ms` +
         (top ? `\n\n**Top endpoints (${range}):**\n${top}` : ''),
       data: { windowMinutes, stats, endpoints },
@@ -8747,6 +8797,20 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
       const measured = a.measuredAt ? `, measured ${a.measuredAt}` : ''
       return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}${measured}); projected ${fmt(a.projected, a.unit)}${grace}`
     })
+    // AI credits with every part the gate counts, so "of 200" never stands for
+    // an allowance that also has bonus or bought credits in it.
+    const credits = usage.aiCredits
+    if (credits) {
+      const parts = [
+        `${credits.plan.toLocaleString('en-US')} plan`,
+        credits.bonus > 0 ? `${credits.bonus.toLocaleString('en-US')} bonus` : null,
+        credits.purchased > 0 ? `${credits.purchased.toLocaleString('en-US')} bought` : null,
+      ].filter(Boolean)
+      lines.push(
+        `- AI credits: ${credits.used.toLocaleString('en-US')} used of ${credits.cap.toLocaleString('en-US')} this month ` +
+          `(${parts.join(' + ')}); ${credits.left.toLocaleString('en-US')} left`,
+      )
+    }
     const overage =
       usage.overage.mode === null
         ? 'Usage past a quota is never charged on this deployment.'
@@ -8756,7 +8820,7 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     return {
       success: true,
       message: [
-        `Usage for ${usage.period} on the ${planDisplayName(usage.planName)} plan, across every project of this account:`,
+        `Usage for ${usage.period} on the ${planDisplayName(usage.planCode)} plan, across every project of this account:`,
         ...lines,
         overage,
         'Projections assume the last seven days continue. Only the account owner can raise the spend limit.',
@@ -9505,8 +9569,14 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
       }
     }
 
-    await db.$executeRawUnsafe(
-      `ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`,
+    // With every row in view: validating a foreign key checks the existing rows
+    // with one query under the tables' row-level security, so as nobody the
+    // referenced table read as empty (lib/data-plane/as-owner.ts).
+    const { asWorkspaceOwner } = await import('@/lib/data-plane/as-owner')
+    await asWorkspaceOwner(
+      db,
+      (tx) => tx.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`),
+      { timeoutMs: CONSTRAINT_SCAN_TIMEOUT_MS },
     )
 
     return {
@@ -9519,14 +9589,20 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
   } catch (err: any) {
     // The error IS the finding. PostgreSQL names the violating row, and
     // flattening that into a generic failure would throw away the one piece of
-    // information the owner needs.
+    // information the owner needs. Its own words, not Prisma's wrapper.
+    const { postgresWords, refusedByExistingRows } = await import('@/lib/db/existing-rows')
+    const reason = postgresWords(err)
+    if (!refusedByExistingRows(err)) {
+      return { success: false, message: `"${constraintName}" could not be validated on "${tableName}": ${reason}`, error: reason }
+    }
     return {
       success: false,
       message:
         `"${constraintName}" could not be validated on "${tableName}" because the existing data ` +
-        `does not satisfy it: ${err.message}. The constraint is still in place for new rows; the ` +
+        `does not satisfy it: ${reason}. The constraint is still in place for new rows; the ` +
         `rows already there need fixing before it can be validated.`,
-      error: err.message,
+      error: reason,
+      code: 'EXISTING_ROWS_VIOLATE',
     }
   }
 }
@@ -9675,9 +9751,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
 
     // ── A UNIQUE index must not count soft-deleted rows ──────────────────────
     //
-    // Every Backenly table is provisioned with `deleted_at`, and a client DELETE
-    // sets it rather than removing the row (bkn_pgrst_soft_delete). A plain
-    // UNIQUE index therefore keeps enforcing uniqueness against rows the
+    // Every Backenly table is provisioned with `deleted_at`, and the SDK's
+    // delete() sets it rather than removing the row (POST /database/delete; a
+    // DELETE on /db or /api/v2 removes it). /db reads then skip the row, and so
+    // do /api/v2 reads by anon and signed-in users (bkn_pgrst_soft_delete). A
+    // plain UNIQUE index therefore keeps enforcing uniqueness against rows the
     // application can no longer see:
     //
     //   user deletes their profile  → row survives with deleted_at set
@@ -9693,9 +9771,17 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // caller who supplies their own `where` has said what they want and is left
     // alone; a NON-unique index is unaffected because duplicates were never the
     // question.
+    //
+    // Not one declared in SQL (`asWritten`): the statement says what it wants,
+    // and PostgreSQL makes `CREATE UNIQUE INDEX … (ext_id)` over every row.
+    // Scoped, ON CONFLICT (ext_id) cannot use it, so an upsert on the key the
+    // migration declared was refused. The result says what soft delete means
+    // for it instead.
+    const asWritten = params.asWritten === true
     let softDeleteScoped = false
     let effectiveWhere = wherePredicate
-    if (unique && !wherePredicate && !everyRow && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
+    const softDelete = unique && !wherePredicate && !everyRow && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
+    if (softDelete && !asWritten) {
       effectiveWhere = '"deleted_at" IS NULL'
       softDeleteScoped = true
     }
@@ -9893,11 +9979,18 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           ? `\n\nIt covers every row, soft-deleted ones included, so an upsert (ON CONFLICT, or on_conflict ` +
             `on the REST API) can target it.`
           : '') +
+        (softDelete && asWritten
+          ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and ` +
+            `keeps the row, so its value stays taken. An upsert (ON CONFLICT, or on_conflict on the REST API) can ` +
+            `target it. For uniqueness among live rows only, declare it WHERE deleted_at IS NULL: on_conflict ` +
+            `cannot target that one, and an ON CONFLICT in SQL has to repeat its WHERE.`
+          : '') +
         (softDeleteScoped
-          ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: a client ` +
-            `DELETE sets \`deleted_at\` instead of removing the row. An unscoped UNIQUE index would keep ` +
-            `enforcing uniqueness against rows the app can no longer see — so a user who deleted their ` +
-            `record and created a new one would hit a unique violation against an invisible row. ` +
+          ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: the SDK's ` +
+            `delete() sets \`deleted_at\` and keeps the row (a DELETE on /db or /api/v2 removes it). An unscoped ` +
+            `UNIQUE index would keep enforcing uniqueness against kept rows the app can no longer see — so a ` +
+            `user who deleted their record and created a new one would hit a unique violation against an ` +
+            `invisible row. ` +
             `An upsert cannot target a scoped index. If you want uniqueness across deleted rows too, or an ` +
             `upsert on these columns, pass \`where: "true"\`.`
           : ''),
@@ -9926,8 +10019,8 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           `Cannot create a unique index on ${tableName} (${columns.join(', ')}) — the table already ` +
           `contains duplicate rows for that combination. Find them with run_query: ` +
           `SELECT ${columns.join(', ')}, count(*) FROM ${tableName} GROUP BY ${columns.join(', ')} HAVING count(*) > 1. ` +
-          `Original error: ${error.message}`,
-        error: error.message,
+          `PostgreSQL: ${postgresWords(error)}`,
+        error: postgresWords(error),
         code: 'DUPLICATE_ROWS',
       }
     }
@@ -10357,9 +10450,24 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts).
         const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
         await ensureReferencedAuthUsersTable(projectId, fk.table, schema)
-        await db.$executeRawUnsafe(sql)
+        // With every row in view: PostgreSQL checks a key added to existing rows
+        // with one query under the tables' row-level security, so as nobody the
+        // referenced table read as empty (lib/data-plane/as-owner.ts).
+        const { asWorkspaceOwner } = await import('@/lib/data-plane/as-owner')
+        await asWorkspaceOwner(db, (tx) => tx.$executeRawUnsafe(sql), { timeoutMs: CONSTRAINT_SCAN_TIMEOUT_MS })
       } catch (err: any) {
-        const reason = err?.meta?.message ?? err?.message ?? String(err)
+        const { postgresWords, refusedByExistingRows } = await import('@/lib/db/existing-rows')
+        const reason = postgresWords(err)
+        if (refusedByExistingRows(err)) {
+          return {
+            success: false,
+            message:
+              `Some rows in ${tableName} have a ${columnName} that matches no row in ${describeTarget(fk)}, so the ` +
+              `foreign key was not added and nothing changed. Correct or remove those rows first (PostgreSQL: ${reason}).`,
+            error: reason,
+            code: 'EXISTING_ROWS_VIOLATE',
+          }
+        }
         return {
           success: false,
           message: `The foreign key ${tableName}.${columnName} → ${describeTarget(fk)} was not added: ${reason}`,
@@ -10380,7 +10488,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     const r = await repairForeignKeyColumn(projectId, tableName, columnName, target)
     return r.success
       ? { success: true, message: `✅ ${r.message}`, data: { tableName, columnName, referencedTable: r.referencedTable } }
-      : { success: false, message: r.message, error: r.message, code: 'FK_FAILED' }
+      : { success: false, message: r.message, error: r.message, code: r.code ?? 'FK_FAILED' }
   }
 
   if (!tableName || (!constraintDefinition && !ct)) {
@@ -10563,8 +10671,8 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     } else if (ct === 'unique') {
       // ── Soft delete makes a UNIQUE *constraint* the wrong instrument ────────
       //
-      // Every Backenly table carries `deleted_at`, and a client DELETE sets it
-      // rather than removing the row. A UNIQUE CONSTRAINT cannot be partial —
+      // Every Backenly table carries `deleted_at`, and the SDK's delete() sets
+      // it rather than removing the row. A UNIQUE CONSTRAINT cannot be partial —
       // PostgreSQL has no `ADD CONSTRAINT … UNIQUE … WHERE` — so it would keep
       // enforcing uniqueness against soft-deleted rows the application can no
       // longer see. The user deletes a record, creates a replacement, and gets a
@@ -10713,12 +10821,14 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       // got rather than trusting that it matches what it sent.
       message:
         `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}` +
-        // A UNIQUE over every row counts the rows a client DELETE only marks
+        // A UNIQUE over every row counts the rows the SDK's delete() only marks
         // deleted, which is what the author asked for and worth saying once.
         (ct === 'unique' && params.asWritten === true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
-          ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and keeps ` +
-            `the row, so its value stays taken. For uniqueness among live rows only, create a unique index ` +
-            `WHERE deleted_at IS NULL instead (ON CONFLICT then has to name that WHERE).`
+          ? `\n\nIt covers every row, soft-deleted ones too: the SDK's delete() on ${tableName} sets "deleted_at" ` +
+            `and keeps the row, so its value stays taken (a DELETE on /db or /api/v2 removes the row and frees ` +
+            `it). An upsert (ON CONFLICT, or on_conflict on the REST API) can target it. For uniqueness among live ` +
+            `rows only, create a unique index WHERE deleted_at IS NULL instead: on_conflict cannot target that one, ` +
+            `and an ON CONFLICT in SQL has to repeat its WHERE.`
           : ''),
       data: { tableName, constraintName: cName, constraintDefinition: after[0].def, columns },
     }
@@ -10743,8 +10853,8 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         message:
           `Cannot add this constraint to ${tableName} — existing rows already violate it, so PostgreSQL ` +
           `rejected it and nothing was applied. Find the offending rows with run_query, fix or delete them, ` +
-          `then retry. Original error: ${error.message}`,
-        error: error.message,
+          `then send it again. PostgreSQL: ${postgresWords(error)}`,
+        error: postgresWords(error),
         code: 'EXISTING_ROWS_VIOLATE',
       }
     }
@@ -12150,14 +12260,13 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
           if (!fixedCode || fixedCode === code) return
           const recheckSyntax = validateFunctionSyntax(fixedCode)
           // Backenly rewrote the code, so the history says Backenly did.
-          await withChangeAttribution({ source: 'autonomy' }, () => governedChange(projectId, `Fix the syntax of function ${fn.name}`, () => prisma.aiFunction.update({
-            where: { id: fn.id },
-            data: {
-              generatedCode: fixedCode,
-              status: recheckSyntax.valid ? 'active' : 'error',
-              lastError: recheckSyntax.valid ? null : `Syntax error: ${recheckSyntax.error}`,
-            },
-          })))
+          // Never back on if someone switched it off meanwhile (lib/services/ai-functions/run-state.ts).
+          const { recordRunState } = await import('@/lib/services/ai-functions/run-state')
+          await withChangeAttribution({ source: 'autonomy' }, () => governedChange(projectId, `Fix the syntax of function ${fn.name}`, () => recordRunState(
+            fn.id,
+            { generatedCode: fixedCode, lastError: recheckSyntax.valid ? null : `Syntax error: ${recheckSyntax.error}` },
+            recheckSyntax.valid ? 'active' : 'error',
+          )))
         })
         .catch(() => {/* non-fatal */ })
     }
@@ -12279,14 +12388,14 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
     const syntaxCheck = validateFunctionSyntax(fixedCode)
 
     const { governedChange } = await import('@/lib/changes/ledger')
-    await governedChange(projectId, `Rewrite function ${fn.name} to fix an error`, () => prisma.aiFunction.update({
-      where: { id: fn.id },
-      data: {
-        generatedCode: fixedCode,
-        status: syntaxCheck.valid ? 'active' : 'error',
-        lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}`,
-      },
-    }))
+    // A function switched off stays off: the rewrite is its code, not the switch
+    // (lib/services/ai-functions/run-state.ts).
+    const { recordRunState } = await import('@/lib/services/ai-functions/run-state')
+    await governedChange(projectId, `Rewrite function ${fn.name} to fix an error`, () => recordRunState(
+      fn.id,
+      { generatedCode: fixedCode, lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}` },
+      syntaxCheck.valid ? 'active' : 'error',
+    ))
     // The runtime error the fix answered is no longer the last one, in the
     // project's region either (a syntax error names the code, not the data).
     if (fn.lastError !== null) {
@@ -12324,6 +12433,7 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
 async function executeListAiFunctions(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
+    const { runsPerRow } = await import('@/lib/services/ai-functions/row-runs')
     // ── The SOURCE and the LAST ERROR are part of the answer ───────────────────
     //
     // This used to select metadata only. Combined with `{"error":"internal_error"}`
@@ -12397,7 +12507,7 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
       return (
         `• **${fn.name}** (${fn.status}) — ${fn.description.slice(0, 80)}${fn.description.length > 80 ? '…' : ''}\n` +
         `  ${c.method} ${fn.url}\n` +
-        `  Trigger: \`${fn.triggerType}${fn.triggerTable ? ':' + fn.triggerTable : ''}\` · Runs: ${fn.runCount}` +
+        `  Trigger: \`${fn.triggerType}${fn.triggerTable ? ':' + fn.triggerTable : ''}\`${runsPerRow(fn.triggerType) ? ' (once per row: a bulk write runs it for every row)' : ''} · Runs: ${fn.runCount}` +
         contractLine +
         (fn.lastError ? `\n  ⚠ Last error: ${fn.lastError.slice(0, 160)}` : '')
       )
@@ -12556,6 +12666,11 @@ async function findAiFunctionForAction(
   return found.fn
 }
 
+/** "18,512 queued runs from row changes were dropped and will not run." */
+function droppedRunsSentence(n: number): string {
+  return `${n.toLocaleString('en-US')} queued ${n === 1 ? 'run' : 'runs'} from row changes ${n === 1 ? 'was' : 'were'} dropped and will not run.`
+}
+
 async function executeToggleAiFunction(params: any, projectId: string): Promise<ExecutionResult> {
   const { functionId, name, active } = params
 
@@ -12579,6 +12694,18 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
     // history: GOVERNED_ACTIONS (TOGGLE_AI_FUNCTION)
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
 
+    // Switched off, it stops at once: the runs queued for it from row changes
+    // are dropped, after the switch, so the drain queues no more of them.
+    const { discardQueuedRuns } = await import('@/lib/services/ai-functions/run-queue')
+    // Should that fail, they still never run: the executor refuses a function
+    // that is off, and the runner drops each one it reaches.
+    const dropped = active
+      ? 0
+      : await discardQueuedRuns(projectId, fn.id).catch((err: any) => {
+          console.warn(`[functions] queued runs of ${fn.id} were not dropped:`, err?.message ?? err)
+          return 0
+        })
+
     // A row-event function going on or off changes what the database-level
     // capture must record; the sync derives the answer from the rows.
     const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
@@ -12586,8 +12713,10 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 
     return {
       success: true,
-      message: `✅ Function \`${fn.name}\` is now **${newStatus}**.`,
-      data: { functionId: fn.id, name: fn.name, status: newStatus },
+      message:
+        `✅ Function \`${fn.name}\` is now **${newStatus}**.` +
+        (dropped > 0 ? ` ${droppedRunsSentence(dropped)}` : ''),
+      data: { functionId: fn.id, name: fn.name, status: newStatus, ...(active ? {} : { droppedQueuedRuns: dropped }) },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to switch the function: ${error.message}`, error: error.message }
@@ -13828,11 +13957,23 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
         fixes.push(rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr)))
       }
 
-      // Reinstall realtime trigger
+      // Realtime as the table had it. Installing the trigger on every table this
+      // re-created turned realtime on for tables nobody had named; a table
+      // streams again only if it streamed when it was last recorded.
       try {
-        const { installRealtimeTrigger } = await import('@/lib/services/realtimeTriggers')
-        await installRealtimeTrigger(projectId, tableName)
-        fixes.push(`Reinstalled realtime NOTIFY trigger on \`${tableName}\``)
+        const { streamedWhenLastRecorded } = await import('@/lib/services/workspace-schema-snapshot')
+        const streamed = await streamedWhenLastRecorded(projectId, tableName)
+        if (streamed === true) {
+          const { installRealtimeTrigger } = await import('@/lib/services/realtimeTriggers')
+          if ((await installRealtimeTrigger(projectId, tableName)).installed) {
+            fixes.push(`Reinstalled the realtime trigger on \`${tableName}\`: it streamed when last recorded.`)
+          }
+        } else if (streamed === null) {
+          fixes.push(
+            `Realtime was not turned on for \`${tableName}\`: no record shows whether it streamed. ` +
+            `To stream it: realtime { "action": "enable", "tableName": "${tableName}" }.`,
+          )
+        }
       } catch { /* non-fatal */ }
     } else {
       // ── 2. Identify missing columns and add them ──────────────────────────
@@ -14553,11 +14694,14 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
       rlsApplied = !!pol
     } catch { /* non-fatal */ }
 
-    // 5. Make it a first-class realtime table. Non-fatal.
+    // 5. Realtime is not turned on: a table streams once it is named
+    //    (realtimeForNewTables). Registering used to install the trigger, so
+    //    adopting a table started streaming every write to it.
+    let realtimeNote: string | null = null
     try {
-      const { installRealtimeTrigger } = await import('@/lib/services/realtimeTriggers')
-      await installRealtimeTrigger(projectId, tableName)
-    } catch { /* non-fatal */ }
+      const { realtimeForNewTables } = await import('@/lib/services/realtimeTriggers')
+      realtimeNote = (await realtimeForNewTables(projectId, [tableName]))?.note ?? null
+    } catch { /* the note is advice; the table is registered either way */ }
 
     return {
       success: apiRes.success,
@@ -14567,6 +14711,7 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
         apiRes.success ? '- REST API generated (list / get / create / update / delete)' : '- API generation needs a retry — the table is now registered',
         rlsApplied ? '- Row-level security applied (users see only their own rows)' : null,
         '- Now visible and managed in the Database section',
+        realtimeNote ? `- ${realtimeNote}` : null,
       ].filter(Boolean).join('\n'),
       data: { tableName, apiGenerated: apiRes.success, rlsApplied },
     }
@@ -14581,7 +14726,7 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
 //
 // The open-loop counterpart of REGISTER_TABLE: instead of adopting one named
 // table, it adopts EVERYTHING the drift watch recorded — registers new live
-// tables (API + RLS + realtime via executeRegisterTable), refreshes metadata
+// tables (API + RLS via executeRegisterTable), refreshes metadata
 // for altered ones, prunes metadata for externally dropped ones, re-baselines
 // the schema snapshot, and re-syncs direct-access grants. Bookkeeping only;
 // this action never executes DDL, which is why the classifier rates it AUTO.
@@ -14607,7 +14752,7 @@ async function executeAdoptExternalSchema(projectId: string): Promise<ExecutionR
     const lines = [
       `✅ **Adopted ${result.adoptedEvents} external schema change${result.adoptedEvents === 1 ? '' : 's'} into the contract.**`,
       '',
-      result.registeredTables.length > 0 ? `- Registered new table${result.registeredTables.length === 1 ? '' : 's'}: ${result.registeredTables.map(t => `\`${t}\``).join(', ')} (API + RLS + realtime)` : null,
+      result.registeredTables.length > 0 ? `- Registered new table${result.registeredTables.length === 1 ? '' : 's'}: ${result.registeredTables.map(t => `\`${t}\``).join(', ')} (API + RLS)` : null,
       result.refreshedTables.length > 0 ? `- Refreshed metadata for: ${result.refreshedTables.map(t => `\`${t}\``).join(', ')}` : null,
       result.prunedTables.length > 0 ? `- Removed metadata for dropped table${result.prunedTables.length === 1 ? '' : 's'}: ${result.prunedTables.map(t => `\`${t}\``).join(', ')}` : null,
       '- Snapshot baseline and direct-access grants re-synced',

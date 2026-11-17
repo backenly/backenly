@@ -280,6 +280,12 @@ export type FindingType =
   // code that ships it, which Backenly does not own.
   | 'service_role_key_exposed'
 
+  // ── A table anyone holding the publishable key can read in full, which has a
+  // column named like a credential or personal data (session_id, password,
+  // ssn…): Supabase's database linter, lint 0023. Never auto-fixable: who may
+  // read a table is the owner's decision (lib/core/drift-detector.ts).
+  | 'sensitive_columns_exposed'
+
   // ── The schema is wired correctly but MODELLED wrongly: a foreign key the
   // data says is mandatory left optional, an email column already unique with
   // nothing enforcing it, an enum in a free-text column, money in a float.
@@ -406,6 +412,8 @@ export const ALL_FINDING_TYPES = [
   'function_failing',
   // Added 2026-11-10 in the same commit that introduced it.
   'function_integration_missing',
+  // Added 2026-11-17 in the same commit that introduced it.
+  'sensitive_columns_exposed',
 ] as const satisfies ReadonlyArray<FindingType>
 
 /** The finding type that carries an architecture-change approval request. */

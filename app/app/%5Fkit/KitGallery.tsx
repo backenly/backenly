@@ -30,6 +30,7 @@ import { CANVAS, EDGE, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/componen
 import { ChipStrip, GridFooter, InstrumentBar, PaneToolbar, count, type Chip } from '@/components/console/InstrumentBar'
 import { RecordDrawer, recordNav, useRecordParam } from '@/components/console/RecordDrawer'
 import { AskYourAgent, EmptyPanel, ErrorRow, RefusedLine } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { CodeWell, DayGroup, DayGroupList, EventList, EventRow, EventRowSkeleton } from '@/components/console/EventRow'
 import { ActorMark, ActorWords, Outcome } from '@/components/console/ActorMark'
 import { SecretOnceDialog } from '@/components/console/SecretOnceDialog'
@@ -47,6 +48,7 @@ const SECTIONS = [
   ['pane-toolbar', 'Pane toolbar'],
   ['record-drawer', 'Record drawer'],
   ['empty-panel', 'Empty panel'],
+  ['first-run', 'First run'],
   ['error-row', 'Error row'],
   ['events', 'Event rows'],
   ['actors', 'Actor marks'],
@@ -89,6 +91,7 @@ export function KitGallery() {
             <PaneToolbarSection now={now} />
             <DrawerSection now={now} />
             <EmptyPanelSection />
+            <FirstRunSection />
             <ErrorRowSection now={now} />
             <EventsSection now={now} />
             <ActorsSection now={now} />
@@ -642,6 +645,98 @@ function DrawerSection({ now }: { now: number }) {
   )
 }
 
+// ─── First run ───────────────────────────────────────────────────────────────
+
+function FirstRunSection() {
+  return (
+    <Section
+      id="first-run"
+      title="First run"
+      description={
+        <>
+          <Path>FirstRun</Path> in components/console/FirstRun.tsx. The first page of Database, Auth &amp; Users, Storage, Functions and Realtime before the agent builds there: the page&apos;s outline, what it holds, the request, then Connect agent until an agent connects. The outline builds in once and holds still.
+        </>
+      }
+    >
+      <Stack>
+        <Demo caption="Database, agent not connected, an owner: Connect agent beside the docs.">
+          <Frame>
+            <FirstRun
+              headingLevel={3}
+              picture="tables"
+              title="No tables yet"
+              sentence="Your agent creates the tables your app needs, each with REST endpoints and row-level security."
+              requests={['Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write.']}
+              projectId="p_movie"
+              agent={{ status: 'disconnected' }}
+              docs={{ label: 'Database docs', slug: 'database' }}
+            />
+          </Frame>
+        </Demo>
+        <Demo caption="Functions, Claude Code connected: the request is addressed to it, and Connect agent is gone.">
+          <Frame>
+            <FirstRun
+              headingLevel={3}
+              picture="functions"
+              title="No functions yet"
+              sentence="Endpoints, scheduled jobs and code that runs when data changes. Your agent writes them, and they go live without a deploy."
+              requests={['When a user signs up, send them a welcome email.']}
+              projectId="p_movie"
+              agent={{ status: 'connected', client: 'Claude Code' }}
+              docs={{ label: 'Functions docs', slug: 'functions' }}
+            />
+          </Frame>
+        </Demo>
+        <Demo caption="Auth & Users, a developer who cannot connect an agent: told who can.">
+          <Frame>
+            <FirstRun
+              headingLevel={3}
+              picture="users"
+              title="No users yet"
+              sentence="People who sign up through your app appear here, with how they signed in and when they were last active."
+              requests={['Add email and password sign-up and sign-in to the app, with password reset.']}
+              projectId="p_movie"
+              agent={{ status: 'disconnected' }}
+              canConnect={false}
+              docs={{ label: 'Auth docs', slug: 'auth' }}
+            />
+          </Frame>
+        </Demo>
+        <div className="grid gap-[16px] lg:grid-cols-2">
+          <Demo caption="Storage.">
+            <Frame>
+              <FirstRun
+                headingLevel={3}
+                picture="files"
+                title="No buckets yet"
+                sentence="Buckets hold your app’s files, each with its own read rule. Ask your agent for uploads and it creates the bucket."
+                requests={['Add profile photo uploads: a private bucket, and only the owner can read their files.']}
+                projectId="p_movie"
+                agent={{ status: 'disconnected' }}
+                docs={{ label: 'Storage docs', slug: 'storage' }}
+              />
+            </Frame>
+          </Demo>
+          <Demo caption="Realtime.">
+            <Frame>
+              <FirstRun
+                headingLevel={3}
+                picture="events"
+                title="No table streams yet"
+                sentence="Realtime is turned on per table, and changes to those tables appear here live."
+                requests={['Turn on realtime for the tables my app shows live.']}
+                projectId="p_movie"
+                agent={{ status: 'disconnected' }}
+                docs={{ label: 'Realtime docs', slug: 'realtime' }}
+              />
+            </Frame>
+          </Demo>
+        </div>
+      </Stack>
+    </Section>
+  )
+}
+
 // ─── Empty panel ─────────────────────────────────────────────────────────────
 
 function EmptyPanelSection() {
@@ -651,7 +746,7 @@ function EmptyPanelSection() {
       title="Empty panel"
       description={
         <>
-          <Path>EmptyPanel</Path>, <Path>AskYourAgent</Path> in components/console/states.tsx. Top left of the real panel; the second sentence comes from the agent&apos;s connection and the person&apos;s role. No icon, tile, ghost or button.
+          <Path>EmptyPanel</Path>, <Path>AskYourAgent</Path> in components/console/states.tsx. Top left of the real panel; the second sentence comes from the agent&apos;s connection and the person&apos;s role. No icon, tile, ghost or button. The five sections the agent builds into use First run instead, below.
         </>
       }
     >

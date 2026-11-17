@@ -69,6 +69,22 @@ describe('revertEligibility — pure verdicts', () => {
     expect(e.requiresConfirmation).toBe(false)
   })
 
+  // The index a slow-query or hot-table fix builds is recorded as a governed
+  // change that History restores, though neither type takes a schema snapshot.
+  // Its card said it could not be undone (production QA, 2026-11-16).
+  test.each(['slow_query_missing_index', 'infra_hot_table_orders'])(
+    'a format-3 %s fix whose change was recorded is revertible, with no snapshot',
+    (type) => {
+      const e = revertEligibility(type, {
+        tableName: 'orders',
+        columnName: 'status',
+        rollbackData: { rollbackFormat: 3, schemaTouching: false, preMetadata: null, changeIds: ['c1'], statements: [{ sql: 'CREATE INDEX CONCURRENTLY …' }] },
+      })
+      expect(e.revertible).toBe(true)
+      expect(e.requiresConfirmation).toBe(false)
+    },
+  )
+
   test('a format-3 fix that ran statements but recorded no change is not revertible', () => {
     const e = revertEligibility('missing_fk_index', {
       tableName: 'orders',

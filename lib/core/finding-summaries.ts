@@ -125,8 +125,16 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         : 'An orphaned table has no API or relations'
 
     // ── Auth ──────────────────────────────────────────────────────────────
-    case 'auth_spike':
+    case 'auth_spike': {
+      // Counted as failed password sign-ins since 2026-11-17; older rows
+      // counted every auth error and carry only errorCount.
+      const failed = Number(d.failedSignIns)
+      const ok = Number(d.successfulSignIns)
+      if (failed > 0 && Number.isFinite(ok)) {
+        return `${failed} of ${failed + ok} password sign-ins failed in ${Number(d.windowMinutes) || 10} minutes`
+      }
       return `Unusual auth error rate${d.errorCount ? ` — ${d.errorCount} failures` : ''}`
+    }
     case 'auth_jwt_missing':
       return 'The project JWT secret is missing'
     case 'auth_users_table_missing':
@@ -317,6 +325,16 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
       default:
         return `${table}.${column} is modelled in a way the data contradicts`
     }
+  }
+
+  if (type === 'sensitive_columns_exposed') {
+    const cols = Array.isArray(details?.columnNames)
+      ? (details!.columnNames as unknown[]).filter((c): c is string => typeof c === 'string')
+      : []
+    const t = (details?.tableName as string | undefined) ?? 'a table'
+    return cols.length
+      ? `Anyone with the publishable key can read ${cols.join(', ')} in \`${t}\``
+      : `Anyone with the publishable key can read sensitive columns in \`${t}\``
   }
 
   if (type === 'service_role_key_exposed') {

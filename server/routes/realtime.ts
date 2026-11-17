@@ -28,7 +28,7 @@ import { createVisibleEventQueue, type RealtimeChange, type RealtimeSubscriber }
 import { mintSseTicket, SSE_TICKET_TTL_SECONDS } from '@/lib/realtime/sse-ticket'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { prisma } from '@/lib/db/prisma'
-import { getProjectServingState, PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
+import { getProjectServingState, PAUSED_CODE, pausedMessage } from '@/lib/projects/serving-state'
 import { asyncRoute } from '../lib/async-route'
 import { LOCKED_MESSAGE } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -151,7 +151,7 @@ router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (r
             send({
               type: 'error',
               code: state.kind === 'paused' ? PAUSED_CODE : 'PROJECT_LOCKED',
-              message: state.kind === 'paused' ? PAUSED_MESSAGE : LOCKED_MESSAGE,
+              message: state.kind === 'paused' ? pausedMessage(state.reason) : LOCKED_MESSAGE,
             })
             cleanup()
             return

@@ -29,6 +29,13 @@
  * continuing would produce precisely the silent partial deletion this module
  * exists to end.
  *
+ * One exception: a schema PostgREST serves stops being served inside the
+ * transaction and is dropped at least two minutes later, from a row the
+ * transaction writes (lib/postgrest/retire-schema.ts). Dropped at once, a cache
+ * rebuild still reading it failed and answered 503 to every request. The
+ * project's logins cannot log in from the deletion on, and are dropped with it
+ * (lib/projects/logins.ts).
+ *
  * ── A PROJECT IN ANOTHER REGION ─────────────────────────────────────────────
  *
  * Its schemas and its logins live in its region's database cluster, which no
@@ -62,16 +69,22 @@ import {
   assertValidProjectId,
   isProjectOwnedSchema,
   projectSchemaPrefix,
-  quoteIdent,
   workspaceSchemaName,
 } from '@/lib/security/workspace-schema'
-import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 import { CHANNEL_TABLE_EXISTS_SQL, DELETE_CHANNELS_SQL } from '@/lib/realtime/channel-sql'
-import { directAccessRoleNames } from '@/lib/services/direct-access'
 import { purgeProjectExternals } from '@/lib/projects/purge'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
 import { purgeAccountState } from '@/lib/usage/account'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
+import { dropOrRetireSchemas, scheduleSchemaDrop } from '@/lib/postgrest/retire-schema'
+import {
+  dropLogins,
+  loginsRetirable,
+  projectLoginNames,
+  recordRetiredLogins,
+  retireLogins,
+  type RetiredLogins,
+} from '@/lib/projects/logins'
 
 export { PURGE_JOB_TYPE, PURGE_STATUS }
 
@@ -113,18 +126,32 @@ export interface DeletionResult {
   projectIds: string[]
   /** Schemas dropped, in the order they were dropped. */
   schemasDropped: string[]
+  /**
+   * Schemas PostgREST served: no longer served from the deletion on, and
+   * dropped at least two minutes later by their region's pass, with the
+   * project's logins (lib/postgrest/retire-schema.ts).
+   */
+  schemasRetired: string[]
   /** BackgroundJob ids written inside the transaction, one per project. */
   purgeJobIds: string[]
   /** False when the post-commit purge attempt failed and was left to the worker. */
   externalPurgeCompleted: boolean
   /**
    * Logins kept as NOLOGIN with no password instead of dropped, because
-   * something outside the project's database still names them (see dropRoles).
+   * something outside the project's database still names them (see dropLogins).
    * They cannot authenticate. Each is audited as DATABASE_LOGIN_RETIRED with the
    * deletion and logged as [LoginRetired], and stays until an operator removes
    * what names it and drops it.
    */
   retiredLogins: string[]
+  /**
+   * The logins of a project whose schemas are dropped later (schemasRetired):
+   * unable to log in from the deletion on (NOLOGIN, no password, sessions
+   * ended), and dropped by the same pass as the schemas. One that something
+   * outside the database still names is retired then instead, and audited as
+   * DATABASE_LOGIN_RETIRED by the pass.
+   */
+  loginsDroppedLater: string[]
   /**
    * Whether the project's region has the deletion yet, for a single project
    * kept outside the home region (lib/auth-projection/confirm.ts). Unset for an
@@ -236,145 +263,11 @@ async function sweepOrphanedProjectRows(tx: Tx, projectId: string): Promise<void
   }
 }
 
-/**
- * Drop the project's own PostgreSQL LOGIN roles.
- *
- * run_query provisions bkn_ro_<hex> for any project an agent queries, the
- * owner may have enabled bkn_rw_<hex>, and the function runtime derives
- * bkn_fn_<hex> per schema. None of these died with the project: the roles are
- * cluster-level, pg_hba admits their group remotely, and the encrypted
- * passwords sat in DatabaseCredential rows the cascade could not reach — so a
- * contractor's psql kept logging in to the production cluster after the
- * project was "permanently" deleted.
- */
-async function dropProjectDatabaseRoles(tx: Tx, projectId: string, schemas: string[]): Promise<string[]> {
-  return dropRoles(tx, projectRoleNames(projectId, await credentialRoleNames(tx, projectId), schemas))
-}
-
 /** The login roles the project's credentials name, read from the platform database. */
 async function credentialRoleNames(db: Pick<Tx, 'databaseCredential'>, projectId: string): Promise<string[]> {
   return (await db.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } })).map(
     (r) => r.roleName,
   )
-}
-
-/**
- * Every login the project may own: its credentials' roles, the names derived
- * from the project (direct access, and the function login of its own schema),
- * and one function login per schema still found. The derived names reach a
- * login nothing else leads to any more: one retired when its credential was
- * revoked (revokeDirectAccess), or a function login a region retired in a
- * deletion whose platform step then failed, which dropped the schema its name
- * was derived from. dropRoles skips any that does not exist.
- */
-function projectRoleNames(projectId: string, credentialRoles: string[], schemas: string[]): string[] {
-  const { ro, rw } = directAccessRoleNames(projectId)
-  const fnRoles = [workspaceSchemaName(projectId), ...schemas].map((schema) => functionRoleName(schema))
-  return [...new Set([...credentialRoles, ro, rw, ...fnRoles])].filter((name) => /^bkn_(ro|rw|fn)_[0-9a-f]{12}$/.test(name))
-}
-
-/**
- * Drop these login roles in the cluster `tx` is connected to.
- *
- * Through the definer helpers where the installer created them:
- * public.backenly_direct_drop_role for bkn_ro_/bkn_rw_ (terminates sessions,
- * strips policies, reassigns, drops) and public.backenly_fn_role_drop for
- * bkn_fn_. Otherwise a guarded manual drop, which only a login that may drop
- * the role can run: the app role on a managed database is NOCREATEROLE and
- * holds none of these roles' privileges, so there it fails with 42501.
- * Existence is CHECKED rather than caught: an error inside the transaction
- * would abort the whole deletion.
- *
- * A login that anything outside this database still names is retired, not
- * dropped: DROP OWNED reaches only this database, so DROP ROLE would fail with
- * 2BP01 and abort the deletion, and what lies outside is not this module's to
- * change. Retired is NOLOGIN with no password, so the login authenticates by no
- * means. The helpers do the same; see public.backenly_direct_drop_role. It
- * stays retired: nothing drops it later on its own. An operator removes what
- * names it elsewhere and then calls the helper, using the record that
- * recordRetiredLogins keeps of each one.
- *
- * Returns the logins retired rather than dropped.
- */
-async function dropRoles(tx: Tx, candidates: string[]): Promise<string[]> {
-  if (candidates.length === 0) return []
-
-  const [helpers] = await tx.$queryRaw<{ direct: boolean; fn: boolean }[]>`
-    SELECT to_regprocedure('public.backenly_direct_drop_role(text)') IS NOT NULL AS direct,
-           to_regprocedure('public.backenly_fn_role_drop(text)') IS NOT NULL AS fn`
-
-  const retired: string[] = []
-  for (const role of candidates) {
-    const exists = await tx.$queryRaw<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${role}`
-    if (Number(exists[0]?.n ?? 0) === 0) continue
-
-    // Each helper validates its argument against its own role shape, and
-    // answers false for a login it retired.
-    if (helpers?.direct && /^bkn_(ro|rw)_/.test(role)) {
-      const [{ gone }] = await tx.$queryRaw<{ gone: boolean }[]>`SELECT public.backenly_direct_drop_role(${role}) AS gone`
-      if (!gone) retired.push(role)
-    } else if (helpers?.fn && /^bkn_fn_/.test(role)) {
-      const [{ gone }] = await tx.$queryRaw<{ gone: boolean }[]>`SELECT public.backenly_fn_role_drop(${role}) AS gone`
-      if (!gone) retired.push(role)
-    } else {
-      // The schemas are already dropped in this transaction, so the role's
-      // grants on them are gone; DROP OWNED clears anything else it holds here.
-      await tx.$executeRawUnsafe(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${role}'`,
-      )
-      await tx.$executeRawUnsafe(`DROP OWNED BY ${quoteIdent(role)}`)
-      if (await namedOutsideThisDatabase(tx, role)) {
-        await tx.$executeRawUnsafe(`ALTER ROLE ${quoteIdent(role)} NOLOGIN PASSWORD NULL`)
-        retired.push(role)
-      } else {
-        await tx.$executeRawUnsafe(`DROP ROLE IF EXISTS ${quoteIdent(role)}`)
-      }
-    }
-  }
-  return retired
-}
-
-/**
- * Whether anything outside the current database still names the role: another
- * database's objects, or a server-level one (dbid 0), such as a database-level
- * privilege DROP OWNED could not revoke.
- */
-async function namedOutsideThisDatabase(tx: Tx, role: string): Promise<boolean> {
-  const [row] = await tx.$queryRaw<{ outside: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM pg_shdepend s JOIN pg_roles r ON r.oid = s.refobjid
-       WHERE s.refclassid = 'pg_authid'::regclass AND r.rolname = ${role}
-         AND s.dbid <> (SELECT oid FROM pg_database WHERE datname = current_database())
-    ) AS outside`
-  return Boolean(row?.outside)
-}
-
-/** Logins a deletion retired, with the project and the region whose cluster holds them. */
-interface RetiredLogins {
-  projectId: string
-  region: CloudRegionId
-  logins: string[]
-}
-
-/**
- * Record each retirement inside the deletion's own transaction, as the purge outbox is recorded, so a retired login
- * is never left without a record: it commits with the deletion or not at all. A retirement means something outside
- * the project's database, typically a copy of its data, still names the login, and nothing drops it later on its
- * own, so the row is what an operator works from. projectId is unset so the project's cascade does not take it.
- */
-async function recordRetiredLogins(tx: Tx, groups: RetiredLogins[], via: string): Promise<void> {
-  for (const { projectId, region, logins } of groups) {
-    if (logins.length === 0) continue
-    await tx.auditLog.create({
-      data: {
-        action: 'DATABASE_LOGIN_RETIRED',
-        type: 'security',
-        details: JSON.stringify({ projectId, region, logins, via }),
-        timestamp: new Date(),
-      },
-    })
-  }
 }
 
 /**
@@ -401,7 +294,7 @@ async function settleRetiredLogins(groups: RetiredLogins[], via: string): Promis
         async (tx) => {
           await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`)
-          return dropRoles(tx as Tx, logins)
+          return dropLogins(tx as Tx, logins)
         },
         { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
       )
@@ -420,6 +313,64 @@ async function settleRetiredLogins(groups: RetiredLogins[], via: string): Promis
 }
 
 /**
+ * After the deletion has committed: end any session that a login of a project
+ * whose schemas are dropped later opened before its retirement committed. Each
+ * login is NOLOGIN now, so ending its sessions once more leaves none; the pass
+ * that drops the schemas drops the logins. Bounded like settleRetiredLogins.
+ *
+ * Never throws: the deletion is committed, and the logins cannot log in.
+ */
+async function endRetiredSessions(groups: RetiredLogins[]): Promise<void> {
+  for (const { projectId, region, logins } of groups) {
+    if (logins.length === 0) continue
+    try {
+      const db = region === HOME_REGION ? prisma : regionRawClient(region, projectId)
+      await db.$transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`)
+          await retireLogins(tx as Tx, logins)
+        },
+        { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+      )
+    } catch (err: any) {
+      console.warn(`[LoginRetired] project=${projectId} ending sessions after the commit failed reason=${err?.name || 'Error'}`)
+    }
+  }
+}
+
+/**
+ * The shared step for one project's schemas and logins, in the database `tx` is
+ * connected to: the platform's for a project in the home region, its region's
+ * otherwise.
+ *
+ * A schema PostgREST does not serve is dropped now, and the logins after it, so
+ * they hold no grants that would block the drop. A served schema stops being
+ * served now and is dropped at least two minutes later by its region's pass
+ * (lib/postgrest/retire-schema.ts). Its project's logins cannot go before it
+ * (lib/projects/logins.ts), so they are retired now, unable to log in, and the
+ * pass drops them with it. Where this database cannot retire them (an install
+ * from before the retire helpers), the schemas are dropped now instead, as they
+ * were before PostgREST was given time, so the logins can go with them.
+ */
+async function dropProjectSchemasAndLogins(
+  tx: Tx,
+  projectId: string,
+  credentialRoles: string[],
+): Promise<{ dropped: string[]; retiredSchemas: string[]; retiredLogins: string[]; pendingLogins: string[] }> {
+  const schemas = await resolveProjectSchemas(tx, projectId)
+  const logins = projectLoginNames(projectId, credentialRoles, schemas)
+  // Validated against the project's own namespace, then quoted. The identifier
+  // cannot come from a request body: it came from pg_namespace.
+  const { dropped, retired } = await dropOrRetireSchemas(tx, schemas, { retire: await loginsRetirable(tx, logins) })
+  await dropRealtimeChannels(tx, projectId, schemas)
+  if (retired.length > 0) {
+    return { dropped, retiredSchemas: retired, retiredLogins: [], pendingLogins: await retireLogins(tx, logins) }
+  }
+  return { dropped, retiredSchemas: [], retiredLogins: await dropLogins(tx, logins), pendingLogins: [] }
+}
+
+/**
  * A project outside the home region keeps its schemas, and its logins, in its
  * region's database cluster, which the platform transaction cannot reach: the
  * drops there find nothing, so the project's data and its direct-access logins
@@ -427,20 +378,22 @@ async function settleRetiredLogins(groups: RetiredLogins[], via: string): Promis
  * transaction of their own on that region's database.
  *
  * Before the platform transaction, not after. If the platform step then fails,
- * the project's row survives with nothing left in its region, and the user's
- * retry finishes the deletion: this step is idempotent and finds nothing to
- * drop the second time. The other order could commit the deletion and leave the
- * regional data with no row pointing at it, the failure this module ends.
+ * the project's row survives with nothing left in its region that can be read
+ * or logged in to, and the user's retry finishes the deletion: this step is
+ * idempotent, and a schema it stopped serving is dropped by the retry. The
+ * other order could commit the deletion and leave the regional data with no
+ * row pointing at it, the failure this module ends.
  *
- * Returns the schemas dropped and the logins retired. Home-region projects
- * return none: their schemas and roles are dropped inside the platform
- * transaction, as before.
+ * Returns what dropProjectSchemasAndLogins did there; the schemas and logins it
+ * left for the pass are recorded by the platform transaction. Home-region
+ * projects return none: their schemas and roles are handled inside the
+ * platform transaction.
  */
 async function dropRegionalProjectData(
   projectId: string,
   region: CloudRegionId,
-): Promise<{ schemas: string[]; retiredLogins: string[] }> {
-  if (region === HOME_REGION) return { schemas: [], retiredLogins: [] }
+): Promise<{ dropped: string[]; retiredSchemas: string[]; retiredLogins: string[]; pendingLogins: string[] }> {
+  if (region === HOME_REGION) return { dropped: [], retiredSchemas: [], retiredLogins: [], pendingLogins: [] }
 
   // The credentials are platform rows: read them here, drop their roles there.
   const credentialRoles = await credentialRoleNames(prisma, projectId)
@@ -448,20 +401,14 @@ async function dropRegionalProjectData(
     async (rtx) => {
       await rtx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
       await rtx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`)
-      const schemas = await resolveProjectSchemas(rtx, projectId)
-      for (const schema of schemas) {
-        await rtx.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
-      }
+      const step = await dropProjectSchemasAndLogins(rtx, projectId, credentialRoles)
       // The project's customer data kept off its platform rows
       // (lib/data-plane/regional-bodies.ts) goes with it, not 30 days later.
       // A database the procedure has not given the table yet holds none.
       const [{ present }] = await rtx.$queryRaw<{ present: boolean }[]>`
         SELECT to_regclass('public.regional_bodies') IS NOT NULL AS present`
       if (present) await rtx.$executeRaw`DELETE FROM public.regional_bodies WHERE "projectId" = ${projectId}`
-      await dropRealtimeChannels(rtx, projectId, schemas)
-      // After the schemas, so the roles hold no grants that would block the drop.
-      const retiredLogins = await dropRoles(rtx, projectRoleNames(projectId, credentialRoles, schemas))
-      return { schemas, retiredLogins }
+      return step
     },
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
   )
@@ -491,18 +438,19 @@ async function purgeProjectInTransaction(
   tx: Tx,
   projectId: string,
   region: CloudRegionId,
-): Promise<{ schemas: string[]; jobId: string; retiredLogins: string[] }> {
-  const schemas = await resolveProjectSchemas(tx, projectId)
-
-  for (const schema of schemas) {
-    // Validated against the project's own namespace above, then quoted. The
-    // identifier cannot come from a request body: it came from pg_namespace.
-    await tx.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
-  }
-  await dropRealtimeChannels(tx, projectId, schemas)
-
-  // After the schemas, so the roles hold no grants that would block the drop.
-  const retiredLogins = await dropProjectDatabaseRoles(tx, projectId, schemas)
+  via: string,
+): Promise<{ schemas: string[]; retiredSchemas: string[]; jobId: string; retiredLogins: string[]; pendingLogins: string[] }> {
+  const step = await dropProjectSchemasAndLogins(tx, projectId, await credentialRoleNames(tx, projectId))
+  // What PostgREST still served, and the logins that go with it, are dropped
+  // at least two minutes later, from this row, written beside the purge job
+  // below (lib/postgrest/retire-schema.ts).
+  await scheduleSchemaDrop(tx, {
+    projectId,
+    region: HOME_REGION,
+    schemas: step.retiredSchemas,
+    logins: step.pendingLogins,
+    via,
+  })
 
   // Written inside the transaction: this is the outbox record, and it must
   // commit with the drops or not at all. Payload carries the project id and
@@ -533,7 +481,13 @@ async function purgeProjectInTransaction(
     select: { id: true },
   })
 
-  return { schemas, jobId: job.id, retiredLogins }
+  return {
+    schemas: step.dropped,
+    retiredSchemas: step.retiredSchemas,
+    jobId: job.id,
+    retiredLogins: step.retiredLogins,
+    pendingLogins: step.pendingLogins,
+  }
 }
 
 /**
@@ -621,13 +575,29 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
   const region = await projectRegion(projectId)
   const regional = await dropRegionalProjectData(projectId, region)
 
-  const { schemas, jobId, retiredLogins: platformRetired } = await prisma.$transaction(
+  const {
+    schemas,
+    retiredSchemas,
+    jobId,
+    retiredLogins: platformRetired,
+    pendingLogins: platformPending,
+  } = await prisma.$transaction(
     async (tx) => {
       await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`)
 
-      const result = await purgeProjectInTransaction(tx, projectId, region)
-      result.schemas.unshift(...regional.schemas)
+      const result = await purgeProjectInTransaction(tx, projectId, region, 'project deletion')
+      result.schemas.unshift(...regional.dropped)
+      result.retiredSchemas.unshift(...regional.retiredSchemas)
+      // What the region stopped serving, and the logins to drop there with it,
+      // commit with the deletion.
+      await scheduleSchemaDrop(tx, {
+        projectId,
+        region,
+        schemas: regional.retiredSchemas,
+        logins: regional.pendingLogins,
+        via: 'project deletion',
+      })
       await recordRetiredLogins(
         tx,
         [
@@ -660,6 +630,11 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
     ],
     'project deletion',
   )
+  const pending: RetiredLogins[] = [
+    { projectId, region, logins: regional.pendingLogins },
+    { projectId, region: HOME_REGION, logins: platformPending },
+  ]
+  await endRetiredSessions(pending)
 
   const externalPurgeCompleted = await attemptImmediatePurge([{ projectId, jobId, region }])
   // Its keys stop working in its region once the region has the deletion
@@ -669,9 +644,11 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
   return {
     projectIds: [projectId],
     schemasDropped: schemas,
+    schemasRetired: retiredSchemas,
     purgeJobIds: [jobId],
     externalPurgeCompleted,
     retiredLogins,
+    loginsDroppedLater: [...new Set(pending.flatMap((p) => p.logins))],
     propagation,
   }
 }
@@ -705,16 +682,22 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
   }
   const regions = new Map<string, CloudRegionId>()
   const regionalSchemas: string[] = []
+  const regionalRetiredSchemas: string[] = []
   const retiredGroups: RetiredLogins[] = []
+  const regionalPending: RetiredLogins[] = []
+  const regionalRetired: Array<{ projectId: string; region: CloudRegionId; schemas: string[]; logins: string[] }> = []
   for (const project of owned) {
     const region = regionOfRecord(project.id, project.region)
     regions.set(project.id, region)
     const regional = await dropRegionalProjectData(project.id, region)
-    regionalSchemas.push(...regional.schemas)
+    regionalSchemas.push(...regional.dropped)
+    regionalRetiredSchemas.push(...regional.retiredSchemas)
     retiredGroups.push({ projectId: project.id, region, logins: regional.retiredLogins })
+    regionalPending.push({ projectId: project.id, region, logins: regional.pendingLogins })
+    regionalRetired.push({ projectId: project.id, region, schemas: regional.retiredSchemas, logins: regional.pendingLogins })
   }
 
-  const { projectIds, schemas, jobIds, platformRetired } = await prisma.$transaction(
+  const { projectIds, schemas, retiredSchemas, jobIds, platformRetired, platformPending } = await prisma.$transaction(
     async (tx) => {
       await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`)
@@ -731,8 +714,10 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
       }
 
       const allSchemas: string[] = [...regionalSchemas]
+      const allRetiredSchemas: string[] = [...regionalRetiredSchemas]
       const allJobIds: string[] = []
       const homeRetired: RetiredLogins[] = []
+      const homePending: RetiredLogins[] = []
 
       for (const project of projects) {
         const region = regions.get(project.id) ?? regionOfRecord(project.id, project.region)
@@ -741,12 +726,15 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
         if (!regions.has(project.id) && region !== HOME_REGION) {
           throw new ProjectCreatedDuringDeletionError(project.id)
         }
-        const result = await purgeProjectInTransaction(tx, project.id, region)
+        const result = await purgeProjectInTransaction(tx, project.id, region, 'account deletion')
         allSchemas.push(...result.schemas)
+        allRetiredSchemas.push(...result.retiredSchemas)
         allJobIds.push(result.jobId)
         homeRetired.push({ projectId: project.id, region: HOME_REGION, logins: result.retiredLogins })
+        homePending.push({ projectId: project.id, region: HOME_REGION, logins: result.pendingLogins })
       }
       await recordRetiredLogins(tx, [...retiredGroups, ...homeRetired], 'account deletion')
+      for (const entry of regionalRetired) await scheduleSchemaDrop(tx, { ...entry, via: 'account deletion' })
 
       // The account's own AI usage and credit balances, which do not cascade.
       await purgeAccountState(tx, userId)
@@ -762,8 +750,10 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
       return {
         projectIds: projects.map((p) => p.id),
         schemas: allSchemas,
+        retiredSchemas: allRetiredSchemas,
         jobIds: allJobIds,
         platformRetired: homeRetired,
+        platformPending: homePending,
       }
     },
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
@@ -774,6 +764,8 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
   )
 
   const retiredLogins = await settleRetiredLogins([...retiredGroups, ...platformRetired], 'account deletion')
+  const pending = [...regionalPending, ...platformPending]
+  await endRetiredSessions(pending)
 
   const externalPurgeCompleted = await attemptImmediatePurge(
     projectIds.map((projectId, i) => ({ projectId, jobId: jobIds[i], region: regions.get(projectId) ?? HOME_REGION })),
@@ -782,8 +774,10 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
   return {
     projectIds,
     schemasDropped: schemas,
+    schemasRetired: retiredSchemas,
     purgeJobIds: jobIds,
     externalPurgeCompleted,
     retiredLogins,
+    loginsDroppedLater: [...new Set(pending.flatMap((p) => p.logins))],
   }
 }

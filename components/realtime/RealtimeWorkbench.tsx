@@ -31,7 +31,8 @@ import { AlertTriangle, Info, WifiOff } from 'lucide-react'
 import { KIT, KitButton, KitSelect, NoticeStrip, StatusGlyph } from '@/components/inspector/kit'
 import { InstrumentBar, PaneToolbar, count, type BarFact } from '@/components/console/InstrumentBar'
 import { RecordDrawer, recordNav, useRecordParam } from '@/components/console/RecordDrawer'
-import { EmptyPanel, ErrorRow } from '@/components/console/states'
+import { ErrorRow } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { DayGroup, EventRowSkeleton } from '@/components/console/EventRow'
 import { groupByDay } from '@/components/console/format'
 import { EmptyLine, Fact, Facts } from '@/components/autonomy/rows'
@@ -127,6 +128,8 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
 
   // ── The feed's body ───────────────────────────────────────────────────────
   const filterTable = tableOf(filter)
+  // Nothing streams yet: the page is the first-run state, with no column heads over it.
+  let firstRun = false
   let body: ReactNode
   if (visible.length > 0) {
     const days = groupByDay(visible, (e) => e.at)
@@ -164,12 +167,14 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   } else if (!statusKnown) {
     body = <EventRowSkeleton rows={6} glyph={false} />
   } else if (streaming.length === 0) {
+    firstRun = true
     body = (
-      <EmptyPanel
-        headingLevel={2}
+      <FirstRun
+        picture="events"
         title="No table streams yet"
         sentence="Realtime is turned on per table, and changes to those tables appear here live."
         requests={['Turn on realtime for the tables my app shows live.']}
+        projectId={projectId}
         agent={role.loading ? { status: 'loading' } : { status: agent.status, client: agent.client }}
         canConnect={role.canAdminister}
         docs={{ label: 'Realtime docs', slug: 'realtime' }}
@@ -310,7 +315,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
               )}
               <div
                 aria-hidden
-                className={`sticky top-0 z-[3] hidden h-[34px] items-center gap-x-[16px] border-b ${RULE} ${GRID_HEAD} px-[20px] text-[12px] font-medium text-faint md:flex`}
+                className={`sticky top-0 z-[3] hidden h-[34px] items-center gap-x-[16px] border-b ${RULE} ${GRID_HEAD} px-[20px] text-[12px] font-medium text-faint ${firstRun ? '' : 'md:flex'}`}
               >
                 <span className="w-[88px] flex-shrink-0">Time</span>
                 <span className="w-[72px] flex-shrink-0">Event</span>

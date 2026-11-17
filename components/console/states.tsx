@@ -18,6 +18,11 @@
  * No icon, tile, ghost picture, centred stack or button in an empty panel:
  * the section's create button stays in its bar, and connecting the agent
  * lives in the top bar and the sidebar (decision 1).
+ *
+ * The exception is the first page of the five sections the agent builds into
+ * (Database, Auth & Users, Storage, Functions, Realtime) before it has built
+ * anything there: those use FirstRun (FirstRun.tsx), the centred state with
+ * the page's outline and Connect agent (the founder's call, 2026-11-17).
  */
 
 import { useId, type ReactNode } from 'react'

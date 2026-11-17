@@ -19,8 +19,8 @@
  * statement that actually ran sat behind a click. Now each row shows what ran
  * (its first statement, in mono), whether a re-check confirmed it, and when;
  * "Why" holds the reason, every statement and Copy. The 30-day scoreboard sits
- * in the heading, and the old feed, system events included, folds into "Full
- * log" at the foot of the same panel.
+ * in the heading, and the old feed folds into "Full log" at the foot of the
+ * same panel.
  *
  * THE RULE THIS PANEL FOLLOWS
  * ---------------------------
@@ -328,17 +328,11 @@ function ChangeRow({
 
 /**
  * What Backenly did lately, every line of it: the feed that used to be a
- * second panel. The loop's own bookkeeping (a step with no sentence of its
- * own) folds behind "Show N system events".
+ * second panel. Every line is a sentence: the server leaves the loop's own
+ * bookkeeping out rather than sending it by name (lib/autonomy/activity-sentences.ts).
  */
 function FullLog({ activity }: { activity: ActivityEntry[] }) {
   const [open, setOpen] = useState(false)
-  const [showSystem, setShowSystem] = useState(false)
-  const isBookkeeping = (a: ActivityEntry) =>
-    (a.kind === 'other' || !a.kind) && a.summary.trim().toLowerCase() === a.action.replace(/[_-]+/g, ' ').trim().toLowerCase()
-  const said = activity.filter(a => !isBookkeeping(a))
-  const folded = activity.length - said.length
-  const shown = showSystem ? activity : said
   return (
     <div className="border-t border-white/[0.06]">
       <button
@@ -354,34 +348,21 @@ function FullLog({ activity }: { activity: ActivityEntry[] }) {
         </svg>
       </button>
       {open && (
-        <>
-          <ul aria-label="What Backenly did" className="divide-y divide-white/[0.06] border-t border-white/[0.06]">
-            {shown.map((a, i) => (
-              <li key={i} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-6 px-[20px] py-[10px]">
-                <span className="min-w-0 text-[13px] leading-[20px] text-zinc-300 [overflow-wrap:anywhere]">
-                  {a.summary}
-                  {/* An unresolved finding is re-escalated every tick; folded
-                      server-side, and the count keeps the fold honest. */}
-                  {(a.repeat ?? 1) > 1 && <span className="ml-1.5 tabular-nums text-faint">{a.repeat} times</span>}
-                </span>
-                <span className="pt-px text-[12.5px] text-faint">
-                  <Time iso={a.at} />
-                </span>
-              </li>
-            ))}
-            {shown.length === 0 && <li className="px-[20px] py-[10px] text-[13px] text-faint">Only system events so far.</li>}
-          </ul>
-          {folded > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowSystem(v => !v)}
-              aria-expanded={showSystem}
-              className={`block w-full border-t border-white/[0.06] px-[20px] py-[10px] text-left text-[12.5px] text-faint transition-colors hover:text-zinc-200 ${FOCUS_INSET}`}
-            >
-              {showSystem ? 'Hide system events' : `Show ${folded} system ${folded === 1 ? 'event' : 'events'}`}
-            </button>
-          )}
-        </>
+        <ul aria-label="What Backenly did" className="divide-y divide-white/[0.06] border-t border-white/[0.06]">
+          {activity.map((a, i) => (
+            <li key={i} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-6 px-[20px] py-[10px]">
+              <span className="min-w-0 text-[13px] leading-[20px] text-zinc-300 [overflow-wrap:anywhere]">
+                {a.summary}
+                {/* An unresolved finding is re-escalated every tick; folded
+                    server-side, and the count keeps the fold honest. */}
+                {(a.repeat ?? 1) > 1 && <span className="ml-1.5 tabular-nums text-faint">{a.repeat} times</span>}
+              </span>
+              <span className="pt-px text-[12.5px] text-faint">
+                <Time iso={a.at} />
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   )

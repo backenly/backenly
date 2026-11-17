@@ -232,7 +232,9 @@ __tests__/projects/live-status.test.ts
 # The project console's shared components (components/console): the exact
 # words a moment is said in (decision 13) and the undo sentence (decision 8),
 # pure functions; and, under jsdom, the record drawer's keys and focus
-# (decision 6) and the empty, error and confirm templates (decisions 8, 12).
+# (decision 6), the empty, error and confirm templates (decisions 8, 12), and
+# the first page of the five sections the agent builds into (2026-11-17).
+__tests__/console/first-run.test.tsx
 __tests__/console/format-time.test.ts
 __tests__/console/record-drawer.test.tsx
 __tests__/console/templates.test.tsx

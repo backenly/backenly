@@ -69,8 +69,9 @@ describe('runs: ?success= filters on the server', () => {
   it('asks only for failed runs with success=false, and only for successful ones with true', async () => {
     await getRuns(request('/api/projects/p1/ai-functions/logs?success=false&functionId=f1'), params)
     await getRuns(request('/api/projects/p1/ai-functions/logs?success=true'), params)
-    expect(whereOf(0)).toEqual({ projectId: 'p1', functionId: 'f1', success: false })
-    expect(whereOf(1)).toEqual({ projectId: 'p1', success: true })
+    // Records of runs that did not happen, and notices, are neither (record-kinds.ts).
+    expect(whereOf(0)).toEqual({ projectId: 'p1', functionId: 'f1', success: false, triggerType: { notIn: ['not_run', 'notice'] } })
+    expect(whereOf(1)).toEqual({ projectId: 'p1', success: true, triggerType: { notIn: ['not_run', 'notice'] } })
   })
 
   it('leaves the outcome unfiltered when the parameter is absent or anything else', async () => {

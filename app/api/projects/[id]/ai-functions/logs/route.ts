@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db'
 import { deleteFunctionRuns, withRunBodies } from '@/lib/services/ai-functions/run-records'
+import { NOT_A_RUN } from '@/lib/services/ai-functions/record-kinds'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -31,7 +32,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       where: {
         projectId,
         ...(functionId ? { functionId } : {}),
-        ...(success !== undefined ? { success } : {}),
+        // Failed or successful RUNS: a record of runs that did not happen, or a
+        // notice, is neither (record-kinds.ts). Unfiltered, every record shows.
+        ...(success !== undefined ? { success, triggerType: { notIn: [...NOT_A_RUN] } } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take: limit,

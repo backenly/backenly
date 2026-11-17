@@ -13,10 +13,24 @@
  * raw SCREAMING_SNAKE_CASE action like "HEALTH_FIX_EXECUTED" to a non-dev
  * (see commit 542b73f). Keeping the labeller here — one copy, not duplicated
  * per route — is what stops that regression from coming back.
+ *
+ * The rows the autonomy loop writes are said by the labeller the Autonomy page
+ * uses (lib/autonomy/activity-sentences.ts), and only those it has a sentence
+ * for are read: the loop's bookkeeping printed here as its own name
+ * ("Authority propose only"), or as a fix that never ran ("Applied a fix to
+ * your backend" for a proposal that fixed nothing).
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { explainAutonomyEvent } from '@/lib/autonomy/because-copy'
+import {
+  activitySentence,
+  CHANGE_PREFIX,
+  FEED_ACTIONS,
+  findingsNamedBy,
+  LOOP_LOG_TYPES,
+  ROLLBACK_PREFIX,
+  type RecordedFinding,
+} from '@/lib/autonomy/activity-sentences'
 import { ARCHITECTURE_LOG_TYPE, TRACE_ACTION } from '@/lib/evolution-engine/memory'
 
 export type ActivityKind =
@@ -74,8 +88,17 @@ export async function buildActivityFeed(
   // when one source dominates the other.
   const [audits, fixes] = await Promise.all([
     prisma.auditLog.findMany({
-      // Architecture-memory traces are the engine's notebook, not activity.
-      where: { projectId, timestamp: timeFilter, action: { not: TRACE_ACTION } },
+      // Architecture-memory traces are the engine's notebook, not activity, and
+      // of the loop's rows only those with a sentence are activity.
+      where: {
+        projectId,
+        timestamp: timeFilter,
+        action: { not: TRACE_ACTION },
+        OR: [
+          { type: { notIn: [...LOOP_LOG_TYPES] } },
+          { action: { in: [...FEED_ACTIONS] } },
+        ],
+      },
       orderBy: { timestamp: 'desc' },
       take: limit,
       select: { id: true, action: true, type: true, timestamp: true, details: true, metadata: true },
@@ -88,11 +111,16 @@ export async function buildActivityFeed(
     }),
   ])
 
-  const auditRows: ActivityRow[] = audits.map(a => ({
-    id: `audit_${a.id}`,
-    ...labelForAudit(a.action, a.type, parseJson(a.metadata), parseJson(a.details)),
-    ts: a.timestamp.toISOString(),
-  }))
+  // Rows written at approval keep only the finding's type; its card's words
+  // come from the finding itself while it is on record.
+  const findings = await findingsNamedBy(projectId, audits.map(a => parseJson(a.details)))
+  const auditRows: ActivityRow[] = audits.flatMap(a => {
+    const detail = parseJson(a.details)
+    const findingId = typeof detail?.findingId === 'string' ? detail.findingId : null
+    const labelled = labelForAudit(a.action, a.type, parseJson(a.metadata), detail, findingId ? findings.get(findingId) : null)
+    // A loop row with no sentence (a governed-change row with no summary).
+    return labelled ? [{ id: `audit_${a.id}`, ...labelled, ts: a.timestamp.toISOString() }] : []
+  })
 
   const fixRows: ActivityRow[] = fixes.map(f => ({
     id: `fix_${f.id}`,
@@ -131,17 +159,30 @@ function parseJson(value: unknown): Record<string, any> | null {
 /**
  * Turn one audit row into a sentence a non-developer can read at a glance.
  * Every branch must return plain English — the feed must never surface a raw
- * SCREAMING_SNAKE_CASE action like "HEALTH_FIX_EXECUTED" to the user.
+ * SCREAMING_SNAKE_CASE action like "HEALTH_FIX_EXECUTED" to the user. Null for
+ * a loop row that has no sentence: it is not shown.
  */
 function labelForAudit(
   action: string,
   type: string,
   meta: Record<string, any> | null,
   detail: Record<string, any> | null,
-): { kind: ActivityKind; label: string } {
+  finding: RecordedFinding | null | undefined,
+): { kind: ActivityKind; label: string } | null {
   const a = action.toLowerCase()
   const t = type.toLowerCase()
   const d = detail ?? {}
+
+  // The autonomy loop's rows, its approvals' and the change ledger's, in the
+  // words the Autonomy page uses.
+  if ((LOOP_LOG_TYPES as readonly string[]).includes(t) || action.startsWith(CHANGE_PREFIX) || action.startsWith(ROLLBACK_PREFIX)) {
+    const label = activitySentence(action, d, finding)
+    if (label === null) return null
+    if (action.startsWith(CHANGE_PREFIX) || action.startsWith(ROLLBACK_PREFIX)) return { kind: 'general', label }
+    const dial = action === 'AUTONOMY_LEVEL_CHANGED' || action === 'AUTONOMY_CIRCUIT_OPEN' ||
+      action === 'AUTONOMY_CHANGE_FREEZE' || action === 'AUTONOMY_REPAIR_HELD' || action === 'AUTONOMY_SHADOW_DECISION'
+    return { kind: dial ? 'autonomy' : 'auto_fix', label }
+  }
 
   // A backend moved in (lib/import/jobs.ts): its start and its end carry their own sentence.
   if (t === 'import') {
@@ -151,38 +192,6 @@ function labelForAudit(
   // An architecture change milestone carries the sentence written for it.
   if (t === ARCHITECTURE_LOG_TYPE) {
     return { kind: 'autonomy', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : 'Backenly recorded an architecture change' }
-  }
-
-  // ── Autonomous fix events FIRST ──────────────────────────────────────────
-  // These rows are written with type='autonomy' AND action='AGENT_AUTO_FIXED'
-  // / 'HEALTH_AUTO_FIXED' / 'FIX_PLAN_AUTO_EXECUTED'. The previous order
-  // checked type='autonomy' first and routed every fix row into "Autonomy
-  // level updated" — a pre-existing labelling bug. Fix-event actions get the
-  // "what because why" sentence; only LEVEL-CHANGE rows fall to the dial branch.
-  if (a.includes('auto_fixed') || a.includes('auto_executed')) {
-    // Only a recorded 'confirmed' outcome is a verified fix; anything else ran
-    // without confirmation and the feed says so rather than implying success.
-    const note = d.verification === 'confirmed' ? '' : ' (it ran, but could not be confirmed)'
-    return { kind: 'auto_fix', label: `${explainAutonomyEvent(d).full}${note}` }
-  }
-
-  // Autonomy dial — the owner changed how much Backenly may do on its own.
-  if (a === 'autonomy_level_changed' || (t.includes('autonomy') && (a.includes('level') || a === 'autonomy_change_freeze' || a === 'autonomy_circuit_open' || a === 'autonomy_shadow_decision' || a === 'autonomy_live_run' || a === 'autonomy_tick'))) {
-    if (a === 'autonomy_change_freeze')    return { kind: 'autonomy', label: 'Autonomous changes paused — Backenly is watching an active incident' }
-    if (a === 'autonomy_circuit_open')     return { kind: 'autonomy', label: 'Safety circuit tripped — autonomous changes paused for this window' }
-    if (a === 'autonomy_shadow_decision')  return { kind: 'autonomy', label: 'Backenly recorded what it would do (shadow mode)' }
-    if (a === 'autonomy_live_run')         return { kind: 'autonomy', label: 'Autonomy loop completed a tick' }
-    if (a === 'autonomy_tick')             return { kind: 'autonomy', label: 'Autonomy loop completed a tick' }
-    // Product mode labels (3-mode dial, 2026-07-18) — never the internal
-    // enum names. Legacy BALANCED events read as Autopilot.
-    const level = typeof d.level === 'string' ? d.level.toUpperCase() : null
-    const label =
-      level === 'OFF'            ? 'Autonomy turned off — Backenly will only suggest changes'
-      : level === 'CONSERVATIVE' ? 'Autonomy set to Review-only'
-      : level === 'BALANCED'     ? 'Autonomy set to Autopilot'
-      : level === 'AGGRESSIVE'   ? 'Autonomy set to Autopilot'
-      :                            'Autonomy level updated'
-    return { kind: 'autonomy', label }
   }
 
   // ── MCP receipts — the user's own coding agent operated the backend ──────
@@ -225,37 +234,12 @@ function labelForAudit(
     }
   }
 
-  // The repair loop putting a table's access rules back after its own verifier
-  // rejected a policy repair (lib/core/auto-fix-engine.ts _recoverPolicies). It
-  // read as "Ran a health check", whatever happened to the rules.
-  if (a === 'authority_recovery') {
-    const table = typeof d.tableName === 'string' ? ` on ${d.tableName}` : ''
-    if (d.status === 'verified') return { kind: 'auto_fix', label: `Put the access rules${table} back after a repair failed its check` }
-    if (d.status === 'not_needed') return { kind: 'auto_fix', label: `A repair failed its check and had changed no access rules${table}` }
-    return { kind: 'auto_fix', label: `A repair failed its check, and the access rules${table} could not be put back: needs a look` }
-  }
-
   // A PostgreSQL extension installed through this project, from the console or
   // an agent's migration (lib/services/extensions.ts). Database-wide, so said.
   if (a === 'extension_installed') {
     const what = typeof d.extension === 'string' ? `the ${d.extension} extension` : 'an extension'
     const by = d.via === 'agent' ? 'Your coding agent installed' : 'Installed'
     return { kind: 'general', label: `${by} ${what}, which every project on the database can use` }
-  }
-
-  // An index Backenly built on its own, kept or taken away after its trial
-  // (lib/autonomy/index-trials.ts). The row carries its own sentence.
-  if (a === 'index_trial_result') {
-    return { kind: 'auto_fix', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : 'Backenly checked an index it built' }
-  }
-
-  // Self-healing engine — health-check rows that aren't direct fix events.
-  if (t.includes('health') || a.includes('health_fix')) {
-    if (a.includes('rolled_back')) return { kind: 'auto_fix', label: 'Undid a previous fix' }
-    if (a.includes('failed'))      return { kind: 'auto_fix', label: "A fix couldn't be applied — needs another look" }
-    if (a.includes('approved'))    return { kind: 'auto_fix', label: 'Approved a recommended fix' }
-    if (a.includes('executed'))    return { kind: 'auto_fix', label: 'Applied a fix to your backend' }
-    return { kind: 'auto_fix', label: 'Ran a health check' }
   }
 
   if (t.includes('api_key') || a.includes('api_key')) return { kind: 'api_key', label: 'API key created' }

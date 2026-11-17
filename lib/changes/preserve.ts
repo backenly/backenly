@@ -32,6 +32,7 @@
 
 import type { PoolClient } from 'pg'
 import { currentChange, ensureVault, recordStatement, type OpenChange } from './ledger'
+import { rlsSessionParams, rlsSessionSql, type RlsIdentity } from '@/lib/services/rls-session'
 import { describeReaders, vaultReaders } from './dependents'
 import { tableChecksum } from './integrity'
 import { AFTER_COLUMN, qualified, quoteIdent as q, vaultTableName } from './names'
@@ -44,6 +45,23 @@ export { AFTER_COLUMN }
 
 /** How long a destructive step waits for its table before giving up. */
 const LOCK_TIMEOUT = '5s'
+
+/**
+ * Backenly, as every policy it writes admits it: the service role.
+ *
+ * A copy of a table's values must read every row. Every workspace table has
+ * FORCE ROW LEVEL SECURITY, which binds the change's connection too (it owns
+ * the tables and does not bypass RLS), and with no claims set a table only the
+ * service role may read showed it no row: a dropped column's values were copied
+ * as none, History said they were kept, and restoring put back nothing
+ * (production-shaped in tests/integration/column-copies-see-every-row.spec.ts).
+ * Set transaction-local, after BEGIN, as a restore does (lib/changes/recovery.ts).
+ */
+const PLATFORM_CONTEXT: RlsIdentity = { userId: '', isServiceRole: true, userRole: 'service' }
+
+async function seeEveryRow(client: Pick<PoolClient, 'query'>): Promise<void> {
+  await client.query(rlsSessionSql(), rlsSessionParams(PLATFORM_CONTEXT))
+}
 
 async function inTransaction<T>(client: PoolClient, fn: () => Promise<T>): Promise<T> {
   await client.query('BEGIN')
@@ -186,6 +204,7 @@ export async function keepColumnValues(
   const vaultTable = uniqueVaultTable(change, reason === 'dropped' ? [table, column] : [table, column, 'before_retype'])
 
   const out = await inTransaction(client, async () => {
+    await seeEveryRow(client)
     await run(change, `LOCK TABLE ${target} IN ACCESS EXCLUSIVE MODE`)
     const keys = (await primaryKey(client, target)).filter((c) => c !== column)
     const select = keys.length > 0 ? [...keys, column].map(q).join(', ') : '*'
@@ -349,11 +368,15 @@ export async function keepFilledValues(
     const vault = await ensureVault(change)
     for (const col of filled) {
       const vaultTable = uniqueVaultTable(change, [A.name, col.name, 'filled'])
-      await run(
-        change,
-        `CREATE TABLE ${qualified(vault, vaultTable)} AS SELECT ${pk.map(q).join(', ')}, ${q(col.name)} AS ${q(AFTER_COLUMN)} FROM ${qualified(change.schema, A.name)}`,
-      )
-      const sum = await tableChecksum(change.client, vault, vaultTable)
+      // Every row, as for a dropped column's values above.
+      const sum = await inTransaction(change.client, async () => {
+        await seeEveryRow(change.client)
+        await run(
+          change,
+          `CREATE TABLE ${qualified(vault, vaultTable)} AS SELECT ${pk.map(q).join(', ')}, ${q(col.name)} AS ${q(AFTER_COLUMN)} FROM ${qualified(change.schema, A.name)}`,
+        )
+        return tableChecksum(change.client, vault, vaultTable)
+      })
       change.preserved.push({
         kind: 'column', table: A.name, column: col.name, reason: 'filled', keyColumns: pk,
         vault, vaultTable, rows: sum.rows, checksum: sum.checksum, afterColumn: AFTER_COLUMN,

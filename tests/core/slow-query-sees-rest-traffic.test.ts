@@ -2,14 +2,27 @@
  * SLOW QUERIES — the sensor must see the traffic apps actually send
  * -----------------------------------------------------------------
  * Apps read through the REST APIs: /api/v2 is PostgREST, and v1 /db is served
- * through PostgREST too (server/routes/postgrest-handler.ts). Every statement
- * PostgREST runs selects `pg_catalog.count(_postgrest_t)`, and the sensor
- * dropped any statement containing `pg_catalog`. So on production (2026-11-09),
- * 120 slow v2 reads and 80 slow v1 /db reads on a 1.14M-row table produced no
- * finding in 20 minutes, while 40 reads through /database/query produced one
- * within a minute.
+ * through PostgREST too (server/routes/postgrest-handler.ts). PostgREST logs in
+ * as its authenticator and runs each request as anon, authenticated or
+ * service_role (lib/postgrest/gateway.ts), and pg_stat_statements records the
+ * statement under that role.
  *
- * The statements below are PostgREST v14.15's own, assembled the way
+ * Two things hid those reads from the sensor:
+ *   - it dropped any statement containing `pg_catalog`, which every PostgREST
+ *     statement selects (production QA, 2026-11-09);
+ *   - it reads as the application role, and PostgreSQL shows the text of a
+ *     statement another role ran only to a role holding the privileges of
+ *     pg_read_all_stats. Until the procedures granted them, every REST read was
+ *     `<insufficient privilege>` to it (production QA, 2026-11-16: 30 slow v2 and
+ *     30 slow v1 /db reads on 1,000,002 rows raised nothing).
+ *
+ * So this runs as production does: the statements through an authenticator
+ * login that switches to service_role, and the sensor reading as a NOSUPERUSER
+ * role with pg_read_all_stats, as the procedures leave the application role.
+ * Only the project's statements count: its own roles', and those PostgREST and
+ * Backenly ran naming its schema (lib/autonomy/statement-attribution.ts).
+ *
+ * The statements are PostgREST v14.15's own, assembled the way
  * src/PostgREST/Query/Statements.hs (mainRead) and QueryBuilder.hs
  * (readPlanToQuery, readPlanToCountQuery) assemble them, including the double
  * spaces: v14.15 is the version docker-compose.dev.yml and production run.
@@ -19,9 +32,11 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from '@jest/globals'
-import { Pool } from 'pg'
+import { randomBytes } from 'crypto'
+import { Client, Pool } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { detectSlowQueryMissingIndexes } from '@/lib/autonomy/slow-query-index'
+import { closeAllWorkspacePools } from '@/lib/services/workspace-pool'
 
 let userId: string
 let projectId: string
@@ -31,6 +46,22 @@ let pool: Pool
 let hasExtension = false
 
 const CALLS = 25
+const PASSWORD = `pw_${randomBytes(8).toString('hex')}`
+const tag = randomBytes(4).toString('hex')
+/** The application role as the procedures leave it: NOSUPERUSER, with pg_read_all_stats. */
+const READER = `slowq_app_${tag}`
+/** PostgREST's login: NOINHERIT, able only to become the request roles. */
+const AUTHENTICATOR = `slowq_authn_${tag}`
+/** Someone else's session on the same database: an operator's, say. */
+const OPERATOR = `slowq_operator_${tag}`
+const SUPER_URL = process.env.DATABASE_URL!
+
+function loginUrl(role: string): string {
+  const u = new URL(SUPER_URL)
+  u.username = role
+  u.password = PASSWORD
+  return u.toString()
+}
 
 /** mainRead: `WITH pgrst_source AS ( <read> ) <count CTE> SELECT … FROM ( SELECT * FROM pgrst_source ) _postgrest_t` */
 function postgrestRead(read: string, countQuery?: string): string {
@@ -51,6 +82,24 @@ function readQuery(qi: string, selects: string, filters: string[], limitParam: n
   return `SELECT ${selects} FROM ${qi} WHERE ${filters.map((f) => ` ${f}`).join(' AND ')}   LIMIT $${limitParam} OFFSET $${limitParam + 1}`
 }
 
+/** Each statement in its own transaction, as PostgREST runs a request: role first, then the read. */
+async function asPostgrest(statements: Array<{ sql: string; params: (i: number) => unknown[] }>): Promise<void> {
+  const c = new Client({ connectionString: loginUrl(AUTHENTICATOR) })
+  await c.connect()
+  try {
+    for (let i = 0; i < CALLS; i++) {
+      for (const st of statements) {
+        await c.query('BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY')
+        await c.query(`select set_config('role', $1, true), set_config('request.method', 'GET', true)`, ['service_role'])
+        await c.query(st.sql, st.params(i))
+        await c.query('COMMIT')
+      }
+    }
+  } finally {
+    await c.end()
+  }
+}
+
 beforeAll(async () => {
   const user = await prisma.user.create({
     data: { email: `slowq-rest-${Date.now()}@example.test`, password: 'x', name: 'slowq' },
@@ -64,9 +113,20 @@ beforeAll(async () => {
   // the position() filter and must still be told apart.
   branchSchema = `${schema}_br_scratch`
 
-  pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
+  pool = new Pool({ connectionString: SUPER_URL, max: 3 })
   await pool.query(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`).catch(() => {})
   hasExtension = (await pool.query(`SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'`)).rows.length > 0
+
+  // PostgREST's request roles are cluster-wide and other suites leave them in
+  // place; made here when this server has none yet, and never dropped.
+  for (const role of ['anon', 'authenticated', 'service_role']) {
+    await pool.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $$`)
+  }
+  await pool.query(`CREATE ROLE ${READER} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${PASSWORD}'`)
+  await pool.query(`GRANT pg_read_all_stats TO ${READER}`)
+  await pool.query(`CREATE ROLE ${AUTHENTICATOR} LOGIN NOINHERIT PASSWORD '${PASSWORD}'`)
+  await pool.query(`GRANT service_role TO ${AUTHENTICATOR}`)
+  await pool.query(`CREATE ROLE ${OPERATOR} LOGIN PASSWORD '${PASSWORD}'`)
 
   for (const s of [schema, branchSchema]) {
     await pool.query(`CREATE SCHEMA "${s}"`)
@@ -85,6 +145,8 @@ beforeAll(async () => {
     await pool.query(`INSERT INTO "${s}"."product_views"(referrer, session_key, campaign, landing_page, user_agent, country)
       SELECT 'r' || (i % 300), 's' || i, 'c' || (i % 40), '/p/' || i, 'ua', 'IN' FROM generate_series(1, 2000) i`)
     await pool.query(`ANALYZE "${s}"."product_views"`)
+    await pool.query(`GRANT USAGE ON SCHEMA "${s}" TO service_role, ${OPERATOR}`)
+    await pool.query(`GRANT SELECT ON "${s}"."product_views" TO service_role, ${OPERATOR}`)
   }
 
   if (!hasExtension) return
@@ -109,17 +171,38 @@ beforeAll(async () => {
   const bqi = `"${branchSchema}"."product_views"`
   const onBranch = postgrestRead(readQuery(bqi, `${bqi}.*`, [`${bqi}."only_on_branch" = $1`], 2))
 
-  for (let i = 0; i < CALLS; i++) {
-    await pool.query(v2, [`none-${i}`, 20, 0])
-    await pool.query(v1, [`none-${i}`, 20, 0, `none-${i}`])
-    await pool.query(wide, [`none-${i}`, 20, 0])
-    await pool.query(onBranch, [`none-${i}`, 20, 0])
+  await asPostgrest([
+    { sql: v2, params: (i) => [`none-${i}`, 20, 0] },
+    { sql: v1, params: (i) => [`none-${i}`, 20, 0, `none-${i}`] },
+    { sql: wide, params: (i) => [`none-${i}`, 20, 0] },
+    { sql: onBranch, params: (i) => [`none-${i}`, 20, 0] },
+  ])
+
+  // The same shape of read on the project's table, from a session that is
+  // neither the project's nor PostgREST's nor Backenly's.
+  const operator = new Client({ connectionString: loginUrl(OPERATOR) })
+  await operator.connect()
+  try {
+    const byHand = postgrestRead(readQuery(qi, `${qi}.*`, [`${col('landing_page')} = $1`], 2))
+    for (let i = 0; i < CALLS; i++) await operator.query(byHand, [`none-${i}`, 20, 0])
+  } finally {
+    await operator.end()
   }
+
+  // From here the sensor reads as the application role does in production.
+  await closeAllWorkspacePools()
+  process.env.DATABASE_URL = loginUrl(READER)
 }, 180_000)
 
 afterAll(async () => {
+  await closeAllWorkspacePools()
+  process.env.DATABASE_URL = SUPER_URL
   for (const s of [schema, branchSchema]) {
     if (s) await pool?.query(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {})
+  }
+  for (const role of [READER, AUTHENTICATOR, OPERATOR]) {
+    await pool?.query(`DROP OWNED BY ${role}`).catch(() => {})
+    await pool?.query(`DROP ROLE IF EXISTS ${role}`).catch(() => {})
   }
   await pool?.end().catch(() => {})
   await prisma.project.delete({ where: { id: projectId } }).catch(() => {})
@@ -132,12 +215,24 @@ describe('slow-query sensor — REST traffic', () => {
     expect(hasExtension).toBe(true)
   })
 
-  test('the replayed statements carry pg_catalog, as PostgREST statements do', async () => {
+  test('the replayed statements carry pg_catalog and were run as service_role, as PostgREST statements are', async () => {
     const r = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_statements WHERE position($1 in query) > 0 AND query LIKE '%pg_catalog.count%'`,
+      `SELECT count(*)::int AS n FROM pg_stat_statements s JOIN pg_roles r ON r.oid = s.userid
+        WHERE r.rolname = 'service_role' AND position($1 in s.query) > 0 AND s.query LIKE '%pg_catalog.count%'`,
       [`"${schema}"`],
     )
     expect(r.rows[0].n).toBeGreaterThanOrEqual(3)
+  })
+
+  test('the sensor reads as a role that is not a superuser', async () => {
+    const reader = new Client({ connectionString: process.env.DATABASE_URL })
+    await reader.connect()
+    try {
+      const r = await reader.query(`SELECT current_user AS who, rolsuper FROM pg_roles WHERE rolname = current_user`)
+      expect(r.rows[0]).toEqual({ who: READER, rolsuper: false })
+    } finally {
+      await reader.end()
+    }
   })
 
   // The thresholds are lowered so the fixture does not need a million rows to
@@ -162,6 +257,11 @@ describe('slow-query sensor — REST traffic', () => {
   test("a preview branch's statements are never attributed to production", async () => {
     const findings = await detect()
     expect(findings.map((f) => f.details.location)).not.toContain('product_views.only_on_branch')
+  })
+
+  test("a statement another role ran is not the project's traffic, whatever it reads", async () => {
+    const findings = await detect()
+    expect(findings.map((f) => f.details.location)).not.toContain('product_views.landing_page')
   })
 
   test('each finding names a column that exists and carries the fix inputs', async () => {

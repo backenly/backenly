@@ -58,6 +58,7 @@ import {
   s3Location,
 } from '@/lib/services/snapshot-store'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
+import { libpqChildEnv } from '@/lib/services/libpq-env'
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import {
   RegionNotConfiguredError,
@@ -219,7 +220,9 @@ export function buildConnection(
     '--no-password',
   ]
 
-  const env: NodeJS.ProcessEnv = { ...process.env }
+  // With a HOME libpq can look in: one it cannot enter fails every TLS
+  // connection before a query is sent (lib/services/libpq-env.ts).
+  const env: NodeJS.ProcessEnv = libpqChildEnv(process.env)
   if (parsed.password) env.PGPASSWORD = decodeURIComponent(parsed.password)
   const sslmode = parsed.searchParams.get('sslmode')
   if (sslmode) env.PGSSLMODE = sslmode

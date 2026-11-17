@@ -51,11 +51,16 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
 
     const responseTimeStatus: 'healthy' | 'warning' | 'critical' =
       cur.avgDuration > 1000 ? 'critical' : cur.avgDuration > 500 ? 'warning' : 'healthy'
-    const errorStatus: 'healthy' | 'warning' | 'critical' =
-      cur.errorRatePct > 5 ? 'critical' : cur.errorRatePct > 1 ? 'warning' : 'healthy'
     const serverErrorRatePct = cur.count > 0 ? (cur.serverErrorCount / cur.count) * 100 : 0
     const serverErrorStatus: 'healthy' | 'warning' | 'critical' =
       serverErrorRatePct > 1 ? 'critical' : cur.serverErrorCount > 0 ? 'warning' : 'healthy'
+    // 5xx only — the number that may sit next to "Reliability" (also
+    // 5xx-based) without the two ever contradicting each other on screen.
+    const serverErrors = {
+      value: cur.serverErrorCount,
+      change: pctChange(cur.serverErrorCount, base.serverErrorCount),
+      status: serverErrorStatus,
+    }
     const reliabilityStatus: 'healthy' | 'warning' | 'critical' =
       cur.count === 0 ? 'healthy' : cur.reliabilityPct < 99 ? 'critical' : cur.reliabilityPct < 99.9 ? 'warning' : 'healthy'
 
@@ -73,17 +78,15 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
           status: reliabilityStatus,
           hasData: cur.count > 0,
         },
-        errors: {
-          value: cur.errorCount,
-          change: pctChange(cur.errorCount, base.errorCount),
-          status: errorStatus,
-        },
-        // 5xx only — the number that may sit next to "Reliability" (also
-        // 5xx-based) without the two ever contradicting each other on screen.
-        serverErrors: {
-          value: cur.serverErrorCount,
-          change: pctChange(cur.serverErrorCount, base.serverErrorCount),
-          status: serverErrorStatus,
+        // An error is a 5xx (lib/services/metrics.ts). `errors` counted every
+        // response of 400 and above; it is now the 5xx, kept for its readers.
+        errors: serverErrors,
+        serverErrors,
+        // 4xx on its own: refused keys, bad requests, rows not found. Not a
+        // failure, so it carries no status.
+        clientErrors: {
+          value: cur.clientErrorCount,
+          change: pctChange(cur.clientErrorCount, base.clientErrorCount),
         },
         requests: {
           value: cur.count,

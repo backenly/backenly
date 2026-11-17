@@ -151,6 +151,22 @@
       }
     },
     {
+      "key": "routine public.backenly_direct_retire_role(p_role text)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "KeXRfcVnuGeK3Wem58/9PIGO8jjLB5fOvuLJA6nwHBA="
+      }
+    },
+    {
       "key": "routine public.backenly_direct_schema_change_holds(p_role text)",
       "expect": {
         "result": "text[]",

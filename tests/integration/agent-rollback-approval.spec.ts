@@ -123,11 +123,14 @@ describe('an agent migration, restored on a person\'s say-so', () => {
   let approvalId: string
 
   it('is the agent\'s governed change: checkpointed, applied and verified', async () => {
-    // Arguments that look like they switch something off reach nothing.
-    const r = await call('apply_migration', {
-      sql: 'CREATE TABLE invoices (number text NOT NULL, amount integer);\nCREATE INDEX invoices_number_idx ON invoices (number)',
-      skipVerification: true, verify: false, autoRecover: false, checks: [],
-    })
+    const sql = 'CREATE TABLE invoices (number text NOT NULL, amount integer);\nCREATE INDEX invoices_number_idx ON invoices (number)'
+    // Arguments that look like they switch something off are refused, and nothing runs.
+    const refused = await call('apply_migration', { sql, skipVerification: true, verify: false, autoRecover: false, checks: [] })
+    expect(refused.status).toBe(400)
+    expect(refused.body).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['skipVerification', 'verify', 'autoRecover', 'checks'] })
+    expect(await tableExists('invoices')).toBe(false)
+
+    const r = await call('apply_migration', { sql })
     expect(r.status).toBe(200)
     expect(r.body.data.change).toMatchObject({ status: 'healthy', verified: true })
     expect(r.body.summary).toMatch(/Recorded as change #\d+: checkpointed, applied and verified/)
@@ -157,11 +160,18 @@ describe('an agent migration, restored on a person\'s say-so', () => {
   }, 60_000)
 
   it('parks the agent\'s request with only what Backenly measured, and changes nothing', async () => {
-    const r = await call('deploy', {
+    // An agent trying to pre-approve the data loss, or to run it as Backenly,
+    // is refused, and nothing waits for a person.
+    const before = await prisma.agentApprovalRequest.count({ where: { projectId } })
+    const refused = await call('deploy', {
       action: 'revert_change', changeId,
-      // An agent trying to pre-approve the data loss, or to run it as Backenly.
       acknowledged: { 'rows_set_aside:invoices:': 1_000_000 }, mode: 'automatic', origin: 'backenly',
     })
+    expect(refused.status).toBe(400)
+    expect(refused.body).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['acknowledged', 'mode', 'origin'] })
+    expect(await prisma.agentApprovalRequest.count({ where: { projectId } })).toBe(before)
+
+    const r = await call('deploy', { action: 'revert_change', changeId })
     expect(r.status).toBe(200)
     expect(r.body.status).toBe('awaiting_approval')
     approvalId = r.body.approval.id
@@ -308,7 +318,7 @@ describe('a migration that fails part-way', () => {
 })
 
 describe('an agent switching off what protects production', () => {
-  it('turns the autonomy dial off and sends arguments meant to skip recovery: its breaking change is recovered anyway', async () => {
+  it('turns the autonomy dial off, and arguments meant to skip recovery are refused: its breaking change is recovered anyway', async () => {
     const off = await call('autonomy', { action: 'set_level', level: 'OFF' })
     expect(off.status).toBe(200)
     expect((await prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { autonomyLevel: true } })).autonomyLevel).toBe('OFF')
@@ -317,10 +327,14 @@ describe('an agent switching off what protects production', () => {
     await ensureAuthUsersTable(projectId, { email: 'owner@example.test' })
     await prisma.$executeRawUnsafe(`INSERT INTO "${schema}".users (email, password) VALUES ('end-user@example.test', 'hash')`)
 
-    const r = await call('apply_migration', {
-      sql: 'ALTER TABLE users RENAME COLUMN email TO login_email',
-      autoRecover: false, recover: false, skipRecovery: true, rollback: false, protect: false, autonomy: 'OFF',
+    const sql = 'ALTER TABLE users RENAME COLUMN email TO login_email'
+    const refused = await call('apply_migration', {
+      sql, autoRecover: false, recover: false, skipRecovery: true, rollback: false, protect: false, autonomy: 'OFF',
     })
+    expect(refused.status).toBe(400)
+    expect(refused.body).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['autoRecover', 'recover', 'skipRecovery', 'rollback', 'protect', 'autonomy'] })
+
+    const r = await call('apply_migration', { sql })
     expect(r.status).toBe(400)
     expect(r.body).toMatchObject({ ok: false, code: 'VERIFICATION_FAILED', applied: [], recovered: true })
     expect(r.body.error).toMatch(/sign-in/i)

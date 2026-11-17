@@ -21,6 +21,7 @@
 
 import { parseMigration, type PlannedAction } from '@/lib/mcp/migration-parser'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { asWorkspaceOwner } from '@/lib/data-plane/as-owner'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { quoteIdent } from '@/lib/changes/names'
 
@@ -36,11 +37,17 @@ export interface MergeImpact {
 
 type Db = Awaited<ReturnType<typeof workspaceRawClient>>
 
+/**
+ * Production's rows in `table`, counted with every row in view
+ * (lib/data-plane/as-owner.ts). Counted as nobody, row-level security hid them:
+ * a card for renaming two populated columns of a service-role-only table said
+ * nothing about its rows (production QA, 2026-11-16).
+ */
 async function rowsIn(db: Db, schema: string, table: string): Promise<string | null> {
   try {
-    const rows = await db.$queryRawUnsafe<Array<{ n: number }>>(
+    const rows = await asWorkspaceOwner(db, (tx) => tx.$queryRawUnsafe<Array<{ n: number }>>(
       `SELECT count(*)::int AS n FROM (SELECT 1 FROM ${quoteIdent(schema)}.${quoteIdent(table)} LIMIT ${COUNT_CAP + 1}) t`,
-    )
+    ))
     const n = rows[0]?.n ?? 0
     if (n === 0) return null
     return n > COUNT_CAP ? `more than ${COUNT_CAP.toLocaleString('en-US')}` : n.toLocaleString('en-US')

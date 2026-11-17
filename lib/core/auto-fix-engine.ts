@@ -409,9 +409,14 @@ export async function runAutoFix(
       }
 
       // PROPOSE_ONLY and DENY: the repair is meaningful, authority is not
-      // sufficient. Surface it for a human rather than mutating.
+      // sufficient. Surface it for a human rather than mutating, with what
+      // held it back: the card said nothing, so a fix the finding itself called
+      // reversible waited with no reason given (production QA, 2026-11-16).
       await prisma.healthFinding
-        .update({ where: { id: finding.id }, data: { status: 'pending_approval' } })
+        .update({
+          where: { id: finding.id },
+          data: { status: 'pending_approval', details: { ...details, heldByAuthority: heldByAuthority(d) } as any },
+        })
         .catch(() => {})
       return {
         findingId,
@@ -467,6 +472,20 @@ export async function runAutoFix(
   }
 
   return _executeAutoFix(finding.id, projectId, type, details, opts)
+}
+
+/**
+ * What held an autonomous repair for a person, kept on the finding: each input
+ * that narrowed the decision, with the authority decision's own sentence for it
+ * (lib/authority/decision.ts). The Review Queue words it for the owner
+ * (lib/autonomy/trust-report.ts, heldBecauseFor).
+ */
+export function heldByAuthority(d: { decision: string; narrowings: Array<{ code: string; reason: string }>; decidedAt?: string }): {
+  decision: string
+  narrowings: Array<{ code: string; reason: string }>
+  at: string
+} {
+  return { decision: d.decision, narrowings: d.narrowings, at: d.decidedAt ?? new Date().toISOString() }
 }
 
 /**
@@ -527,6 +546,8 @@ export async function executeApprovedFix(
   regressionCheck?: FixOutcome['regressionCheck']
   /** Nothing ran because the project's region, which keeps what it replays, could not be reached. */
   regionUnavailable?: boolean
+  /** Nothing changed because rows already in the table break the rule (lib/db/existing-rows.ts). */
+  refusedByRows?: boolean
 }> {
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) return { success: false, message: 'Finding not found.' }
@@ -736,6 +757,12 @@ export async function executeApprovedFix(
   }
 
   if (!result.success) {
+    // Rows already in the table refused the rule: the data's answer, said in
+    // the executor's sentence, which names the rows and what to do with them.
+    const { EXISTING_ROWS_CODES } = await import('@/lib/db/existing-rows')
+    if (result.code && EXISTING_ROWS_CODES.has(result.code)) {
+      return { success: false, message: result.message, refusedByRows: true }
+    }
     return { success: false, message: result.error ?? result.message }
   }
 
@@ -1135,6 +1162,11 @@ export interface RevertEligibility {
  *     anyone made since. Format 3 records the governed changes the fix made, and
  *     undoes exactly those (lib/changes/recovery.ts).
  */
+/** A format-3 fix whose governed changes were recorded: undone by restoring exactly those. */
+function recordedChanges(rollbackData: Record<string, unknown>): boolean {
+  return rollbackData.rollbackFormat === 3 && Array.isArray(rollbackData.changeIds) && rollbackData.changeIds.length > 0
+}
+
 export function revertEligibility(
   findingType: string,
   details: Record<string, unknown> | null | undefined,
@@ -1193,7 +1225,14 @@ export function revertEligibility(
   // earlier platform value (an approved held action setting a secret or a key's
   // permissions) has no undo. Offered anyway, it reported "Fix reverted." and
   // reopened the finding with the change still in place.
-  if (rollbackData.schemaTouching !== true && !rollbackData.preMetadata) {
+  //
+  // A fix that recorded governed changes has one, whatever its finding type's
+  // snapshot habit: undo restores exactly those changes, as History does. The
+  // index a slow-query fix builds is recorded so ("Added an index to
+  // product_views", change #46, which History restored), yet its card said
+  // nothing could be undone, because slow_query_missing_index is not in
+  // SCHEMA_TOUCHING (production QA, 2026-11-16).
+  if (rollbackData.schemaTouching !== true && !rollbackData.preMetadata && !recordedChanges(rollbackData)) {
     return {
       revertible: false,
       requiresConfirmation: false,
@@ -1271,7 +1310,7 @@ export async function revertAutoFix(
   // belongs in History, where the person sees exactly what is kept.
   let appliedSteps = 0
   let schemaMessage = ''
-  if (rollbackData.schemaTouching === true) {
+  if (rollbackData.schemaTouching === true || recordedChanges(rollbackData)) {
     const { previewRecovery, recoverChange } = await import('@/lib/changes/recovery')
     const { currentAttribution } = await import('@/lib/changes/attribution')
     const ids = Array.isArray(rollbackData.changeIds) ? (rollbackData.changeIds as string[]) : []

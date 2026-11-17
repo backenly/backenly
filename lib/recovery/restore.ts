@@ -59,6 +59,7 @@ import { isChangeVaultSchema } from '@/lib/security/workspace-schema'
 import { ALL_FUNCTION_STATE_SQL, currentFunctionSql, type RealtimeFunctionName } from '@/lib/realtime/channel-sql'
 import { BUNDLE_FILES, MANIFEST_FILE } from './export'
 import { extractTar } from './tar'
+import { libpqChildEnv } from '@/lib/services/libpq-env'
 
 const execFileAsync = promisify(execFile)
 
@@ -1052,7 +1053,8 @@ async function verifyHealth(bundle: ValidatedBundle, options: RestoreOptions): P
 
 // ─── Plumbing ────────────────────────────────────────────────────────────────
 
-function connectionArgs(url: string): { args: string[]; env: NodeJS.ProcessEnv } {
+/** psql's arguments and environment for `url`, the password kept out of argv. */
+export function connectionArgs(url: string): { args: string[]; env: NodeJS.ProcessEnv } {
   const parsed = new URL(url)
   const args = [
     '--host', parsed.hostname,
@@ -1061,7 +1063,8 @@ function connectionArgs(url: string): { args: string[]; env: NodeJS.ProcessEnv }
     '--dbname', parsed.pathname.replace(/^\//, ''),
     '--no-password',
   ]
-  const env: NodeJS.ProcessEnv = { ...process.env }
+  // With a HOME libpq can look in (lib/services/libpq-env.ts).
+  const env: NodeJS.ProcessEnv = libpqChildEnv(process.env)
   if (parsed.password) env.PGPASSWORD = decodeURIComponent(parsed.password)
   const sslmode = parsed.searchParams.get('sslmode')
   if (sslmode) env.PGSSLMODE = sslmode
