@@ -357,6 +357,13 @@ export async function middleware(request: NextRequest) {
       response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
       const allowedHeaders = corsResponse.headers.get('Access-Control-Allow-Headers')
       if (allowedHeaders) response.headers.set('Access-Control-Allow-Headers', allowedHeaders)
+      // The headers a cross-origin app may read (Content-Range, Retry-After…),
+      // which handleCORS names for the SDK routes. They were left off every
+      // answer but the preflight, and the forwarder drops the runtime's own
+      // CORS headers (lib/runtime/forward-to-runtime.ts), so an app reading a
+      // count through this server found none.
+      const exposedHeaders = corsResponse.headers.get('Access-Control-Expose-Headers')
+      if (exposedHeaders) response.headers.set('Access-Control-Expose-Headers', exposedHeaders)
     }
     return response
   }

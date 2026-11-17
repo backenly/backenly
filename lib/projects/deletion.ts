@@ -12,7 +12,8 @@
  *   stopped   the project is paused with reason 'deleted', through the pause
  *             columns every runtime door already refuses on, in its own region
  *             too (they are in the authorization projection). Its webhooks
- *             stop. Nothing is dropped.
+ *             stop, and its allowed addresses leave its region's network
+ *             allowlist. Nothing is dropped.
  *   restored  until then, an admin restores it from the Projects page
  *             (restoreDeletedProject): both dates cleared, the deletion pause
  *             lifted, back in the list and serving, if the plan has room for it.
@@ -38,6 +39,7 @@ import { confirmPropagation, type Propagation } from '@/lib/auth-projection/conf
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { cancelPendingDeliveries, withProjectLifecycleLock, type LifecycleActor } from './pause-lifecycle'
 import { DELETED_PAUSE_REASON, invalidateProjectServingState } from './serving-state'
+import { syncAllowlistForProject } from '@/lib/services/direct-access-allowlist'
 import { deleteProjectCompletely } from './delete'
 
 /** How long a deleted project is kept before it is removed for good. */
@@ -86,6 +88,10 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
   invalidateProjectServingState(projectId)
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
   await discardOutbox(projectId)
+  // Its allowed addresses stop counting toward its region's network allowlist
+  // (lib/services/direct-access-allowlist.ts), unless another project allows
+  // the same one; restoring it brings them back. Never throws.
+  await syncAllowlistForProject(projectId)
 
   await prisma.auditLog.create({
     data: {
@@ -149,6 +155,8 @@ export async function restoreDeletedProject(
   invalidateProjectServingState(projectId)
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
   await ensureSchemaRegistered(projectId)
+  // Its allowed addresses count toward its region's network allowlist again.
+  await syncAllowlistForProject(projectId)
   await prisma.auditLog.create({
     data: {
       action: 'PROJECT_RESTORED',
