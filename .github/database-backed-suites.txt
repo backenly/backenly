@@ -2367,3 +2367,9 @@ tests/integration/unknown-auth-paths.spec.ts
 # with the number shown. Real account_ai_usage rows, description, gate and MCP
 # usage summary; the Cloud provider's plan and balances are stood in.
 tests/integration/ai-credits-allowance.spec.ts
+# A function self-heal is the platform's own work: run under a metered tool
+# call, it holds none of the customer's credits, adds nothing to the call's
+# charge, still heals when their credits are used up, and is booked against the
+# platform's budget; a repair the customer asks for is still theirs. Real
+# gateway spend rules, fixers, function runner and database.
+tests/integration/function-self-heal-is-platform-paid.spec.ts

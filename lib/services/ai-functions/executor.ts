@@ -609,6 +609,22 @@ async function recordSelfHealRewrite(
   }).catch(() => {})
 }
 
+/**
+ * Who pays for a self-heal's model call: the platform. Healing a function
+ * Backenly wrote is Backenly's own work, like the autonomy investigator's, so
+ * it never holds or spends a customer's AI credits and is never refused for
+ * want of them (lib/ai/token-meter.ts), and it counts against the platform's
+ * own budget (lib/ai/llm/spend.ts).
+ *
+ * The repair helpers were customer-paid by default (purpose
+ * functions.generate). That kept the heal free only while no metered request
+ * was open where it ran: inside one, such as a direct MCP tool call, which
+ * meters the project, the heal held the account's credits, added its tokens
+ * to that call's charge, and was refused once the credits were used up,
+ * leaving the function in error (production QA re-test, 2026-11-16, #98).
+ */
+const SELF_HEAL_PAYMENT = { payer: 'platform' } as const
+
 async function autoFixAiFunction(
   functionId: string,
   projectId: string,
@@ -629,7 +645,8 @@ async function autoFixAiFunction(
       description,
       triggerType,
       triggerTable,
-      projectId
+      projectId,
+      SELF_HEAL_PAYMENT,
     )
 
     if (!fixedCode || fixedCode === originalCode) {
@@ -676,7 +693,7 @@ export async function autoFixRouteModuleFunction(
     console.log(`[AutoFix:RouteModule] Attempting fix for function ${functionId}: ${errorMessage}`)
     const method = triggerTableHint?.match(/^\s*(GET|POST|PUT|PATCH|DELETE)\b/i)?.[1]?.toUpperCase() || 'POST'
     const { generateFixedRouteModule } = await import('@/lib/ai/function-generator')
-    const fixedCode = await generateFixedRouteModule(originalCode, errorMessage, description, method, projectId)
+    const fixedCode = await generateFixedRouteModule(originalCode, errorMessage, description, method, projectId, SELF_HEAL_PAYMENT)
 
     if (!fixedCode) {
       // history: how the last run went, not configuration (lib/changes/resources/functions.ts)

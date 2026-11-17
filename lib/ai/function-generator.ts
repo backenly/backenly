@@ -358,13 +358,18 @@ function stripCodeFences(raw: string): string {
  * Shared by the creation gate (below) and the executor's self-heal path.
  * Returns null when no validated fix could be produced — callers must treat
  * null as "leave the stored code untouched".
+ *
+ * The creation gate's repair is part of the build the customer asked for, and
+ * is paid as its purpose says. The self-heal is Backenly's own work and passes
+ * `payer: 'platform'`.
  */
 export async function generateFixedRouteModule(
   originalCode: string,
   errorMessage: string,
   description: string,
   method: string,
-  projectId: string
+  projectId: string,
+  { payer }: { payer?: 'customer' | 'platform' } = {},
 ): Promise<string | null> {
   try {
     const { validateRouteModule } = await import('@/lib/services/ai-functions/route-module-runner')
@@ -400,6 +405,7 @@ Fix the code so it satisfies the runtime contract and its purpose.
 Check the error against the real schema above — a runtime failure here is most often a wrong column name, a missing ::uuid cast, an un-serialisable BigInt from COUNT(*), or a value that violates a CHECK constraint.`,
       }],
       label: 'function-repair',
+      ...(payer ? { payer } : {}),
     })
 
     const fixed = stripCodeFences(response.text?.trim() ?? '')

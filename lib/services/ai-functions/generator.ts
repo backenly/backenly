@@ -234,7 +234,12 @@ Generate ONLY the function body code (no function declaration, no exports). Star
 
 /**
  * Regenerate a function's code given the runtime error it produced.
- * Used by the auto-fix system when a function fails at execution time.
+ *
+ * Used by the self-heal when a function fails (lib/services/ai-functions/
+ * executor.ts), which is Backenly's own work and passes `payer: 'platform'`,
+ * and by repairs the customer's own request asks for (create_function's
+ * repair, the fix action), which are theirs: without `payer` the call is
+ * paid as its purpose says, by the customer.
  */
 export async function generateFixedFunctionCode(
   originalCode: string,
@@ -242,7 +247,8 @@ export async function generateFixedFunctionCode(
   description: string,
   triggerType: string,
   triggerTable: string | null,
-  projectId: string
+  projectId: string,
+  { payer }: { payer?: 'customer' | 'platform' } = {},
 ): Promise<string> {
   const [liveSchema, connectedProviderIds] = await Promise.all([
     introspectSchema(projectId),
@@ -293,6 +299,7 @@ Fix the code to resolve the error. Return ONLY the fixed function body (no funct
       { role: 'user', content: userPrompt },
     ],
     label: 'ai-function-repair',
+    ...(payer ? { payer } : {}),
   })
 
   const rawCode = response.text?.trim() || originalCode
