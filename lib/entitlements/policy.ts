@@ -285,8 +285,15 @@ export async function aiCreditAllowance(billingAccountId: string): Promise<AiCre
  * Cloud provider; this is the public entry point the product calls. In
  * single-tenant it records nothing, because there is nobody to bill.
  *
- * Call AFTER the turn, only when it produced a real backend change (questions
- * and clarifications are free). Fire-and-forget; never blocks.
+ * Called after the turn, through closeCreditTurn (lib/entitlements/
+ * credit-holds.ts), which keeps the charge within the account's cap. A
+ * backend_chat turn is charged what it used whether it changed the backend or
+ * only answered a question, as the Pricing page says: credits are spent "when
+ * Backenly runs its own model for you: the natural-language MCP tool
+ * (backend_chat)". The one exception is a build on a protected production that
+ * ends before a merge request or a change (lib/mcp/chat-turn.ts). Questions
+ * are free in the dashboard assistant, which never charges.
+ * Fire-and-forget; never blocks.
  */
 export async function chargeAiCredits(billingAccountId: string, tokensUsed: number): Promise<void> {
   if (!Number.isFinite(tokensUsed) || tokensUsed <= 0) return
