@@ -5017,7 +5017,8 @@ async function executeCreateTable(
       message:
         (asWritten
           ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
-            `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
+            `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (set by the SDK's ` +
+            `delete(); a DELETE on /db or /api/v2 removes the row).`
           : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`) +
         (rlsNotice ? `\n\n${rlsNotice}` : '') +
         (realtimeNote ? `\n\n${realtimeNote}` : ''),
@@ -9750,9 +9751,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
 
     // ── A UNIQUE index must not count soft-deleted rows ──────────────────────
     //
-    // Every Backenly table is provisioned with `deleted_at`, and a client DELETE
-    // sets it rather than removing the row (bkn_pgrst_soft_delete). A plain
-    // UNIQUE index therefore keeps enforcing uniqueness against rows the
+    // Every Backenly table is provisioned with `deleted_at`, and the SDK's
+    // delete() sets it rather than removing the row (POST /database/delete; a
+    // DELETE on /db or /api/v2 removes it). /db reads then skip the row, and so
+    // do /api/v2 reads by anon and signed-in users (bkn_pgrst_soft_delete). A
+    // plain UNIQUE index therefore keeps enforcing uniqueness against rows the
     // application can no longer see:
     //
     //   user deletes their profile  → row survives with deleted_at set
@@ -9983,10 +9986,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
             `cannot target that one, and an ON CONFLICT in SQL has to repeat its WHERE.`
           : '') +
         (softDeleteScoped
-          ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: a client ` +
-            `DELETE sets \`deleted_at\` instead of removing the row. An unscoped UNIQUE index would keep ` +
-            `enforcing uniqueness against rows the app can no longer see — so a user who deleted their ` +
-            `record and created a new one would hit a unique violation against an invisible row. ` +
+          ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: the SDK's ` +
+            `delete() sets \`deleted_at\` and keeps the row (a DELETE on /db or /api/v2 removes it). An unscoped ` +
+            `UNIQUE index would keep enforcing uniqueness against kept rows the app can no longer see — so a ` +
+            `user who deleted their record and created a new one would hit a unique violation against an ` +
+            `invisible row. ` +
             `An upsert cannot target a scoped index. If you want uniqueness across deleted rows too, or an ` +
             `upsert on these columns, pass \`where: "true"\`.`
           : ''),
@@ -10667,8 +10671,8 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     } else if (ct === 'unique') {
       // ── Soft delete makes a UNIQUE *constraint* the wrong instrument ────────
       //
-      // Every Backenly table carries `deleted_at`, and a client DELETE sets it
-      // rather than removing the row. A UNIQUE CONSTRAINT cannot be partial —
+      // Every Backenly table carries `deleted_at`, and the SDK's delete() sets
+      // it rather than removing the row. A UNIQUE CONSTRAINT cannot be partial —
       // PostgreSQL has no `ADD CONSTRAINT … UNIQUE … WHERE` — so it would keep
       // enforcing uniqueness against soft-deleted rows the application can no
       // longer see. The user deletes a record, creates a replacement, and gets a
@@ -10817,13 +10821,14 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       // got rather than trusting that it matches what it sent.
       message:
         `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}` +
-        // A UNIQUE over every row counts the rows a client DELETE only marks
+        // A UNIQUE over every row counts the rows the SDK's delete() only marks
         // deleted, which is what the author asked for and worth saying once.
         (ct === 'unique' && params.asWritten === true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
-          ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and keeps ` +
-            `the row, so its value stays taken. An upsert (ON CONFLICT, or on_conflict on the REST API) can target ` +
-            `it. For uniqueness among live rows only, create a unique index WHERE deleted_at IS NULL instead: ` +
-            `on_conflict cannot target that one, and an ON CONFLICT in SQL has to repeat its WHERE.`
+          ? `\n\nIt covers every row, soft-deleted ones too: the SDK's delete() on ${tableName} sets "deleted_at" ` +
+            `and keeps the row, so its value stays taken (a DELETE on /db or /api/v2 removes the row and frees ` +
+            `it). An upsert (ON CONFLICT, or on_conflict on the REST API) can target it. For uniqueness among live ` +
+            `rows only, create a unique index WHERE deleted_at IS NULL instead: on_conflict cannot target that one, ` +
+            `and an ON CONFLICT in SQL has to repeat its WHERE.`
           : ''),
       data: { tableName, constraintName: cName, constraintDefinition: after[0].def, columns },
     }

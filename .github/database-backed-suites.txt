@@ -2415,3 +2415,7 @@ tests/integration/function-self-heal-is-platform-paid.spec.ts
 # against none of the account's credits; a call the account pays for is still
 # refused. Real route, gateway spend rules, credit hold and usage row.
 tests/integration/dashboard-assistant-answers-free.spec.ts
+# Receipts and the runtime API guide say which delete keeps a row: the SDK's
+# delete() sets deleted_at; a DELETE on /db or /api/v2 removes the row (#22).
+# Real provisioned project, real executor, migrations and guide.
+tests/integration/receipts-say-what-delete-does.spec.ts
