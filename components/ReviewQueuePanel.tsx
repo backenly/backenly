@@ -34,6 +34,7 @@ import { ClipboardCopy } from 'lucide-react'
 import { groupFindings, CATEGORY_LABEL, type FindingGroup, type GroupableFinding } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { decisionLabels } from '@/lib/core/finding-summaries'
+import { findingOriginLabel } from '@/lib/core/finding-origin'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
 import { approvalTitle } from '@/lib/mcp/approval-title'
@@ -1111,9 +1112,8 @@ function ApprovalRow({
         {critical && <Fact strong><span className="font-medium text-zinc-50">Critical</span></Fact>}
         <Fact>{CATEGORY_LABEL[g.category]}</Fact>
         {!many && head.resource && <Fact><MetaCode>{head.resource}</MetaCode></Fact>}
-        {head.source && head.source !== 'autonomy' && (
-          <Fact>{head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}</Fact>
-        )}
+        {/* Who raised it, only when someone other than Backenly's own checks did. */}
+        {findingOriginLabel(head.source) && <Fact>{findingOriginLabel(head.source)}</Fact>}
         {proposal && <Fact>AI-proposed, recorded as fixed only if a re-check confirms it</Fact>}
         {!fixable && <Fact>No automatic fix</Fact>}
         <Fact><Time iso={head.detectedAt} /></Fact>
