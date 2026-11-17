@@ -12,6 +12,11 @@
 
 import { deriveFkBase } from '@/lib/db/fk-shape'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { asWorkspaceOwner } from '@/lib/data-plane/as-owner'
+import { postgresWords, refusedByExistingRows } from '@/lib/db/existing-rows'
+
+/** A key added to a populated table reads all of it; a large one takes a while. */
+const KEY_TIMEOUT_MS = 10 * 60_000
 
 const SET_NULL_COLUMNS = ['assigned_to', 'assignee_id', 'updated_by', 'deleted_by', 'approved_by', 'actor_id']
 
@@ -247,7 +252,7 @@ export async function repairForeignKeyColumn(
   tableName: string,
   columnName: string,
   referencedTable?: string,
-): Promise<{ success: boolean; message: string; referencedTable?: string }> {
+): Promise<{ success: boolean; message: string; referencedTable?: string; code?: string }> {
   const db = await workspaceRawClient(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
@@ -307,10 +312,17 @@ export async function repairForeignKeyColumn(
   const constraintName = `fk_${tableName}_${base}`.replace(/[^a-z0-9_]/gi, '_').slice(0, 63)
 
   try {
-    await db.$executeRawUnsafe(
-      `ALTER TABLE "${postgresSchema}"."${tableName}"
-       ADD CONSTRAINT "${constraintName}"
-       FOREIGN KEY ("${columnName}") REFERENCES "${postgresSchema}"."${refTable}"(id) ${cascadeStr}`,
+    // With every row in view (lib/data-plane/as-owner.ts): PostgreSQL checks a
+    // key added to existing rows with one query under the tables' row-level
+    // security, so as nobody `users` was empty and every key failed with 23503.
+    await asWorkspaceOwner(
+      db,
+      (tx) => tx.$executeRawUnsafe(
+        `ALTER TABLE "${postgresSchema}"."${tableName}"
+         ADD CONSTRAINT "${constraintName}"
+         FOREIGN KEY ("${columnName}") REFERENCES "${postgresSchema}"."${refTable}"(id) ${cascadeStr}`,
+      ),
+      { timeoutMs: KEY_TIMEOUT_MS },
     )
     return {
       success: true,
@@ -318,10 +330,20 @@ export async function repairForeignKeyColumn(
       referencedTable: refTable,
     }
   } catch (err: any) {
-    if (err?.message?.includes('already exists')) {
+    const words = postgresWords(err)
+    if (words.includes('already exists')) {
       return { success: true, message: `Foreign key on "${tableName}.${columnName}" already exists.`, referencedTable: refTable }
     }
-    return { success: false, message: `Could not add foreign key on "${tableName}.${columnName}": ${err?.message}` }
+    if (refusedByExistingRows(err)) {
+      return {
+        success: false,
+        code: 'EXISTING_ROWS_VIOLATE',
+        message:
+          `Some rows in ${tableName} have a ${columnName} that matches no row in ${refTable}, so the foreign key ` +
+          `was not added and nothing changed. Correct or remove those rows first (PostgreSQL: ${words}).`,
+      }
+    }
+    return { success: false, message: `Could not add the foreign key ${tableName}.${columnName} → ${refTable}.id: ${words}` }
   }
 }
 
@@ -398,10 +420,15 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
         // Use fk_<table>_<base> naming to preserve semantic role and avoid conflicts
         // e.g. orders.sellerId → fk_orders_seller, orders.buyerId → fk_orders_buyer
         const constraintName = `fk_${table_name}_${base}`
-        await db.$executeRawUnsafe(
-          `ALTER TABLE "${postgresSchema}"."${table_name}"
-           ADD CONSTRAINT "${constraintName}"
-           FOREIGN KEY ("${column_name}") REFERENCES "${postgresSchema}"."${refTable}"(id) ${cascadeStr}`
+        // One transaction per key, so one that fails leaves the next to run.
+        await asWorkspaceOwner(
+          db,
+          (tx) => tx.$executeRawUnsafe(
+            `ALTER TABLE "${postgresSchema}"."${table_name}"
+             ADD CONSTRAINT "${constraintName}"
+             FOREIGN KEY ("${column_name}") REFERENCES "${postgresSchema}"."${refTable}"(id) ${cascadeStr}`,
+          ),
+          { timeoutMs: KEY_TIMEOUT_MS },
         )
         console.log(`[FK Repair] ✅ ${table_name}.${column_name} → ${refTable}.id [${cascadeStr}]`)
         fkSet.add(`${table_name}.${column_name}`) // Prevent duplicates in same pass
@@ -409,7 +436,7 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
         details.push({ table: table_name, column: column_name, refTable, cascadeRule: cascadeStr, success: true })
       } catch (err: any) {
         // Non-fatal: column type mismatch, constraint already exists, etc.
-        console.warn(`[FK Repair] ⚠️ ${table_name}.${column_name}: ${err?.message?.slice(0, 100)}`)
+        console.warn(`[FK Repair] ⚠️ ${table_name}.${column_name}: ${postgresWords(err).slice(0, 160)}`)
         failed++
         details.push({ table: table_name, column: column_name, refTable, cascadeRule: cascadeStr, success: false })
       }

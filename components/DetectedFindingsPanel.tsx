@@ -213,7 +213,9 @@ export function DetectedFindingsPanel({
       })
       const j = await res.json().catch(() => ({} as any))
       if (res.ok && j?.success) return { ok: true, snapshotId: typeof j.snapshotId === 'string' ? j.snapshotId : null }
-      if (res.status === 409 && retriesLeft > 0) {
+      // EXISTING_ROWS: rows already in the table break the rule; asking again
+      // changes nothing, so the reason is shown at once.
+      if (res.status === 409 && j?.code !== 'EXISTING_ROWS' && retriesLeft > 0) {
         await new Promise(r => { timers.current.push(setTimeout(r, 2500)) })
         return fixOne(findingId, retriesLeft - 1)
       }

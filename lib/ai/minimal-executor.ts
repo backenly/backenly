@@ -10,6 +10,7 @@
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
+import { postgresWords } from '@/lib/db/existing-rows'
 import { ruleChecksFor, uniqueByName } from '@/lib/db/name-rules'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withoutTables } from '@/lib/orchestration/graph-tables'
@@ -34,6 +35,9 @@ async function projectDb(projectId: string) {
   const { workspaceRawClient } = await import('@/lib/data-plane/regional')
   return workspaceRawClient(projectId)
 }
+
+/** A foreign key added to, or validated over, a populated table reads all of it. */
+const CONSTRAINT_SCAN_TIMEOUT_MS = 10 * 60_000
 
 export interface AIAction {
   /** Optional trace explaining why this action was chosen — aids debugging hallucinations */
@@ -9526,8 +9530,14 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
       }
     }
 
-    await db.$executeRawUnsafe(
-      `ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`,
+    // With every row in view: validating a foreign key checks the existing rows
+    // with one query under the tables' row-level security, so as nobody the
+    // referenced table read as empty (lib/data-plane/as-owner.ts).
+    const { asWorkspaceOwner } = await import('@/lib/data-plane/as-owner')
+    await asWorkspaceOwner(
+      db,
+      (tx) => tx.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`),
+      { timeoutMs: CONSTRAINT_SCAN_TIMEOUT_MS },
     )
 
     return {
@@ -9540,14 +9550,20 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
   } catch (err: any) {
     // The error IS the finding. PostgreSQL names the violating row, and
     // flattening that into a generic failure would throw away the one piece of
-    // information the owner needs.
+    // information the owner needs. Its own words, not Prisma's wrapper.
+    const { postgresWords, refusedByExistingRows } = await import('@/lib/db/existing-rows')
+    const reason = postgresWords(err)
+    if (!refusedByExistingRows(err)) {
+      return { success: false, message: `"${constraintName}" could not be validated on "${tableName}": ${reason}`, error: reason }
+    }
     return {
       success: false,
       message:
         `"${constraintName}" could not be validated on "${tableName}" because the existing data ` +
-        `does not satisfy it: ${err.message}. The constraint is still in place for new rows; the ` +
+        `does not satisfy it: ${reason}. The constraint is still in place for new rows; the ` +
         `rows already there need fixing before it can be validated.`,
-      error: err.message,
+      error: reason,
+      code: 'EXISTING_ROWS_VIOLATE',
     }
   }
 }
@@ -9947,8 +9963,8 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           `Cannot create a unique index on ${tableName} (${columns.join(', ')}) — the table already ` +
           `contains duplicate rows for that combination. Find them with run_query: ` +
           `SELECT ${columns.join(', ')}, count(*) FROM ${tableName} GROUP BY ${columns.join(', ')} HAVING count(*) > 1. ` +
-          `Original error: ${error.message}`,
-        error: error.message,
+          `PostgreSQL: ${postgresWords(error)}`,
+        error: postgresWords(error),
         code: 'DUPLICATE_ROWS',
       }
     }
@@ -10378,9 +10394,24 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts).
         const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
         await ensureReferencedAuthUsersTable(projectId, fk.table, schema)
-        await db.$executeRawUnsafe(sql)
+        // With every row in view: PostgreSQL checks a key added to existing rows
+        // with one query under the tables' row-level security, so as nobody the
+        // referenced table read as empty (lib/data-plane/as-owner.ts).
+        const { asWorkspaceOwner } = await import('@/lib/data-plane/as-owner')
+        await asWorkspaceOwner(db, (tx) => tx.$executeRawUnsafe(sql), { timeoutMs: CONSTRAINT_SCAN_TIMEOUT_MS })
       } catch (err: any) {
-        const reason = err?.meta?.message ?? err?.message ?? String(err)
+        const { postgresWords, refusedByExistingRows } = await import('@/lib/db/existing-rows')
+        const reason = postgresWords(err)
+        if (refusedByExistingRows(err)) {
+          return {
+            success: false,
+            message:
+              `Some rows in ${tableName} have a ${columnName} that matches no row in ${describeTarget(fk)}, so the ` +
+              `foreign key was not added and nothing changed. Correct or remove those rows first (PostgreSQL: ${reason}).`,
+            error: reason,
+            code: 'EXISTING_ROWS_VIOLATE',
+          }
+        }
         return {
           success: false,
           message: `The foreign key ${tableName}.${columnName} → ${describeTarget(fk)} was not added: ${reason}`,
@@ -10401,7 +10432,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     const r = await repairForeignKeyColumn(projectId, tableName, columnName, target)
     return r.success
       ? { success: true, message: `✅ ${r.message}`, data: { tableName, columnName, referencedTable: r.referencedTable } }
-      : { success: false, message: r.message, error: r.message, code: 'FK_FAILED' }
+      : { success: false, message: r.message, error: r.message, code: r.code ?? 'FK_FAILED' }
   }
 
   if (!tableName || (!constraintDefinition && !ct)) {
@@ -10764,8 +10795,8 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         message:
           `Cannot add this constraint to ${tableName} — existing rows already violate it, so PostgreSQL ` +
           `rejected it and nothing was applied. Find the offending rows with run_query, fix or delete them, ` +
-          `then retry. Original error: ${error.message}`,
-        error: error.message,
+          `then send it again. PostgreSQL: ${postgresWords(error)}`,
+        error: postgresWords(error),
         code: 'EXISTING_ROWS_VIOLATE',
       }
     }
