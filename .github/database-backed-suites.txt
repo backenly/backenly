@@ -2362,3 +2362,8 @@ tests/integration/check-accounts-are-removed.spec.ts
 # mistyped provider) answers 404 ROUTE_NOT_FOUND with the auth routes there
 # are, GET /auth/me included, from the runtime and from Next. Real runtime.
 tests/integration/unknown-auth-paths.spec.ts
+# The AI credits Usage and MCP show are the ones the credit gate counts: the
+# plan's plus bonus and bought credits, with what is left, and the gate agrees
+# with the number shown. Real account_ai_usage rows, description, gate and MCP
+# usage summary; the Cloud provider's plan and balances are stood in.
+tests/integration/ai-credits-allowance.spec.ts

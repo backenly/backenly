@@ -83,12 +83,24 @@ interface AxisDescription {
   measuredAt?: string | null
 }
 
+/** AI credits with every part the credit gate counts (lib/entitlements/policy.ts AiCreditAllowance). */
+export interface AiCredits {
+  used: number
+  plan: number
+  bonus: number
+  purchased: number
+  cap: number
+  left: number
+}
+
 interface AccountUsage {
   period: string
   /** The plan as it is sold ("Pro"). */
   planName: string
   /** The plan's code (BUILDER): what overage is decided on. */
   planCode: string
+  /** Absent from an older server, null where credits are not capped. */
+  aiCredits?: AiCredits | null
   overage: {
     mode: 'off' | 'shadow' | 'enforce' | null
     /** The limit in force: the owner's, up to what is prepaid. */
@@ -190,12 +202,32 @@ function quotaOf(a: AxisDescription, cycleLastDay: string, now: number): Quota {
 }
 
 /**
- * AI credits, against the plan's monthly amount. Bonus and bought credits are
- * spent after the plan's (lib/entitlements/policy.ts), so usage past the
- * plan's amount is not by itself a refusal: the row says only what is known,
- * that the plan's credits are used up.
+ * AI credits, against everything the account has this month: the plan's
+ * credits plus bonus and bought ones, the numbers the credit gate itself
+ * counts (GET /api/usage/account, aiCredits). The row used to read "575 of
+ * 200" against the plan's alone while the gate, which counts the other two,
+ * still let calls through (production QA re-test, 2026-11-16, #98).
+ *
+ * Without those numbers (an older server) it falls back to the plan's amount,
+ * and then says only what is known, that the plan's credits are used up.
  */
-function aiCreditsQuota(usage: BillingUsage): Quota {
+export function aiCreditsQuota(usage: BillingUsage, credits?: AiCredits | null): Quota {
+  if (credits) {
+    const extra = [
+      credits.bonus > 0 ? `${fmtCount(credits.bonus)} bonus` : null,
+      credits.purchased > 0 ? `${fmtCount(credits.purchased)} bought` : null,
+    ].filter(Boolean)
+    let tone: Tone = 'normal'
+    let fact = extra.length > 0 ? `${fmtCount(credits.plan)} plan + ${extra.join(' + ')}` : 'Typed MCP tools never use credits'
+    if (credits.cap > 0 && credits.used >= credits.cap) {
+      tone = 'over'
+      fact = 'All credits used'
+    } else if (credits.cap > 0 && credits.used / credits.cap >= 0.9) {
+      tone = 'warn'
+      fact = `${Math.floor((credits.used / credits.cap) * 100)}% used`
+    }
+    return { key: 'ai', label: 'AI credits', used: credits.used, included: credits.cap, format: fmtCount, tone, fact }
+  }
   const included = usage.monthlyAiCredits
   const used = usage.aiCreditsUsed
   let tone: Tone = 'normal'
@@ -567,7 +599,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
     const byAxis = new Map(data.account.axes.map((a) => [a.axis, a]))
     const known = AXIS_ORDER.flatMap((axis) => (byAxis.has(axis) ? [quotaOf(byAxis.get(axis)!, cycleLastDay, now)] : []))
     const others = data.account.axes.filter((a) => !AXIS_ORDER.includes(a.axis)).map((a) => quotaOf(a, cycleLastDay, now))
-    return [...known, ...others, aiCreditsQuota(data.usage)]
+    return [...known, ...others, aiCreditsQuota(data.usage, data.account.aiCredits)]
   }, [data, cycleLastDay, now])
 
   const planName = data ? planDisplayName(data.usage.planName) : null
