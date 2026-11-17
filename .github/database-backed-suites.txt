@@ -2419,3 +2419,6 @@ tests/integration/dashboard-assistant-answers-free.spec.ts
 # delete() sets deleted_at; a DELETE on /db or /api/v2 removes the row (#22).
 # Real provisioned project, real executor, migrations and guide.
 tests/integration/receipts-say-what-delete-does.spec.ts
+# An approval card says a deleted function, schedule or trigger can be undone
+# when History restores it, and that what nothing keeps cannot. Real rows.
+tests/integration/approval-cards-know-what-history-restores.spec.ts
