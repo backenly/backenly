@@ -533,14 +533,28 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
   if (branch) await dropBranchSchema(projectId, branch.schemaName).catch((e: any) =>
     console.warn(`[Branch] could not drop merged branch schema ${branch.schemaName}:`, e?.message))
   await audit(projectId, userId, 'BRANCH_MERGED', { branch: d.branch, applied: replay.applied.length, replayed: true })
+  const { tablesCreated } = await import('./migrate')
+  const realtime = await newTablesRealtime(projectId, tablesCreated(d.migrations))
   return {
     ok: true as const,
     branch: d.branch,
     applied: replay.applied.map((s) => `Applied to production: ${s}`),
     review: [] as string[],
     fullyMerged: true,
+    ...(realtime ? { realtime } : {}),
     ...recorded,
   }
+}
+
+/**
+ * What a merge's new tables mean for realtime: none streams until realtime is
+ * turned on for it by name, and the merge says so when other tables stream
+ * (lib/services/realtimeTriggers.ts, realtimeForNewTables).
+ */
+async function newTablesRealtime(projectId: string, created: string[]) {
+  if (created.length === 0) return null
+  const { realtimeForNewTables } = await import('@/lib/services/realtimeTriggers')
+  return realtimeForNewTables(projectId, created).catch(() => null)
 }
 
 /**
@@ -550,6 +564,7 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
 async function legacyAdditiveMerge(projectId: string, userId: string, branchId: string, d: BranchDiff) {
   const applied: string[] = []
   const review: string[] = []
+  const created: string[] = []
 
   // Additive: new tables go to main through the governed kernel.
   for (const t of d.diff.addedTables) {
@@ -577,6 +592,7 @@ async function legacyAdditiveMerge(projectId: string, userId: string, branchId: 
       review.push(`Table "${t.tableName}" could not be created: ${result.error ?? 'unknown'} — bring it over via chat`)
     } else {
       applied.push(`Created table "${t.tableName}" (${columns.length} columns) with generated APIs`)
+      created.push(t.tableName)
     }
   }
 
@@ -600,7 +616,8 @@ async function legacyAdditiveMerge(projectId: string, userId: string, branchId: 
   await audit(projectId, userId, 'BRANCH_MERGED', {
     branch: d.branch, applied: applied.length, review: review.length,
   })
-  return { ok: true as const, branch: d.branch, applied, review, fullyMerged: review.length === 0 }
+  const realtime = await newTablesRealtime(projectId, created)
+  return { ok: true as const, branch: d.branch, applied, review, fullyMerged: review.length === 0, ...(realtime ? { realtime } : {}) }
 }
 
 export async function discardBranch(projectId: string, userId: string, branchId: string) {

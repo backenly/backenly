@@ -1113,7 +1113,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
     }),
   fn('adopt_external_schema',
-    "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS + realtime), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
+    "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
     {}),
   // ── Read tools (live state of every section) ──────────────────────────────
   fn('run_query',
@@ -2827,9 +2827,11 @@ export async function dispatchTool(
         const review = r.review?.length
           ? ` ${r.review.length} change(s) need the governed path rather than an automatic apply — a merge never reshapes a live column silently:\n  • ${r.review.join('\n  • ')}`
           : ''
+        // A table the merge made does not stream until realtime is turned on for it.
+        const realtime = r.realtime?.note ? `\n${r.realtime.note}` : ''
         return finalize({
           ok: true,
-          summary: `Merge of "${r.branch}" ${r.fullyMerged ? 'complete' : 'partial'}. ${applied}${review}`,
+          summary: `Merge of "${r.branch}" ${r.fullyMerged ? 'complete' : 'partial'}. ${applied}${review}${realtime}`,
           data: r,
         })
       }
