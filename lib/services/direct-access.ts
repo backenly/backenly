@@ -42,11 +42,11 @@ import {
   workspaceRawClient,
 } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
 import { rotateProjectChannel } from '@/lib/realtime/channels'
-import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 
 export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 

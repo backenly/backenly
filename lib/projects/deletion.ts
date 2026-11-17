@@ -12,13 +12,16 @@
  *   stopped   the project is paused with reason 'deleted', through the pause
  *             columns every runtime door already refuses on, in its own region
  *             too (they are in the authorization projection). Its webhooks
- *             stop, and its direct Postgres logins cannot log in
- *             (lib/projects/paused-logins.ts). Nothing is dropped.
+ *             stop. Nothing is dropped.
  *   restored  until then, an admin restores it from the Projects page
  *             (restoreDeletedProject): both dates cleared, the deletion pause
  *             lifted, back in the list and serving, if the plan has room for it.
  *   purged    the daily purge (instrumentation.ts) runs the full deletion,
  *             deleteProjectCompletely, for every project past `purgeAfter`.
+ *
+ * Its direct Postgres logins stop when the deletion is asked for and come back
+ * with their passwords when the project is restored, as for a pause
+ * (lib/projects/paused-logins.ts).
  *
  * Neon keeps a deleted project restorable for 7 days the same way. A project an
  * import made and never finished is purged at once, as before: nothing in it was
@@ -29,13 +32,13 @@
  * calls); it shares the columns and the lock so the two can never interleave.
  */
 import { prisma } from '@/lib/db/prisma'
+import { restoreDirectLogins, stopDirectLogins } from './paused-logins'
 import { discardOutbox } from '@/lib/webhooks/capture'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { cancelPendingDeliveries, withProjectLifecycleLock, type LifecycleActor } from './pause-lifecycle'
 import { DELETED_PAUSE_REASON, invalidateProjectServingState } from './serving-state'
 import { deleteProjectCompletely } from './delete'
-import { restoreDirectLogins, stopDirectLogins } from './paused-logins'
 
 /** How long a deleted project is kept before it is removed for good. */
 export const DELETION_GRACE_DAYS = 7
