@@ -54,6 +54,12 @@ tests/integration/direct-postgres-only-where-reachable.spec.ts
 tests/integration/direct-postgres-allowed-addresses.spec.ts
 tests/integration/direct-postgres-allowed-addresses-history.spec.ts
 tests/integration/direct-postgres-allowlist-sync.spec.ts
+
+# Where the endpoint fronts RDS, each login has a libpq string (verify-full
+# through hostaddr) and one for every other client (verify-ca), both naming the
+# published RDS CA bundle; each login holds its plan's connections at once,
+# set at creation and at every read of its credentials, enforced by Postgres.
+tests/integration/direct-postgres-verified-strings-and-limits.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts

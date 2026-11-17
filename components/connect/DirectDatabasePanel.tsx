@@ -5,11 +5,20 @@
  *
  *   Logins
  *   Read-only                                                                 ⋯
+ *   For psql, pg_dump and other libpq tools
+ *   [postgresql://bkn_ro_edc2…:•••@<instance>:5432/backenly?hostaddr=…  ◉ Copy]
+ *   For every other client
  *   [postgresql://bkn_ro_edc2…:•••@<DIRECT_DB_HOST>:5432/backenly…     ◉ Copy]
  *   bkn_ro_edc2173ce55c   Created Nov 11       Copy psql command  Copy pg_dump command
  *   Read-write                                                    [Create login]
  *   Reads and writes rows. Schema changes are refused unless you allow them.
- *   Each login reaches only this project's schema, over TLS. …
+ *   Each login reaches only this project's schema, over TLS, with up to 2
+ *   connections at once. …
+ *   The strings check the server's certificate against Backenly's CA bundle.
+ *   Download rds-ca-cloud-regions.pem …
+ *
+ *   The two strings are where the region's endpoint fronts its RDS instance
+ *   (lib/services/direct-access.ts); elsewhere there is one, as before.
  *
  *   Where the region has no developer-facing host (status.available false),
  *   one sentence says direct connections aren't available there, no login is
@@ -70,6 +79,9 @@ interface Credential {
   port: number
   database: string
   connectionString: string
+  /** Where the region's endpoint fronts RDS: the string for clients that are not libpq. */
+  otherClientsConnectionString?: string
+  caBundle?: { file: string; url: string }
   psqlCommand: string
   pgDumpCommand: string
   createdAt: string
@@ -106,6 +118,8 @@ interface Status {
   logins?: Array<{ mode: Mode; roleName: string; createdAt: string; rotatedAt: string | null }>
   allowlist?: Allowlist
   you?: CallerAddress | null
+  /** Connections each login may hold at once, by the plan. */
+  connectionLimit?: number | null
   pendingDriftEvents: number
 }
 
@@ -136,16 +150,24 @@ function saveFile(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-function masked(c: Credential): string {
-  return c.connectionString.replace(`:${c.password}@`, ':••••••••@')
+function masked(value: string, password: string): string {
+  return value.replace(`:${password}@`, ':••••••••@')
 }
 
-/** The connection string, masked until shown; Copy always copies the real one. */
-function ConnectionString({ c }: { c: Credential }) {
+/** A connection string, masked until shown; Copy always copies the real one. */
+function ConnectionString({
+  value,
+  password,
+  copyLabel = 'Copy connection string',
+}: {
+  value: string
+  password: string
+  copyLabel?: string
+}) {
   const [shown, setShown] = useState(false)
   return (
     <div className={`mt-[10px] flex h-[34px] min-w-0 items-center gap-[4px] ${WELL} border ${EDGE} ${R_CONTROL} pl-[12px] pr-[4px]`}>
-      <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-300">{shown ? c.connectionString : masked(c)}</code>
+      <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-300">{shown ? value : masked(value, password)}</code>
       <button
         type="button"
         onClick={() => setShown((s) => !s)}
@@ -156,7 +178,7 @@ function ConnectionString({ c }: { c: Credential }) {
       >
         {shown ? <EyeOff className="h-3.5 w-3.5" strokeWidth={1.75} /> : <Eye className="h-3.5 w-3.5" strokeWidth={1.75} />}
       </button>
-      <CopyButton value={c.connectionString} label="Copy connection string" />
+      <CopyButton value={value} label={copyLabel} />
     </div>
   )
 }
@@ -541,7 +563,20 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
           <p className={`!mt-[4px] ${ROW_TEXT}`}>{LOGIN_BODY[mode]}</p>
         ) : (
           <>
-            <ConnectionString c={c} />
+            {c.otherClientsConnectionString ? (
+              <>
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For psql, pg_dump and other libpq tools</p>
+                <ConnectionString value={c.connectionString} password={c.password} />
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For every other client</p>
+                <ConnectionString
+                  value={c.otherClientsConnectionString}
+                  password={c.password}
+                  copyLabel="Copy the connection string for other clients"
+                />
+              </>
+            ) : (
+              <ConnectionString value={c.connectionString} password={c.password} />
+            )}
             <div className="mt-[8px] flex flex-wrap items-center justify-between gap-x-[16px] gap-y-[6px]">
               <span className="flex flex-wrap items-center gap-x-[16px] gap-y-[4px] text-[12px] leading-[16px] text-faint">
                 <code className="font-mono text-[11.5px] text-zinc-400">{c.roleName}</code>
@@ -634,6 +669,7 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
   )
 
   const allowlist = status?.available !== false && status?.allowlist?.enforced ? status.allowlist : null
+  const caBundle = status?.available !== false ? status?.credentials.find((c) => c.caBundle)?.caBundle ?? null : null
 
   return (
     <div className="space-y-[36px]">
@@ -669,8 +705,23 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
         </Panel>
         {status?.available !== false && (
           <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
-            Each login reaches only this project&apos;s schema, over TLS. Every change to a login is recorded; rotate at once if a
-            connection string leaks.
+            Each login reaches only this project&apos;s schema, over TLS
+            {typeof status?.connectionLimit === 'number' &&
+              `, with up to ${status.connectionLimit} ${status.connectionLimit === 1 ? 'connection' : 'connections'} at once`}
+            . Every change to a login is recorded; rotate at once if a connection string leaks.
+          </p>
+        )}
+        {caBundle && (
+          <p className="mt-[6px] text-[12.5px] leading-[18px] text-faint">
+            The strings check the server&apos;s certificate against Backenly&apos;s CA bundle.{' '}
+            <a
+              href={caBundle.url}
+              download={caBundle.file}
+              className={`rounded-[3px] text-zinc-300 underline decoration-zinc-300/40 underline-offset-2 hover:text-zinc-50 ${FOCUS}`}
+            >
+              Download {caBundle.file}
+            </a>{' '}
+            and keep it in the folder you connect from, or give sslrootcert its full path.
           </p>
         )}
       </Section>

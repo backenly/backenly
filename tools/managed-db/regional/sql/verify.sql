@@ -139,6 +139,7 @@ BEGIN
       ('public.backenly_fn_role_retire(text)',                          true),
       ('public.backenly_direct_create_role(text,text,text,text)',       true),
       ('public.backenly_direct_set_password(text,text)',                true),
+      ('public.backenly_direct_set_connection_limit(text,integer)',     true),
       ('public.backenly_direct_drop_role(text)',                        true),
       ('public.backenly_direct_retire_role(text)',                      true),
       ('public.backenly_direct_sync_schema(text,text,text,text)',       true),

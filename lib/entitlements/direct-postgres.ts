@@ -4,8 +4,10 @@
  *
  * Every plan, Free included, gets direct connections (the Pricing page's
  * promise). What grows with the plan is how many addresses a project may let
- * connect: the database's network allowlist holds the union of every project's
- * addresses in a region, so each entry is a rule on a shared endpoint.
+ * connect (the database's network allowlist holds the union of every project's
+ * addresses in a region, so each entry is a rule on a shared endpoint), and how
+ * many connections each of its logins may hold at once (every project in a
+ * region shares one Postgres, and its max_connections).
  *
  * Plans are named by code (lib/entitlements/plan-names.ts). A code this table
  * does not know, or an account with no plan at all, gets the Free allowance:
@@ -20,11 +22,13 @@ export interface DirectPostgresAllowance {
   planName: string
   /** Addresses a project may allow to connect. */
   allowedAddresses: number
+  /** Connections each of a project's logins may hold at once (Postgres CONNECTION LIMIT). */
+  connectionLimit: number
 }
 
-const FREE: Omit<DirectPostgresAllowance, 'planName'> = { allowedAddresses: 2 }
-const PRO: Omit<DirectPostgresAllowance, 'planName'> = { allowedAddresses: 10 }
-const ENTERPRISE: Omit<DirectPostgresAllowance, 'planName'> = { allowedAddresses: 50 }
+const FREE: Omit<DirectPostgresAllowance, 'planName'> = { allowedAddresses: 2, connectionLimit: 2 }
+const PRO: Omit<DirectPostgresAllowance, 'planName'> = { allowedAddresses: 10, connectionLimit: 5 }
+const ENTERPRISE: Omit<DirectPostgresAllowance, 'planName'> = { allowedAddresses: 50, connectionLimit: 20 }
 
 const BY_PLAN: Record<string, Omit<DirectPostgresAllowance, 'planName'>> = {
   SANDBOX: FREE,
