@@ -51,6 +51,8 @@ describe('the content type an answer on a data path is sent with', () => {
     ['application/xhtml+xml', 'text/plain'],
     ['image/svg+xml; charset=utf-8', 'text/plain; charset=utf-8'],
     ['text/xml', 'text/plain'],
+    // Chrome and Safari show text/xsl as an XML document, XHTML script and all.
+    ['text/xsl', 'text/plain'],
     ['application/xml', 'text/plain'],
     ['application/rss+xml', 'text/plain'],
     ['application/javascript', 'text/plain'],

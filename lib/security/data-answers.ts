@@ -41,14 +41,16 @@ const TOKEN = /^[!#$%&'*+.^_`|~0-9a-z-]+$/
 /**
  * Whether a browser shows a document of this type as a page or runs it as
  * script: HTML, the XML types (text/xml, application/xml and every +xml type,
- * XHTML and SVG among them), the JavaScript types, and multipart/x-mixed-replace,
- * whose parts are shown as documents.
+ * XHTML and SVG among them, and text/xsl, which Chrome and Safari show as XML),
+ * the JavaScript types, and multipart/x-mixed-replace, whose parts are shown as
+ * documents.
  */
 function showsAsPage(essence: string): boolean {
   const subtype = essence.slice(essence.indexOf('/') + 1)
   return (
     essence === 'text/html' ||
     subtype === 'xml' ||
+    essence === 'text/xsl' ||
     subtype.endsWith('+xml') ||
     SCRIPT_TYPES.has(essence) ||
     essence === 'multipart/x-mixed-replace'
