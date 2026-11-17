@@ -139,9 +139,10 @@ describe('a workspace that has enabled auth', () => {
     await purgeSyntheticAuthArtifacts(populatedProjectId)
 
     const after = await prisma.$queryRawUnsafe<Array<{ email: string }>>(
-      `SELECT email FROM "${populatedSchema}"."users" ORDER BY email`
+      `SELECT email FROM "${populatedSchema}"."users"`
     )
-    // The check account is gone; the real ones are untouched.
-    expect(after.map(r => r.email)).toEqual(['ana@corp.internal', 'real@example.test'])
+    // The check account is gone; the real ones are untouched. Sorted here, not
+    // by ORDER BY, so the database's collation cannot change the order.
+    expect(after.map(r => r.email).sort()).toEqual(['ana@corp.internal', 'real@example.test'])
   }, 60_000)
 })
