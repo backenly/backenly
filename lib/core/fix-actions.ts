@@ -558,6 +558,25 @@ export function getManualRemediationHint(
       )
     }
 
+    // A table anyone with the publishable key can read in full, holding
+    // columns named like credentials or personal data
+    // (drift-detector.ts detectSensitiveColumnsAnyoneCanRead). Nothing to
+    // repair on Backenly's side: the hint is what to ask for.
+    case 'sensitive_columns_exposed': {
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      const cols = Array.isArray(details?.columnNames)
+        ? (details!.columnNames as unknown[]).filter((c): c is string => typeof c === 'string')
+        : []
+      const which = cols.length ? cols.join(', ') : 'columns named like credentials or personal data'
+      return (
+        `Anyone with your publishable key, which ships in your frontend, can read every row of "${t}", ` +
+        `including ${which}. If those rows should be private, tell your coding agent, for example: set_rls ` +
+        `on ${t} so a row is visible only to the signed-in user it belongs to, or so only your server (the ` +
+        `service role) reads it. If the table is meant to be public, keep ${which} out of it. Backenly will ` +
+        'not change who can read it on its own.'
+      )
+    }
+
     case 'architecture_evolution': {
       const ev = (details?.evolution ?? {}) as { summary?: { change?: string; reason?: string } }
       return (
@@ -747,6 +766,19 @@ If the column is deliberately different now, tell your coding agent to rebuild i
     case 'rls_denies_everything': {
       if (details?.rlsBasis !== 'undecidable') return null
       const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      // An always-true write policy on a table with no owner column
+      // (drift-detector.ts detectOverPermissiveRls). RLS is on; the question is
+      // who may change rows, which only the owner can answer.
+      if (details?.openWrites === true) {
+        const policy = typeof details?.policyName === 'string' ? `"${details.policyName}"` : 'A policy'
+        const cmd = typeof details?.policyCommand === 'string' ? details.policyCommand : 'change'
+        return (
+          `${policy} lets anyone it covers ${cmd} any row of "${t}": its condition is always true. ` +
+          `No column on "${t}" says whose a row is, so Backenly will not choose who may. Tell your coding ` +
+          `agent who should, for example: set_rls on ${t} so only your server (the service role) changes ` +
+          `rows, or so a row can be changed when <column> equals the signed-in user. If anyone should, dismiss this.`
+        )
+      }
       const rationale = typeof details?.rlsRationale === 'string' ? ` ${details.rlsRationale}` : ''
       return (
         `Backenly will not enable row-level security on "${t}" until it knows who owns a row, ` +

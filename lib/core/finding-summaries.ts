@@ -327,6 +327,16 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
     }
   }
 
+  if (type === 'sensitive_columns_exposed') {
+    const cols = Array.isArray(details?.columnNames)
+      ? (details!.columnNames as unknown[]).filter((c): c is string => typeof c === 'string')
+      : []
+    const t = (details?.tableName as string | undefined) ?? 'a table'
+    return cols.length
+      ? `Anyone with the publishable key can read ${cols.join(', ')} in \`${t}\``
+      : `Anyone with the publishable key can read sensitive columns in \`${t}\``
+  }
+
   if (type === 'service_role_key_exposed') {
     const name = (details?.keyName as string | undefined) ?? 'A service-role key'
     return `Blocked: the key "${name}" bypasses all row security and is being called from a browser — rotate it and use a client key there`
