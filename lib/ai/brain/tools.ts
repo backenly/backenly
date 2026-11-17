@@ -4222,6 +4222,12 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
 function withProvenance(diagnosis: unknown): unknown {
   if (!diagnosis || typeof diagnosis !== 'object' || Array.isArray(diagnosis)) return diagnosis
   const d = diagnosis as Record<string, unknown>
+  // A hypothesis that failed the investigator's own checks is not passed on as
+  // one: only that an investigation ran and what it got wrong.
+  const validation = d.validation as { ok?: unknown; problems?: unknown } | undefined
+  if (validation && validation.ok === false) {
+    return { provenance: 'ai_hypothesis', verdict: 'uncertain', failedChecks: validation.problems ?? [], at: d.at }
+  }
   return {
     ...d,
     provenance: d.model === 'deterministic-investigation' ? 'investigation' : 'ai_hypothesis',
