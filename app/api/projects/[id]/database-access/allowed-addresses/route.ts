@@ -2,7 +2,7 @@
  * The addresses this project's direct Postgres logins may connect from.
  *
  *   GET    /api/projects/[id]/database-access/allowed-addresses
- *          { enforced, addresses: [{ cidr, createdAt }], limit, planName, you }
+ *          { enforced, addresses: [{ cidr, createdAt, admitted }], limit, planCode, planName, you }
  *   POST   /api/projects/[id]/database-access/allowed-addresses
  *          { address: "203.0.113.7" | "203.0.113.0/24" } or { mine: true }
  *   DELETE /api/projects/[id]/database-access/allowed-addresses?address=203.0.113.7/32

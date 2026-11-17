@@ -54,6 +54,8 @@ export interface AllowlistState {
   addresses: Array<AllowedAddress & { admitted: boolean }>
   /** How many the project's plan allows. */
   limit: number
+  /** The plan's code (SANDBOX, BUILDER…): sentences name it through planDisplayName, as #800's usage does. */
+  planCode: string
   /** The plan, as it is sold. */
   planName: string
   /** Where some address is not admitted: what to do about it, in a sentence. */
@@ -77,15 +79,17 @@ export async function allowlistState(projectId: string): Promise<AllowlistState>
     directPostgresAllowanceFor(projectId),
   ])
   const limit = allowance.allowedAddresses
-  const planName = planDisplayName(allowance.planName)
   // The same rule, and the same order, as the region's list (allowedAddressesIn).
   const admitted = new Set(admittedAddresses(addresses, limit).map((a) => a.cidr))
   return {
     enforced: allowlistEnforced(region),
     addresses: addresses.map((a) => ({ ...a, admitted: admitted.has(a.cidr) })),
     limit,
-    planName,
-    ...(addresses.length > limit ? { notAdmitted: `Not admitted on the ${planName} plan: remove one${moreOnAnotherPlan(limit)}.` } : {}),
+    planCode: allowance.planName,
+    planName: planDisplayName(allowance.planName),
+    ...(addresses.length > limit
+      ? { notAdmitted: `Not admitted on the ${planDisplayName(allowance.planName)} plan: remove one${moreOnAnotherPlan(limit)}.` }
+      : {}),
   }
 }
 
@@ -94,7 +98,7 @@ export function notAdmittedLine(list: AllowlistState): string | null {
   const over = list.addresses.filter((a) => !a.admitted).map((a) => a.cidr)
   if (over.length === 0) return null
   return (
-    `${over.join(', ')} ${over.length === 1 ? 'is' : 'are'} not admitted: the ${list.planName} plan includes ${list.limit} ` +
+    `${over.join(', ')} ${over.length === 1 ? 'is' : 'are'} not admitted: the ${planDisplayName(list.planCode)} plan includes ${list.limit} ` +
     `${list.limit === 1 ? 'address' : 'addresses'} and this project allows ${list.addresses.length}. Remove one${moreOnAnotherPlan(list.limit)}.`
   )
 }

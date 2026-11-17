@@ -50,7 +50,7 @@ function status(addresses: Array<{ cidr: string; createdAt: string; admitted?: b
     schema: 'workspace_p1',
     available: true,
     credentials: [LOGIN],
-    allowlist: { enforced, addresses: addresses.map((a) => ({ admitted: true, ...a })), limit: 2, planName: 'Free', ...(notAdmitted ? { notAdmitted } : {}) },
+    allowlist: { enforced, addresses: addresses.map((a) => ({ admitted: true, ...a })), limit: 2, planCode: 'SANDBOX', planName: 'Free', ...(notAdmitted ? { notAdmitted } : {}) },
     you: { address: '198.51.100.23', allowable: true },
     pendingDriftEvents: 0,
   }
