@@ -38,9 +38,15 @@ async function addUser(email: string, minutesAgo: number): Promise<void> {
   )
 }
 
+/**
+ * The users table's addresses, sorted here by code point. An ORDER BY would
+ * follow the database's collation: with en_US.UTF-8, as on CI, the underscore
+ * is ignored at first and `ana@…` comes before `__cv_…`, while a C cluster
+ * puts `__cv_…` first.
+ */
 async function emails(): Promise<string[]> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ email: string }>>(`SELECT email FROM ${users()} ORDER BY email`)
-  return rows.map((r) => r.email)
+  const rows = await prisma.$queryRawUnsafe<Array<{ email: string }>>(`SELECT email FROM ${users()}`)
+  return rows.map((r) => r.email).sort()
 }
 
 beforeAll(async () => {
