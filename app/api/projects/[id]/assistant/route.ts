@@ -6,9 +6,11 @@
  * no tools, no mutations — build/change requests are redirected to the MCP
  * door (Connect) or the Database UI by the system prompt.
  *
- * Free by design: questions never consume assistant credits (the same rule
- * lib/billing enforces everywhere), so the only gate is the per-user rate
- * limit. History is client-held; nothing is persisted here.
+ * Free, as the Pricing page says ("The dashboard assistant answers questions
+ * free"): the platform pays for its model call, so it never holds or spends
+ * the account's AI credits and still answers when they are used up. What
+ * bounds it is the per-user rate limit and the platform's own monthly AI
+ * budget. History is client-held; nothing is persisted here.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -116,6 +118,11 @@ export async function POST(request: NextRequest) {
             messages: [{ role: 'system', content: assistantPrompt(projectContext) }, ...messages],
             maxTokens: 1024,
             onText: (delta) => controller.enqueue(encoder.encode(delta)),
+            // The platform pays. Customer-paid by default (brain.answer), the
+            // call was refused once the account's credits were used up, so the
+            // free assistant stopped answering (production QA re-test,
+            // 2026-11-16, #98). The project is still named, for its usage row.
+            payer: 'platform',
             billing: { projectId },
             label: 'assistant',
           })
