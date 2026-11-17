@@ -23,6 +23,7 @@ import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { publicOrigin } from '@/lib/branches/preview'
 import type { BuildBranch } from '@/lib/branches/build-branch'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
+import { currentDiagnosis } from '@/lib/autonomy/finding-fingerprint'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
 const ACTOR_AUDITED_ACTIONS = new Set<string>(['TRIGGER_DEPLOY', 'ROLLBACK_DEPLOY'])
@@ -3571,7 +3572,8 @@ export async function dispatchTool(
           status: f.status,
           detectedAt: f.detectedAt.toISOString(),
           summary: summariseFinding(f.type, f.details as Record<string, unknown>),
-          diagnosis: withProvenance(((f.details ?? {}) as Record<string, unknown>).diagnosis),
+          // Only a diagnosis made from the evidence the finding carries now.
+          diagnosis: withProvenance(currentDiagnosis(f.type, (f.details ?? {}) as Record<string, unknown>)),
         }))
       // A repair is "fixed" only when a re-check confirmed it. The rest ran
       // without confirmation and are reported as exactly that.

@@ -954,15 +954,30 @@ async function writeFinding(
     .map((key) => ({ key, value: (finding.details as Record<string, unknown>)[key] as string | undefined }))
   const keyed = discriminator.length > 0 && discriminator.every((d) => d.value !== undefined)
 
-  const existing = await prisma.healthFinding.findFirst({
-    where: {
-      projectId,
-      type: finding.type,
-      status: { in: ['open', 'pending_approval'] },
-      ...(keyed ? { AND: discriminator.map((d) => ({ details: { path: [d.key], equals: d.value as string } })) } : {}),
-    },
-    select: { id: true, status: true, details: true },
-  })
+  const live = { projectId, type: finding.type, status: { in: ['open', 'pending_approval'] } }
+  const select = { id: true, status: true, details: true } as const
+  // Every other type: the row for this gap, as the repair loop and the reaper
+  // identify it (gapIdentity, lib/autonomy/desired-state.ts). Keyed by type
+  // alone, each `missing_fk` gap (and each orphan table, each broken webhook…)
+  // was written over the one open row of its type: on a row waiting for a
+  // person the new details were merged over the old, so a card titled "orders
+  // has a relation with no foreign key constraint" kept the explanation written
+  // about reviews.user_id (production QA, 2026-11-16). Imported lazily:
+  // desired-state imports this module.
+  const existing = keyed || DISCRIMINATOR[finding.type]
+    ? await prisma.healthFinding.findFirst({
+        where: {
+          ...live,
+          ...(keyed ? { AND: discriminator.map((d) => ({ details: { path: [d.key], equals: d.value as string } })) } : {}),
+        },
+        select,
+      })
+    : await (async () => {
+        const { gapIdentity } = await import('@/lib/autonomy/desired-state')
+        const gap = gapIdentity(finding.type, finding.details as Record<string, unknown>)
+        const rows = await prisma.healthFinding.findMany({ where: live, select, orderBy: { detectedAt: 'desc' } })
+        return rows.find((r) => gapIdentity(finding.type, (r.details ?? {}) as Record<string, unknown>) === gap) ?? null
+      })()
 
   // `detectedAt` moves on every write, so it cannot say how long a problem
   // has persisted. `firstDetectedAt` is carried across updates for that: it is

@@ -639,6 +639,10 @@ export function gapIdentity(
     // table too, so by table two functions on `orders` were one gap: while
     // one kept failing, the other's finding outlived its recovery.
     (d.functionId as string | undefined) ??
+    // A broken webhook is located by its TRIGGER and carries no table: two
+    // triggers failing were one gap, so the observer's writer, which keys its
+    // rows by this identity, kept one row for both.
+    (d.triggerId as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`
