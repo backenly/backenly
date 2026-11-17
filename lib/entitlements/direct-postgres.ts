@@ -14,8 +14,11 @@
  * the smallest, never the largest. A self-hosted deployment is one project on
  * its operator's own database, and gets the largest.
  */
-import { getAccountEntitlements } from './index'
-import { billingAccountOf } from '@/lib/usage/account'
+// No static import of './index' or the usage account: lib/entitlements/index.ts
+// loads the edition modules, which reach this file through project
+// provisioning (lib/services/direct-access.ts), so a static import closes an
+// import cycle that fails whichever module is evaluated first. Both are loaded
+// when an allowance is read (directPostgresAllowanceFor).
 
 export interface DirectPostgresAllowance {
   /** The plan code the allowance was read for ('SANDBOX' when none could be read). */
@@ -62,6 +65,10 @@ export function directPostgresAllowance(planName: string | null | undefined): Di
  */
 export async function directPostgresAllowanceFor(projectId: string): Promise<DirectPostgresAllowance> {
   try {
+    const [{ billingAccountOf }, { getAccountEntitlements }] = await Promise.all([
+      import('@/lib/usage/account'),
+      import('./index'),
+    ])
     const account = await billingAccountOf(projectId)
     const ent = account ? await getAccountEntitlements(account) : null
     return directPostgresAllowance(ent?.planName)
