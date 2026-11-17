@@ -486,7 +486,40 @@ function heldBecauseFor(
     return { kind: 'guardrail', text: classification.reason }
   }
 
+  // An automatic repair the authority decision held for a person
+  // (lib/core/auto-fix-engine.ts, heldByAuthority): what held it, in words.
+  const held = det.heldByAuthority as { narrowings?: Array<{ code?: unknown; reason?: unknown }> } | undefined
+  const words = authorityHoldWords(held?.narrowings ?? [])
+  if (words) return { kind: 'guardrail', text: words }
+
   return { kind: 'held', text: 'Waiting for your review.' }
+}
+
+/**
+ * Narrowings whose sentence lib/authority/decision.ts already writes for the
+ * owner: what the repair would occupy, what happened to it before, who else is
+ * changing the table, what the deployment allows. Shown as written.
+ */
+const OWNER_WORDED = /^(storage_headroom|storage_unknown|table_too_large|build_size_unknown|build_not_online|recently_removed|prior_attempts_unknown|build_failed_repeatedly|recent_conflicting_change|deployment_.+)$/
+
+/** The rest name internals (probe ids, tiers, rollback strategies), so they are said plainly here. */
+function plainHoldWords(code: string): string {
+  if (code.startsWith('sensor_')) {
+    return 'The check that found this has not yet been seen working on this project, so Backenly does not apply the fix on that check alone.'
+  }
+  if (code.startsWith('tier_above_ceiling')) return 'Your autonomy mode keeps this kind of change for you.'
+  if (code === 'recovery_not_implemented') return 'Backenly could not undo this fix on its own if it went wrong, so it is yours to approve.'
+  if (code.startsWith('intent_')) return 'This changes who can read data, and nothing has told Backenly who should, so it is yours to approve.'
+  return 'Backenly could not establish on its own that this fix is safe to apply now, so it is yours to approve.'
+}
+
+/** What held an automatic repair, in the owner's words, or null when nothing did. */
+export function authorityHoldWords(narrowings: Array<{ code?: unknown; reason?: unknown }>): string | null {
+  const known = narrowings.filter((n): n is { code: string; reason?: unknown } => typeof n.code === 'string' && n.code.length > 0)
+  if (known.length === 0) return null
+  const worded = known.find((n) => OWNER_WORDED.test(n.code) && typeof n.reason === 'string' && n.reason.trim())
+  if (worded) return (worded.reason as string).trim()
+  return plainHoldWords(known[0].code)
 }
 
 export async function buildTrustReport(
