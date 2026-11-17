@@ -25,19 +25,20 @@ import { refuseMisplacedKey } from '@/lib/security/key-placement'
 import { isRegionError } from '@/lib/data-plane/regional'
 import { isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { misdirection } from '@/lib/data-plane/serving'
-import { FUNCTION_ANSWER_HEADERS, isFunctionAnswerPath } from '@/lib/services/ai-functions/reply'
+import { DATA_ANSWER_HEADERS, isDataAnswerPath } from '@/lib/security/data-answers'
 
 const app = express()
 
 // ── Security ───────────────────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }))
 
-// A function's answer is data for the app that called it, never a page of this
-// origin (lib/services/ai-functions/reply.ts). Every answer on a function's
-// path, Backenly's own errors included, carries the sandbox policy and nosniff.
+// A function's answer and the REST APIs' are data for the app that called
+// them, never a page of this origin (lib/security/data-answers.ts). Every
+// answer on those paths, Backenly's own errors included, carries the sandbox
+// policy and nosniff.
 app.use((req, res, next) => {
-  if (isFunctionAnswerPath(req.path)) {
-    for (const [name, value] of Object.entries(FUNCTION_ANSWER_HEADERS)) res.setHeader(name, value)
+  if (isDataAnswerPath(req.path)) {
+    for (const [name, value] of Object.entries(DATA_ANSWER_HEADERS)) res.setHeader(name, value)
   }
   next()
 })

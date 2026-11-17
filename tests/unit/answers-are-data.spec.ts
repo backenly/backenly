@@ -1,24 +1,27 @@
 /**
- * A FUNCTION'S ANSWER IS DATA, NEVER A PAGE OF THE PLATFORM'S ORIGIN
- * ==================================================================
+ * A FUNCTION'S ANSWER AND THE REST APIS' ARE DATA, NEVER A PAGE OF THE ORIGIN
+ * ============================================================================
  *
- * /api/v1/{projectId}/fn/{name} is served from Backenly's own origin, and a
- * function chooses its answer's content type. What it answers is data for the
- * app that called it, so:
+ * Three surfaces answer from Backenly's own origin with content a project
+ * chose: /api/v1/{projectId}/fn/{name}, where a function picks its answer's
+ * content type, and the REST APIs, /api/v1/{projectId}/db/… and
+ * /api/v2/{projectId}/…, where PostgREST answers in the media type the request
+ * asked for. So (lib/security/data-answers.ts):
  *
  *   - a type a browser shows as a page or runs as script (HTML, the XML types,
  *     XHTML and SVG among them, the JavaScript types) is sent as text/plain,
- *     with its charset; JSON, text and every other type as the function wrote
- *     them (functionAnswerType);
- *   - every answer on a function's path carries `X-Content-Type-Options:
- *     nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`,
- *     from the runtime (server/app.ts), the web server's forwarder
+ *     with its charset; JSON, text and every other type, PostgREST's own
+ *     among them, as written (dataAnswerType);
+ *   - every answer on those paths carries `X-Content-Type-Options: nosniff`
+ *     and `Content-Security-Policy: sandbox; default-src 'none'`, from the
+ *     runtime (server/app.ts), the web server's forwarder
  *     (lib/runtime/forward-to-runtime.ts) and next.config.js.
  *
  * The config's rules are matched here with Next's own loader and matcher
- * (tests/helpers/next-config-headers.ts). The full path through the runtime
- * and through Next's route and response code is
- * tests/integration/function-answers-are-data.spec.ts.
+ * (tests/helpers/next-config-headers.ts). The full paths through the runtime
+ * and through Next's middleware, route and response code are
+ * tests/integration/function-answers-are-data.spec.ts and
+ * tests/integration/rest-answers-are-data.spec.ts.
  */
 
 jest.mock('@sentry/nextjs', () => ({ withSentryConfig: (config: unknown) => config }))
@@ -27,13 +30,20 @@ import '@/tests/helpers/real-web-standard'
 
 import http from 'http'
 import type { AddressInfo } from 'net'
-import { answerHeaders, FUNCTION_ANSWER_HEADERS, functionAnswerType, isFunctionAnswerPath } from '@/lib/services/ai-functions/reply'
+import { answerHeaders } from '@/lib/services/ai-functions/reply'
+import {
+  DATA_ANSWER_HEADERS,
+  dataAnswerType,
+  isDataAnswerPath,
+  isFunctionAnswerPath,
+  isTableAnswerPath,
+} from '@/lib/security/data-answers'
 import { configHeadersFor, nextConfigHeaderRules, type HeaderRule } from '@/tests/helpers/next-config-headers'
 
 const P = '0b6f3c1e-1d2a-4c55-9a1e-7f2d3b4c5d6e'
 const SANDBOX = "sandbox; default-src 'none'"
 
-describe('the content type a function’s answer is sent with', () => {
+describe('the content type an answer on a data path is sent with', () => {
   it.each([
     ['text/html', 'text/plain'],
     ['text/html; charset=utf-8', 'text/plain; charset=utf-8'],
@@ -53,7 +63,7 @@ describe('the content type a function’s answer is sent with', () => {
     ['text/plain, text/html', 'text/plain'],
     ['', 'text/plain'],
   ])('sends %j as %j', (written, sent) => {
-    expect(functionAnswerType(written)).toBe(sent)
+    expect(dataAnswerType(written)).toBe(sent)
   })
 
   it.each([
@@ -67,11 +77,27 @@ describe('the content type a function’s answer is sent with', () => {
     'image/png',
     'application/pdf',
     'application/octet-stream',
-  ])('sends %j as the function wrote it', (type) => {
-    expect(functionAnswerType(type)).toBe(type)
+  ])('sends %j as written', (type) => {
+    expect(dataAnswerType(type)).toBe(type)
   })
 
-  it('applies to the answer’s headers, and keeps its caching', () => {
+  // What PostgREST itself answers with, on /api/v2.
+  it.each([
+    'application/json; charset=utf-8',
+    'application/geo+json; charset=utf-8',
+    'application/vnd.pgrst.object+json; charset=utf-8',
+    'application/vnd.pgrst.object+json;nulls=stripped',
+    'application/vnd.pgrst.array+json;nulls=stripped',
+    'application/vnd.pgrst.plan+json; for="application/json"; charset=utf-8',
+    'application/vnd.pgrst.plan+text; for="application/json"; charset=utf-8',
+    'text/csv; charset=utf-8',
+    'application/octet-stream',
+    'text/plain; charset=utf-8',
+  ])('sends PostgREST’s %j as written', (type) => {
+    expect(dataAnswerType(type)).toBe(type)
+  })
+
+  it('applies to a function answer’s headers, and keeps its caching', () => {
     expect(answerHeaders({ 'Content-Type': 'text/html', 'Cache-Control': 'no-store', 'Set-Cookie': 'a=b' })).toEqual({
       'content-type': 'text/plain',
       'cache-control': 'no-store',
@@ -90,45 +116,79 @@ const FUNCTION_PATHS = [
   '/api/v1/db/fn/report',
 ]
 
-const OTHER_PATHS = [
+const TABLE_PATHS = [
+  `/api/v1/${P}/db`,
   `/api/v1/${P}/db/orders`,
+  `/api/v1/${P}/db/orders/42`,
+  `/api/v1/${P}/DB/orders`,
+  `/api/v1/${P}/db/orders/vector-search`,
+  '/api/v1/db/orders',
+]
+
+const V2_PATHS = [
+  '/api/v2',
+  `/api/v2/${P}`,
+  `/api/v2/${P}/orders`,
+  `/api/v2/${P}/orders?select=*,author(*)`.split('?')[0],
+  `/api/v2/${P}/fn/report`,
+  `/API/V2/${P}/orders`,
+]
+
+const OTHER_PATHS = [
+  `/api/v1/${P}`,
+  `/api/v1/${P}/orders`,
   `/api/v1/${P}/orders/fn`,
   `/api/v1/${P}/functions`,
   `/api/v1/${P}/functions/invoke`,
   `/api/v1/${P}/fn`,
   `/api/v1/${P}/a/b/fn/report`,
-  // Percent-encoded, these are not a function's path: the runtime calls no
-  // function on them (server/routes/dynamic.ts).
+  `/api/v1/${P}/auth/signin`,
+  `/api/v1/${P}/storage/files`,
+  `/api/v1/${P}/dbx/orders`,
+  // Percent-encoded, these are not those paths: the runtime calls no function
+  // and serves no table on them (server/routes/dynamic.ts).
   `/api/v1/${P}/%66n/report`,
   `/api/v1/${P}/fn%2Freport`,
   `/api/v1/${P}/%64b/fn/report`,
-  `/api/v2/${P}/fn/report`,
+  `/api/v1/${P}/%64b/orders`,
+  '/api/v2x/orders',
   '/api/storage/files/0b6f3c1e-1d2a-4c55-9a1e-7f2d3b4c5d6e/download',
   '/app/projects/p1/functions',
   '/',
 ]
 
-describe('a function’s path', () => {
-  it.each(FUNCTION_PATHS)('%s is one', (path) => {
+describe('which paths answer with data', () => {
+  it.each(FUNCTION_PATHS)('%s is a function’s path', (path) => {
     expect(isFunctionAnswerPath(path)).toBe(true)
+    expect(isDataAnswerPath(path)).toBe(true)
   })
 
-  it.each(OTHER_PATHS)('%s is not', (path) => {
-    expect(isFunctionAnswerPath(path)).toBe(false)
+  it.each(TABLE_PATHS)('%s is the v1 REST API’s', (path) => {
+    expect(isTableAnswerPath(path)).toBe(true)
+    expect(isDataAnswerPath(path)).toBe(true)
   })
 
-  it('is one with repeated slashes, which the runtime reads as one', () => {
+  it.each(V2_PATHS)('%s is the v2 REST API’s', (path) => {
+    expect(isDataAnswerPath(path)).toBe(true)
+  })
+
+  it.each(OTHER_PATHS)('%s is none of them', (path) => {
+    expect(isDataAnswerPath(path)).toBe(false)
+  })
+
+  it('takes repeated slashes as one, as the runtime does', () => {
     expect(isFunctionAnswerPath(`/api/v1/${P}//fn//report`)).toBe(true)
+    expect(isTableAnswerPath(`/api/v1/${P}//db//orders`)).toBe(true)
   })
 })
 
-describe('what next.config.js sends on a function’s path', () => {
+describe('what next.config.js sends', () => {
   let rules: HeaderRule[]
   beforeAll(async () => {
     rules = await nextConfigHeaderRules()
   })
 
-  it.each(FUNCTION_PATHS)('%s: the sandbox policy and nosniff, in place of the site’s policy', (path) => {
+  it.each([...FUNCTION_PATHS, ...TABLE_PATHS, ...V2_PATHS])('%s: the sandbox policy and nosniff, in place of the site’s policy', (path) => {
     const headers = configHeadersFor(rules, path)
     expect(headers['content-security-policy']).toBe(SANDBOX)
     expect(headers['x-content-type-options']).toBe('nosniff')
@@ -138,7 +198,7 @@ describe('what next.config.js sends on a function’s path', () => {
 
   it('the same two values the runtime and the forwarder send', () => {
     const headers = configHeadersFor(rules, FUNCTION_PATHS[0])
-    for (const [name, value] of Object.entries(FUNCTION_ANSWER_HEADERS)) expect(headers[name.toLowerCase()]).toBe(value)
+    for (const [name, value] of Object.entries(DATA_ANSWER_HEADERS)) expect(headers[name.toLowerCase()]).toBe(value)
   })
 
   it.each(OTHER_PATHS.filter((p) => !p.startsWith('/api/storage/')))('%s: the site’s policy', (path) => {
@@ -146,10 +206,10 @@ describe('what next.config.js sends on a function’s path', () => {
     expect(policy).toMatch(/^default-src 'self'; script-src 'self'/)
   })
 
-  it('on exactly the paths the runtime calls a function on', () => {
-    for (const path of [...FUNCTION_PATHS, ...OTHER_PATHS]) {
+  it('on exactly the paths that answer with data', () => {
+    for (const path of [...FUNCTION_PATHS, ...TABLE_PATHS, ...V2_PATHS, ...OTHER_PATHS]) {
       const sandboxed = configHeadersFor(rules, path)['content-security-policy'] === SANDBOX
-      expect({ path, sandboxed }).toEqual({ path, sandboxed: isFunctionAnswerPath(path) })
+      expect({ path, sandboxed }).toEqual({ path, sandboxed: isDataAnswerPath(path) })
     }
   })
 })

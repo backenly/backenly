@@ -11,37 +11,31 @@
  * Both ways an answer leaves Backenly are followed:
  *   - the runtime itself (server/app.ts and server/routes/dynamic.ts), as a
  *     load balancer that sends /api/v1 straight to it serves it;
- *   - the web server in front of it: next.config.js's headers, matched with
- *     Next's own loader and matcher and set before the route runs as
- *     server/lib/router-server.js sets them; the real route,
- *     app/api/v1/[projectId]/[...unmatched], which forwards to the runtime
- *     (lib/runtime/forward-to-runtime.ts); and Next's own
- *     server/send-response.js, which adds the route's headers where the config
- *     set none. (middleware.ts sets neither a policy nor a content type.)
+ *   - the web server in front of it (tests/helpers/web-server-in-front.ts):
+ *     next.config.js's headers by Next's own matcher, middleware.ts, the real
+ *     route app/api/v1/[projectId]/[...unmatched], which forwards to the
+ *     runtime (lib/runtime/forward-to-runtime.ts), and Next's own
+ *     server/send-response.js.
  *
  * Real runtime, route, API key and function rows; functions run in the
  * function runner.
  */
 
 jest.mock('@sentry/nextjs', () => ({ withSentryConfig: (config: unknown) => config }))
+// middleware.ts imports `jose`, which ships ESM-only and jest cannot parse; no
+// token is verified on the paths here.
+jest.mock('jose', () => ({ jwtVerify: jest.fn(async () => ({ payload: {} })) }))
 
 import '@/tests/helpers/real-web-standard'
 
 import http from 'http'
 import type { AddressInfo } from 'net'
 import { randomBytes, randomUUID } from 'crypto'
-import { NextRequest } from 'next/server'
 
 import app from '@/server/app'
 import { prisma } from '@/lib/db/prisma'
 import { hashApiKey } from '@/server/lib/end-user-identity'
-import { GET as forwardGet, POST as forwardPost } from '@/app/api/v1/[projectId]/[...unmatched]/route'
-import { configHeadersFor, nextConfigHeaderRules } from '@/tests/helpers/next-config-headers'
-
-const { sendResponse } = require('next/dist/server/send-response') as {
-  sendResponse: (req: http.IncomingMessage, res: unknown, response: Response) => Promise<void>
-}
-const { NodeNextResponse } = require('next/dist/server/base-http/node') as { NodeNextResponse: new (res: http.ServerResponse) => unknown }
+import { webServerInFront } from '@/tests/helpers/web-server-in-front'
 
 jest.setTimeout(120_000)
 
@@ -57,30 +51,6 @@ const listen = async (server: http.Server) => {
   servers.push(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-}
-
-async function readBody(req: http.IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(chunk as Buffer)
-  return Buffer.concat(chunks)
-}
-
-/** The web server in front of the runtime, as Next serves a path under /api/v1/{projectId} it has no route of its own for. */
-async function webServer(): Promise<http.Server> {
-  const rules = await nextConfigHeaderRules()
-  return http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
-    for (const [name, value] of Object.entries(configHeadersFor(rules, url.pathname))) res.setHeader(name, value)
-    const [, , , routeProject, ...unmatched] = url.pathname.split('/')
-    const headers = new Headers()
-    for (const [name, value] of Object.entries(req.headers)) if (typeof value === 'string') headers.set(name, value)
-    const method = req.method ?? 'GET'
-    const body = method === 'GET' || method === 'HEAD' ? undefined : await readBody(req)
-    const request = new NextRequest(url, { method, headers, body })
-    const route = method === 'POST' ? forwardPost : forwardGet
-    const response = await route(request, { params: Promise.resolve({ projectId: routeProject, unmatched }) })
-    await sendResponse(req, new NodeNextResponse(res), response)
-  })
 }
 
 interface Answer {
@@ -154,7 +124,7 @@ beforeAll(async () => {
   }
   bases.runtime = await listen(http.createServer(app))
   process.env.RUNTIME_API_URL = bases.runtime
-  bases['web server'] = await listen(await webServer())
+  bases['web server'] = await listen(await webServerInFront())
 }, 120_000)
 
 afterAll(async () => {
