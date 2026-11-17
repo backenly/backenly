@@ -64,7 +64,7 @@ describe('an address to allow', () => {
 
   it('knows whether an address is inside a range', () => {
     expect(addressInRange('198.51.100.23', '198.51.100.0/24')).toBe(true)
-    expect(addressInRange('198.51.101.23', '198.51.100.0/24')).toBe(false)
+    expect(addressInRange('203.0.113.23', '198.51.100.0/24')).toBe(false)
     expect(addressInRange('198.51.100.23', '198.51.100.23/32')).toBe(true)
     expect(addressInRange('2001:db8::1', '198.51.100.0/24')).toBe(false)
   })
