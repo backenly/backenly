@@ -181,6 +181,13 @@ export function tablesTouched(statements: string[]): string[] {
   return tablesNamed((plan as { ok: true; planned: PlannedAction[] }).planned)
 }
 
+/** The tables a list of statements creates, in the order it creates them. */
+export function tablesCreated(statements: string[]): string[] {
+  const plan = planMigration(statements.join(';\n'))
+  if (!plan.ok) return []
+  return tablesNamed((plan as { ok: true; planned: PlannedAction[] }).planned.filter((p) => p.tool === 'create_table'))
+}
+
 /**
  * The reason a replayed statement failed, without the statement again: the
  * merge already names it (`failedAt`), and "Migration stopped at: <it>" in front

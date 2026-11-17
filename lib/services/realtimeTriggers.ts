@@ -64,19 +64,53 @@ export async function ensureRealtimeFunctionCurrent(projectId: string): Promise<
   return (await bringProjectFunctionsCurrent(projectId)).notify
 }
 
+/** What installRealtimeTrigger did. */
+export interface TriggerInstallResult {
+  /** The table carries the realtime trigger when the call returns. */
+  installed: boolean
+  /**
+   * It already did, so nothing was run. Re-creating an identical trigger
+   * changed nothing, so History recorded nothing, while enable_realtime listed
+   * the table as "Enabled by this call" (production QA, 2026-11-16).
+   */
+  alreadyStreaming?: boolean
+  /** Why a table was not given a trigger, when it was not. */
+  reason?: string
+}
+
+/**
+ * Whether a table already carries the trigger this file installs, enabled and
+ * unchanged: AFTER INSERT OR UPDATE OR DELETE, FOR EACH ROW, on every column,
+ * calling the schema's own notify function. One that differs is replaced.
+ */
+async function streamsAlready(projectId: string, tableName: string): Promise<boolean> {
+  const rows = (await queryWorkspaceSchema(
+    projectId,
+    `SELECT 1 AS one
+       FROM pg_trigger t
+      WHERE t.tgrelid = to_regclass(format('%I.%I', $1::text, $2::text))
+        AND t.tgname = 'backenly_realtime'
+        AND NOT t.tgisinternal
+        AND t.tgenabled IN ('O', 'A')
+        AND t.tgtype = 29
+        AND t.tgqual IS NULL
+        AND cardinality(t.tgattr::int2[]) = 0
+        AND t.tgfoid = to_regprocedure(format('%I.%I()', $1::text, $3::text))`,
+    `workspace_${projectId}`,
+    tableName,
+    NOTIFY_FUNCTION_NAME,
+  )) as Array<{ one: number }> | undefined
+  return (rows ?? []).length > 0
+}
+
 /**
  * Install (or replace) the realtime NOTIFY trigger on a single table.
- * Safe to call multiple times — uses CREATE OR REPLACE / DROP IF EXISTS.
+ * Safe to call multiple times — uses CREATE OR REPLACE / DROP IF EXISTS. A
+ * table that already carries it is left as it is.
  *
  * System tables (prefixed `_backenly_`) are skipped — they carry their own
  * specialized NOTIFY functions (e.g. presence uses backenly_notify_presence).
  */
-/** Why a table was not given a trigger, when it was not. */
-export interface TriggerInstallResult {
-  installed: boolean
-  reason?: string
-}
-
 export async function installRealtimeTrigger(
   projectId: string,
   tableName: string
@@ -114,6 +148,10 @@ export async function installRealtimeTrigger(
 
   const schemaName = `workspace_${projectId}`
 
+  // Already streaming: nothing to install, and nothing is replaced. The notify
+  // function is kept current on its own (ensureRealtimeFunctionCurrent).
+  if (await streamsAlready(projectId, tableName)) return { installed: true, alreadyStreaming: true }
+
   // 1. Create (or replace) the shared notify function for this schema.
   //    One function per schema, reused across all tables.
   await createNotifyFunction(projectId)
@@ -147,14 +185,22 @@ export async function installRealtimeTrigger(
 export async function installRealtimeTriggersForAllTables(
   projectId: string,
   tableNames: string[]
-): Promise<{ installed: string[]; skipped: Array<{ table: string; reason: string }>; failed: Array<{ table: string; error: string }> }> {
+): Promise<{
+  installed: string[]
+  /** Streaming before the call, and left as they were. */
+  alreadyStreaming: string[]
+  skipped: Array<{ table: string; reason: string }>
+  failed: Array<{ table: string; error: string }>
+}> {
   const installed: string[] = []
+  const alreadyStreaming: string[] = []
   const skipped: Array<{ table: string; reason: string }> = []
   const failed: Array<{ table: string; error: string }> = []
   for (const tableName of tableNames) {
     try {
       const result = await installRealtimeTrigger(projectId, tableName)
-      if (result.installed) installed.push(tableName)
+      if (result.alreadyStreaming) alreadyStreaming.push(tableName)
+      else if (result.installed) installed.push(tableName)
       else skipped.push({ table: tableName, reason: result.reason ?? 'refused' })
     } catch (err: any) {
       console.warn(
@@ -164,7 +210,7 @@ export async function installRealtimeTriggersForAllTables(
       failed.push({ table: tableName, error: err?.message ?? String(err) })
     }
   }
-  return { installed, skipped, failed }
+  return { installed, alreadyStreaming, skipped, failed }
 }
 
 /**
@@ -235,6 +281,50 @@ export async function listTablesWithRealtimeTriggers(
   }
 }
 
+/** A table an app subscribes to: not an internal or a legacy `_apis` table. */
+const userFacing = (table: string) => !table.startsWith('_') && !table.endsWith('_apis')
+
+/** Realtime, as a result that made tables reports it. */
+export interface NewTablesRealtime {
+  /** Every table that streams now. */
+  streaming: string[]
+  /** The new tables that do not. */
+  notStreaming: string[]
+  /** One sentence: which tables stream, and the call that adds a new one. */
+  note: string
+}
+
+/**
+ * What to tell the caller that made `created`: null when no table streams, or
+ * when every new one does.
+ *
+ * A new table streams only once realtime is turned on for it by name. It used
+ * to join by itself whenever any table streamed, so a merge started streaming
+ * a table nobody had named, History said only "Created table", and turning
+ * realtime on for it afterwards changed nothing (production QA, 2026-11-16).
+ * Supabase works the same way: a table streams once it is added to the
+ * realtime publication.
+ */
+export async function realtimeForNewTables(projectId: string, created: string[]): Promise<NewTablesRealtime | null> {
+  const streaming = (await listTablesWithRealtimeTriggers(projectId)).filter(userFacing)
+  if (streaming.length === 0) return null
+  const live = new Set(streaming)
+  const notStreaming = [...new Set(created)].filter((t) => userFacing(t) && !live.has(t))
+  if (notStreaming.length === 0) return null
+  const call = `realtime { "action": "enable", "tableName": "${notStreaming[0]}" }`
+  const note =
+    `Realtime streams ${listed(streaming)}; ${listed(notStreaming)} ${notStreaming.length === 1 ? 'does' : 'do'} not. ` +
+    (notStreaming.length === 1 ? `To stream it: ${call}.` : `To stream one: ${call}, once for each table.`)
+  return { streaming, notStreaming, note }
+}
+
+/** "a", "a and b", "a, b and c", "a, b, c and 4 more": short enough for a clipped tool result. */
+function listed(names: string[], shown = 3): string {
+  if (names.length === 1) return names[0]
+  if (names.length <= shown) return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `${names.slice(0, shown).join(', ')} and ${names.length - shown} more`
+}
+
 /**
  * Full realtime status for a project — the OBSERVE half of the realtime
  * agentic loop. Used by the AI chat brain's `get_realtime_status` read tool,
@@ -265,7 +355,7 @@ export async function getRealtimeStatus(projectId: string): Promise<RealtimeStat
   // underscore) table so a stray trigger left on _email_verifications / _apis
   // from before this fix never shows up as a user-facing streaming table.
   const streamingTables = (await listTablesWithRealtimeTriggers(projectId).catch(() => [] as string[]))
-    .filter((n) => !n.startsWith('_') && !n.endsWith('_apis'))
+    .filter(userFacing)
 
   // Every user table in the workspace schema — system + phantom tables excluded.
   let allTables: string[] = []
@@ -282,7 +372,7 @@ export async function getRealtimeStatus(projectId: string): Promise<RealtimeStat
     ) as Array<{ table_name: string }>
     allTables = (rows ?? [])
       .map((r) => r.table_name)
-      .filter((n) => !n.startsWith('_') && !n.endsWith('_apis'))
+      .filter(userFacing)
   } catch {
     // Schema not provisioned yet — fall back to whatever is streaming.
     allTables = [...streamingTables]

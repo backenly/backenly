@@ -81,11 +81,12 @@ describe('Monitoring Service (ApiRequestLog-backed)', () => {
     it('aggregates only runtime traffic and excludes /api/* rows', async () => {
       const w = await getRuntimeWindowStats(projectId, new Date(now - HOUR), new Date(now))
       expect(w.count).toBe(10)              // 12 inserted current-window rows minus 2 internal
-      expect(w.errorCount).toBe(3)          // two 400s + one 500
+      expect(w.errorCount).toBe(1)          // the single 500: a 400 is the client's, not a failure
       expect(w.serverErrorCount).toBe(1)    // the single 500
+      expect(w.clientErrorCount).toBe(2)    // the two 400s
       expect(w.avgDuration).toBe(130)       // (500 + 100 + 500 + 200) / 10
       expect(w.reliabilityPct).toBe(90)     // (10 - 1) / 10 * 100
-      expect(w.stabilityPct).toBe(70)       // (10 - 3) / 10 * 100
+      expect(w.stabilityPct).toBe(90)       // the same as reliability now
     })
 
     it('reports a calm 100% reliability when there is no traffic', async () => {
@@ -108,8 +109,8 @@ describe('Monitoring Service (ApiRequestLog-backed)', () => {
       expect(rt.avg).toBe(130)
       expect(rt.count).toBe(10)
       expect(rv.count).toBe(10)
-      expect(er.avg).toBe(30)   // 3 / 10 * 100
-      expect(er.count).toBe(3)
+      expect(er.avg).toBe(10)   // 1 / 10 * 100: 5xx only
+      expect(er.count).toBe(1)
       expect(up.avg).toBe(90)   // reliability
     })
   })
@@ -130,7 +131,8 @@ describe('Monitoring Service (ApiRequestLog-backed)', () => {
       expect(byId['GET /companies'].requests).toBe(6)                // 5×200 + 1×500
       expect(byId['GET /companies'].errorRate).toBeCloseTo(16.67, 1)
       expect(byId['POST /companies'].requests).toBe(2)
-      expect(byId['POST /companies'].errorRate).toBe(100)
+      expect(byId['POST /companies'].errorRate).toBe(0)              // two 400s: client errors
+      expect(byId['POST /companies'].clientErrorRate).toBe(100)
       expect(byId['GET /companies/:id'].requests).toBe(2)           // /1 and /2 rolled up
       expect(byId['GET /companies/:id'].errorRate).toBe(0)
     })

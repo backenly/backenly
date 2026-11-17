@@ -26,6 +26,7 @@ import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { assertAiAllowed } from '@/lib/platform-controls'
 import { enforceAiCredits } from '@/lib/entitlements/policy'
+import { planNamesOf } from '@/lib/entitlements/plan-names'
 import { creditAccountOf } from '@/lib/usage/account'
 import {
   activeRun,
@@ -134,6 +135,8 @@ export async function POST(request: NextRequest) {
         // than retry into the same wall.
         currentPlan: credits.currentPlan,
         requiredPlan: credits.requiredPlan,
+        // The plans as they are sold ("Free", "Pro"), for the agent to say to its human.
+        ...planNamesOf(credits),
         upgradeRequired: true,
         // The typed tools are deterministic and cost us no model spend, so they
         // stay open. Only the natural-language door is gated.

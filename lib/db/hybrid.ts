@@ -7,6 +7,7 @@ import { prisma } from './postgres'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { getMongoDB, getCollection } from './mongodb'
 import { Prisma } from '@prisma/client'
+import { quoteIdent } from '@/lib/security/workspace-schema'
 
 /**
  * A tagged `Prisma.Sql` → the positional form `$queryRawUnsafe` takes.
@@ -678,12 +679,14 @@ export class PostgresService {
     
     console.log('[PostgresService.insertRow] Data with defaults:', dataWithDefaults)
     
-    const columnList = Object.keys(dataWithDefaults).map(col => `"${col}"`)
+    // Every name is quoted with its own quotes doubled, as getTableRows does: a
+    // table or column name is caller input and must stay one identifier.
+    const columnList = Object.keys(dataWithDefaults).map((col) => quoteIdent(col))
     const values = Object.values(dataWithDefaults)
     const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
 
-    const escapedSchema = `"${schema}"`
-    const escapedTable = `"${tableName}"`
+    const escapedSchema = quoteIdent(schema)
+    const escapedTable = quoteIdent(tableName)
     
     console.log('[PostgresService.insertRow] SQL:', `INSERT INTO ${escapedSchema}.${escapedTable} (${columnList.join(', ')}) VALUES (${placeholders})`)
     console.log('[PostgresService.insertRow] Values:', values)
@@ -716,12 +719,12 @@ export class PostgresService {
     id: any,
     data: Record<string, any>
   ): Promise<any> {
-    const updates = Object.keys(data).map((key, i) => `"${key}" = $${i + 1}`).join(', ')
+    const updates = Object.keys(data).map((key, i) => `${quoteIdent(key)} = $${i + 1}`).join(', ')
     const values = Object.values(data)
     const idValue = values.length + 1
 
-    const escapedSchema = `"${schema}"`
-    const escapedTable = `"${tableName}"`
+    const escapedSchema = quoteIdent(schema)
+    const escapedTable = quoteIdent(tableName)
 
     // Service-role context — see insertRow. A claimless UPDATE on a FORCE-RLS
     // table matches zero rows and the dashboard edit silently did nothing.
@@ -744,8 +747,8 @@ export class PostgresService {
    * Delete a row
    */
   static async deleteRow(projectId: string, schema: string, tableName: string, id: any): Promise<boolean> {
-    const escapedSchema = `"${schema}"`
-    const escapedTable = `"${tableName}"`
+    const escapedSchema = quoteIdent(schema)
+    const escapedTable = quoteIdent(tableName)
 
     // Service-role context — see insertRow.
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')

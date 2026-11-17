@@ -28,6 +28,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { spawn } from 'child_process'
 import { portablePolicies } from '@/lib/services/export-policies'
+import { exportFailure } from '@/lib/services/export-failure'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { buildConnection, sanitizeError } from '@/lib/services/workspace-backup'
@@ -102,19 +103,11 @@ export async function GET(request: NextRequest) {
     })
 
     if (exitCode !== 0) {
+      // pg_dump's own words name the database host and its address: they stay
+      // in the log, and the answer names the cause (lib/services/export-failure.ts).
       console.error('[export/database] pg_dump failed:', sanitizeError(stderr).slice(0, 500))
-      const notFound = exitCode === null || /ENOENT|not found/i.test(stderr)
-      const rls = /row-level security/i.test(stderr)
-      return NextResponse.json(
-        {
-          error: notFound
-            ? 'pg_dump is not available on this server.'
-            : rls
-              ? 'Export failed: the export credential cannot read RLS-protected tables. Set BACKUP_DATABASE_URL to the backup role (see README, Backups).'
-              : 'Export failed — see server logs.',
-        },
-        { status: 503 },
-      )
+      const failure = exportFailure(stderr, exitCode)
+      return NextResponse.json({ error: failure.message, code: failure.code }, { status: 503 })
     }
 
     const dump = Buffer.concat(chunks)

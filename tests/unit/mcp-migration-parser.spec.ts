@@ -451,7 +451,7 @@ describe('CREATE INDEX', () => {
     const a = parseOne('CREATE UNIQUE INDEX idx_email ON users (email)')
     expect(a.tool).toBe('create_index')
     expect(a.args).toEqual({
-      tableName: 'users', columns: ['email'], unique: true, indexName: 'idx_email',
+      tableName: 'users', columns: ['email'], unique: true, indexName: 'idx_email', asWritten: true,
     })
     expect(a.notes).toBeUndefined()
   })
@@ -464,12 +464,20 @@ describe('CREATE INDEX', () => {
       columns: ['user_a', 'user_b'],
       unique: true,
       indexName: 'idx_pair',
+      asWritten: true,
     })
+  })
+
+  // A UNIQUE INDEX in SQL is created as it is declared: over every row, with
+  // no WHERE deleted_at IS NULL added, so ON CONFLICT on its columns can use it.
+  it('marks an index declared in SQL as written', () => {
+    expect(parseOne('CREATE UNIQUE INDEX qa_probe_ext_uq ON qa_probe (ext_id)').args).toMatchObject({ unique: true, asWritten: true })
+    expect(parseOne('CREATE INDEX ON posts (author_id) WHERE deleted_at IS NULL').args).toMatchObject({ asWritten: true })
   })
 
   it('carries an index method through instead of dropping it', () => {
     expect(parseOne('CREATE INDEX ON posts USING gin (tags)').args).toEqual({
-      tableName: 'posts', columns: ['tags'], unique: false, method: 'gin',
+      tableName: 'posts', columns: ['tags'], unique: false, method: 'gin', asWritten: true,
     })
   })
 
@@ -486,7 +494,7 @@ describe('CREATE INDEX', () => {
       'CREATE UNIQUE INDEX cart_all ON cart_items (user_id, product_id) WHERE (TRUE)',
     ]) {
       expect(parseOne(sql).args).toEqual({
-        tableName: 'cart_items', columns: ['user_id', 'product_id'], unique: true, indexName: 'cart_all', where: 'true',
+        tableName: 'cart_items', columns: ['user_id', 'product_id'], unique: true, indexName: 'cart_all', where: 'true', asWritten: true,
       })
     }
   })
@@ -504,7 +512,7 @@ describe('CREATE INDEX', () => {
   it('translates an unnamed multi-column index and strips sort modifiers', () => {
     const a = parseOne('CREATE INDEX ON posts (author_id, created_at DESC)')
     expect(a.args).toEqual({
-      tableName: 'posts', columns: ['author_id', 'created_at'], unique: false,
+      tableName: 'posts', columns: ['author_id', 'created_at'], unique: false, asWritten: true,
     })
     expect(a.notes).toBeUndefined()
   })

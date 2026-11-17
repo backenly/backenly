@@ -37,7 +37,8 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { AiError } from '@/lib/ai/llm'
-import { summariseFinding } from '@/lib/core/finding-summaries'
+import { decisionLabels, summariseFinding } from '@/lib/core/finding-summaries'
+import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { EVOLUTION_FINDING_TYPE } from '@/lib/core/types'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
@@ -55,6 +56,20 @@ const MAX_ATTEMPTS = 3
 const BACKOFF_MS = [10 * 60_000, 60 * 60_000, 6 * 60 * 60_000]
 /** Wait while no model can be called at all (no provider, no budget). Not an attempt. */
 const UNAVAILABLE_WAIT_MS = 60 * 60_000
+
+/**
+ * The buttons a finding's card offers in the Review Queue, in their words
+ * (components/ReviewQueuePanel.tsx): an approval when there is a repair to
+ * approve, and the way to decline it. The investigator recommends in them.
+ */
+function cardChoices(type: string, status: string, details: Record<string, unknown>): string[] {
+  if (status !== 'pending_approval') return []
+  const labels = decisionLabels(type)
+  return [
+    ...(hasExecutableFix(type, details) ? [labels?.approve ?? 'Approve & fix'] : []),
+    labels?.dismiss ?? 'Dismiss',
+  ]
+}
 
 /** Narrow an unknown detail field to a usable string, or undefined. */
 function pickString(v: unknown): string | undefined {
@@ -345,6 +360,7 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
               ),
               priorAttempts: prior?.history ?? [],
               proposable: proposableFor({ type: finding.type, details }),
+              choices: cardChoices(finding.type, finding.status, details),
             },
             (probe, probeTable) => PROBE_REGISTRY[probe]({ projectId, table: probeTable ?? table }),
             Object.keys(PROBE_REGISTRY),

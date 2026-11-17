@@ -23,6 +23,8 @@ import { isRouteModuleFunction, usesAsService, validateRouteModule } from './rou
 import { FunctionRunnerBusyError, FunctionRunnerUnavailableError } from './isolation/client'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
+import { perRowSentence, runsPerRow } from './row-runs'
+import { NOT_RUN, NOTICE } from './record-kinds'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { functionNameForms, resolveFunctionByName } from './names'
 import { integrationsUsedBy, missingIntegrations } from './integration-use'
@@ -236,9 +238,15 @@ export async function listFunctionLogs(
     take,
     include: { function: { select: { name: true } } },
   }))
+  // A record of runs that did not happen, or a notice, is said as what it is,
+  // not as a run that failed or succeeded (record-kinds.ts).
   const lines = logs.slice(0, 10).map((l) =>
-    `• ${l.createdAt.toISOString()} ${l.function.name}: ${l.success ? 'ok' : 'FAILED'}, ${l.durationMs}ms, ${l.triggerType}` +
-    (l.error ? `, ${l.error.slice(0, 100)}` : ''))
+    l.triggerType === NOT_RUN
+      ? `• ${l.createdAt.toISOString()} ${l.function.name}: not run, ${(l.error ?? '').slice(0, 160)}`
+      : l.triggerType === NOTICE
+        ? `• ${l.createdAt.toISOString()} ${l.function.name}: notice, ${(l.logs[0] ?? '').slice(0, 160)}`
+        : `• ${l.createdAt.toISOString()} ${l.function.name}: ${l.success ? 'ok' : 'FAILED'}, ${l.durationMs}ms, ${l.triggerType}` +
+          (l.error ? `, ${l.error.slice(0, 100)}` : ''))
   // Runs of row-event functions wait in a queue and start a few at a time
   // (./run-queue.ts): say how many have not run yet, so a missing run reads as
   // waiting, not lost.
@@ -588,6 +596,7 @@ export async function deployFunctionCode(
       `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
       (columns ? `, run only when ${columns.join(' or ')} changes` : '') +
+      (runsPerRow(fn.triggerType) ? `. ${perRowSentence(fn.triggerType)}` : '') +
       missingIntegrationDeployNote(missing) +
       (runsAsService
         ? '. Its asService blocks run as the service role, so row-level security does not apply to their SQL: check who is calling before one runs'

@@ -34,7 +34,6 @@
 import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import {
-  RegionNotConfiguredError,
   projectDriftEvents,
   projectRegion,
   regionDatabaseUrl,
@@ -77,6 +76,30 @@ export class SchemaChangesUnavailableError extends Error {
   }
 }
 
+/**
+ * Direct connections are not offered where nothing answers them.
+ *
+ * A login's connection string names the region's developer-facing host
+ * (DIRECT_DB_HOST, or DIRECT_DB_HOST_<REGION>). Without one, the home region
+ * used to fall back to backenly.com:5432, where nothing listens: Connect handed
+ * out read-only and read-write strings that psql, TablePlus, BI tools and the
+ * copied pg_dump command could never connect with (production QA re-test,
+ * 2026-11-16, N4). Every Backenly Cloud database is private to its VPC, so
+ * until a region has a public endpoint, no string is shown or issued for it.
+ * The platform's own use of a project's read-only role, an agent's run_query,
+ * dials the database directly and is unaffected (readOnlyLogin).
+ */
+export const DIRECT_ACCESS_UNAVAILABLE_MESSAGE =
+  "Direct Postgres connections aren't available in this project's region yet: nothing outside Backenly can reach its database, so there is no connection string to give."
+
+export class DirectAccessUnavailableError extends Error {
+  readonly code = 'DIRECT_ACCESS_UNAVAILABLE'
+  constructor(readonly region: CloudRegionId, readonly variable: string) {
+    super(DIRECT_ACCESS_UNAVAILABLE_MESSAGE)
+    this.name = 'DirectAccessUnavailableError'
+  }
+}
+
 export interface DirectAccessCredential {
   mode: DirectAccessMode
   roleName: string
@@ -97,7 +120,16 @@ export interface DirectAccessCredential {
 
 export interface DirectAccessStatus {
   schema: string
+  /** Whether a connection from outside Backenly can reach this project's database. */
+  available: boolean
+  /** Why not, in a sentence, where it cannot. */
+  unavailable?: string
   credentials: DirectAccessCredential[]
+  /**
+   * Where connections cannot be made: the logins that exist, by name, so they
+   * can still be revoked. Their passwords and strings are not given.
+   */
+  logins?: Array<{ mode: DirectAccessMode; roleName: string; createdAt: string; rotatedAt: string | null }>
   pendingDriftEvents: number
 }
 
@@ -129,12 +161,14 @@ interface ConnectionTarget {
  * Where a developer connects to reach a project's data: the database in the
  * project's region, where its role exists.
  *
- * The home region keeps DIRECT_DB_HOST / DIRECT_DB_PORT and their defaults.
- * Any other region needs its own DIRECT_DB_HOST_<REGION> (DIRECT_DB_PORT_<REGION>
- * optional): without it this refuses, rather than hand out the home host, where
- * the project's role and schema do not exist.
+ * Each region needs its own developer-facing host: DIRECT_DB_HOST for the home
+ * region, DIRECT_DB_HOST_<REGION> for any other (DIRECT_DB_PORT and its
+ * regional form optional). Without one this refuses with
+ * DirectAccessUnavailableError rather than name a host nothing answers on:
+ * another region's, or backenly.com. Outside production the home region keeps
+ * localhost, the developer's own database.
  */
-function connectionTargetFor(region: CloudRegionId, projectId: string): ConnectionTarget {
+function connectionTargetFor(region: CloudRegionId, _projectId: string): ConnectionTarget {
   const isProd = process.env.NODE_ENV === 'production'
   let database = 'backenly'
   try {
@@ -144,11 +178,10 @@ function connectionTargetFor(region: CloudRegionId, projectId: string): Connecti
     /* keep default */
   }
   const host = regionSetting('DIRECT_DB_HOST', region)
-  if (region !== HOME_REGION && !host.value) {
-    throw new RegionNotConfiguredError(region, host.variable, projectId)
-  }
+  const hostname = host.value || (!isProd && region === HOME_REGION ? 'localhost' : '')
+  if (!hostname) throw new DirectAccessUnavailableError(region, host.variable)
   return {
-    host: host.value || (isProd ? 'backenly.com' : 'localhost'),
+    host: hostname,
     port: parseInt(regionSetting('DIRECT_DB_PORT', region).value ?? '5432', 10),
     database,
     // Snakeoil cert on the box → require (encrypted, no CA verification). Local
@@ -256,6 +289,8 @@ async function withSchemaChanges(projectId: string, credential: DirectAccessCred
  */
 export async function setSchemaChanges(projectId: string, allowed: boolean): Promise<DirectAccessCredential> {
   assertValidProjectId(projectId)
+  // A login nothing can connect with has no schema changes to allow.
+  const target = await connectionTarget(projectId)
   const existing = await prisma.databaseCredential.findUnique({ where: { projectId_mode: { projectId, mode: 'READ_WRITE' } } })
   if (!existing) throw new Error('This project has no read-write login to change.')
   if (allowed) {
@@ -282,7 +317,7 @@ export async function setSchemaChanges(projectId: string, allowed: boolean): Pro
       timestamp: new Date(),
     },
   }).catch(() => {})
-  const [schema, target] = await Promise.all([resolveWorkspaceSchema(projectId), connectionTarget(projectId)])
+  const schema = await resolveWorkspaceSchema(projectId)
   return withSchemaChanges(projectId, buildCredential(existing, schema, target))
 }
 
@@ -490,11 +525,31 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
     // Counted in the project's region, where the capture trigger records them.
     projectDriftEvents(projectId).then((events) => events.count({ where: { projectId, status: 'pending' } })),
   ])
-  // Only a project that has credentials needs to know where they connect.
-  const target = rows.length > 0 ? await connectionTarget(projectId) : null
+  let target: ConnectionTarget
+  try {
+    target = await connectionTarget(projectId)
+  } catch (err) {
+    if (!(err instanceof DirectAccessUnavailableError)) throw err
+    // Nothing outside can connect: no strings, and the logins that exist by
+    // name only, so they can still be revoked.
+    return {
+      schema,
+      available: false,
+      unavailable: err.message,
+      credentials: [],
+      logins: rows.map((r) => ({
+        mode: r.mode as DirectAccessMode,
+        roleName: r.roleName,
+        createdAt: r.createdAt.toISOString(),
+        rotatedAt: r.rotatedAt ? r.rotatedAt.toISOString() : null,
+      })),
+      pendingDriftEvents,
+    }
+  }
   return {
     schema,
-    credentials: target ? await Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))) : [],
+    available: true,
+    credentials: await Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))),
     pendingDriftEvents,
   }
 }

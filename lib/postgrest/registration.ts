@@ -290,6 +290,38 @@ export async function unregisteredSchemas(region: CloudRegionId = HOME_REGION): 
   return existing.map(e => e.schema_name).filter(s => !registered.has(s) && !isChangeVaultSchema(s))
 }
 
+/** Raw SQL on the database the schemas are in: a client, or a transaction on it. */
+export interface RegistrySql {
+  $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T>
+}
+
+/**
+ * Of `schemas`, the ones PostgREST is told to serve, read from the registry on
+ * `db`. None where no registry is installed: then nothing serves a schema, and
+ * nothing has to wait before one is dropped (lib/postgrest/retire-schema.ts).
+ */
+export async function servedAmong(db: RegistrySql, schemas: string[]): Promise<string[]> {
+  if (schemas.length === 0) return []
+  const [{ installed }] = await db.$queryRawUnsafe<Array<{ installed: boolean }>>(
+    `SELECT to_regprocedure('public.backenly_pgrst_current_schemas()') IS NOT NULL AS installed`,
+  )
+  if (!installed) return []
+  const [{ list }] = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
+    `SELECT public.backenly_pgrst_current_schemas() AS list`,
+  )
+  const served = new Set((list ?? '').split(',').filter(Boolean))
+  return schemas.filter((schema) => served.has(schema))
+}
+
+/**
+ * Stop serving `schema`, in `db`'s transaction when it has one: the registry
+ * tells PostgREST to read its list again when that commits.
+ */
+export async function unregisterSchemaOn(db: RegistrySql, schema: string): Promise<void> {
+  await db.$queryRawUnsafe(`SELECT public.backenly_pgrst_unregister_schema($1)::text AS list`, schema)
+  recentlyRegistered.delete(schema)
+}
+
 /**
  * Remove a schema from PostgREST's exposed list. Non-destructive — no row is
  * read or written, and re-registering restores it exactly.

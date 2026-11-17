@@ -238,6 +238,46 @@ export async function aiCreditCap(billingAccountId: string): Promise<number | nu
   return max + (await bonusCredits(billingAccountId)) + (await purchasedCredits(billingAccountId))
 }
 
+/** An account's AI credits this month, by source, and what it has used. */
+export interface AiCreditAllowance {
+  /** Credits charged this month. */
+  used: number
+  /** The plan's monthly credits. */
+  plan: number
+  /** Granted credits (referral, promotion, an admin's grant). */
+  bonus: number
+  /** Bought credits. */
+  purchased: number
+  /** What the credit gate allows this month: plan + bonus + purchased, as aiCreditCap counts it. */
+  cap: number
+  /** cap - used, never below zero. */
+  left: number
+}
+
+/**
+ * The credits the gate counts (enforceAiCredits, aiCreditCap), with their
+ * parts, for the pages and tools that show them. The Usage and Billing meters
+ * read the plan's allowance alone, so an account with bonus or bought credits
+ * read "575 of 200" while the gate, rightly, still let calls through
+ * (production QA re-test, 2026-11-16, #98). Null where nothing is enforced
+ * (no entitlements, or unlimited); throws when they cannot be read, and the
+ * caller decides what to show.
+ */
+export async function aiCreditAllowance(billingAccountId: string): Promise<AiCreditAllowance | null> {
+  const ent = await getAccountEntitlements(billingAccountId)
+  if (!ent) return null
+  const plan = ent.monthlyAiCredits
+  if (plan === null || plan === undefined) return null
+  const [bonus, purchased, usage] = await Promise.all([
+    bonusCredits(billingAccountId),
+    purchasedCredits(billingAccountId),
+    getMonthlyUsage(billingAccountId),
+  ])
+  const cap = plan + bonus + purchased
+  const used = creditsFromTokens(usage.aiTokensUsed)
+  return { used, plan, bonus, purchased, cap, left: Math.max(0, cap - used) }
+}
+
 /**
  * Charge a completed AI turn's actual token usage.
  *
@@ -245,8 +285,15 @@ export async function aiCreditCap(billingAccountId: string): Promise<number | nu
  * Cloud provider; this is the public entry point the product calls. In
  * single-tenant it records nothing, because there is nobody to bill.
  *
- * Call AFTER the turn, only when it produced a real backend change (questions
- * and clarifications are free). Fire-and-forget; never blocks.
+ * Called after the turn, through closeCreditTurn (lib/entitlements/
+ * credit-holds.ts), which keeps the charge within the account's cap. A
+ * backend_chat turn is charged what it used whether it changed the backend or
+ * only answered a question, as the Pricing page says: credits are spent "when
+ * Backenly runs its own model for you: the natural-language MCP tool
+ * (backend_chat)". The one exception is a build on a protected production that
+ * ends before a merge request or a change (lib/mcp/chat-turn.ts). Questions
+ * are free in the dashboard assistant, which never charges.
+ * Fire-and-forget; never blocks.
  */
 export async function chargeAiCredits(billingAccountId: string, tokensUsed: number): Promise<void> {
   if (!Number.isFinite(tokensUsed) || tokensUsed <= 0) return
@@ -454,6 +501,28 @@ export async function enforceAiFunctionInvocation(billingAccountId: string): Pro
     )
   }
   return true
+}
+
+/**
+ * The function runs an account can still start this month, by the rule
+ * enforceAiFunctionInvocation applies to each run: the plan's included runs,
+ * or the spend limit's cap past them. Null when the plan sets no limit.
+ *
+ * The run queue reads it before it queues a burst of row-event runs
+ * (lib/services/ai-functions/run-queue.ts), so runs the month cannot pay for
+ * are not queued at all, and a burst larger than what is left says so.
+ */
+export async function functionRunsLeft(
+  billingAccountId: string,
+): Promise<{ left: number; cap: number; planName: string } | null> {
+  const ent = await getAccountEntitlements(billingAccountId)
+  if (!ent) return { left: 0, cap: 0, planName: 'NONE' }
+  const max = ent.maxAiFunctionInvocationsPerMonth
+  if (max === null) return null
+  const usage = await getMonthlyUsage(billingAccountId)
+  const { effectiveCap } = await import('@/lib/usage/overage')
+  const cap = await effectiveCap(billingAccountId, 'fn_runs', max, ent)
+  return { left: Math.max(0, cap - usage.aiFunctionInvocations), cap, planName: ent.planName }
 }
 
 /**

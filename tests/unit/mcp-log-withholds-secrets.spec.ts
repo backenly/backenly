@@ -189,7 +189,7 @@ describe('through the tool route', () => {
     const res = await POST(new NextRequest('https://backenly.test/api/mcp/tool', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': 'mcp_live_test_key' },
-      body: JSON.stringify({ tool: 'connect', args: { action: 'create_api_key', name: 'web' } }),
+      body: JSON.stringify({ tool: 'connect', args: { action: 'create_api_key', description: 'web' } }),
     }))
     expect(res.status).toBe(200)
     expect(JSON.stringify(await res.json())).toContain(KEY)

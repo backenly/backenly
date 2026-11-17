@@ -699,7 +699,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'adopt_external_schema',
     name: 'Adopt schema changes made directly',
-    what: 'Fold schema changes made over a direct connection into Backenly: new tables get their REST API, RLS and realtime, altered ones are refreshed and dropped ones pruned.',
+    what: 'Fold schema changes made over a direct connection into Backenly: new tables get their REST API and RLS, altered ones are refreshed and dropped ones pruned.',
     tool: 'adopt_external_schema',
   },
 

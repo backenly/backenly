@@ -7,9 +7,11 @@
  * privileges it must have, and for the same reason: neither is expressible in
  * `schema.prisma`, so neither can ever arrive through a migration.
  *
- * Exactly one entry today. It is deliberately not a general privilege framework:
- * a closed manifest of one is auditable at a glance, and the moment this grows
- * an "apply whatever the manifest says" loop it becomes a way to grant anything.
+ * Two entries today, both for the application role. It is deliberately not a
+ * general privilege framework: a closed manifest, each entry granted by a
+ * statement the audit below names, is auditable at a glance, and the moment
+ * this grows an "apply whatever the manifest says" loop it becomes a way to
+ * grant anything.
  *
  * ── Why this is not in the canonical baseline ──────────────────────────────
  *
@@ -28,7 +30,8 @@ export const GRANT_SQL_PATH = join('tools', 'managed-db', 'sql', 'grant-workspac
 
 export interface RolePrivilege {
   role: string
-  privilege: 'CREATE'
+  /** CREATE on the database, or membership with the privileges of a predefined role. */
+  privilege: 'CREATE' | 'pg_read_all_stats'
   /** What breaks without it. */
   requiredBy: string
   evidence: string[]
@@ -55,6 +58,21 @@ export const REQUIRED_ROLE_PRIVILEGES: readonly RolePrivilege[] = [
       'lib/branches/engine.ts',
     ],
   },
+  {
+    role: 'backenly_user',
+    privilege: 'pg_read_all_stats',
+    requiredBy:
+      'PostgREST runs every /api/v2 and v1 /db request as anon, authenticated or service_role, and ' +
+      'PostgreSQL shows the text of a statement another role ran only to a role holding the privileges ' +
+      'of pg_read_all_stats. Without them the slow-query checks read each REST statement as ' +
+      '<insufficient privilege> and never index a column the app is measurably slow filtering on.',
+    evidence: [
+      'lib/autonomy/slow-query-index.ts',
+      'lib/autonomy/statement-attribution.ts',
+      'lib/ai/infra-intelligence.ts',
+      'lib/autonomy/index-trials.ts',
+    ],
+  },
 ]
 
 /**
@@ -65,6 +83,7 @@ export const REQUIRED_ROLE_PRIVILEGES: readonly RolePrivilege[] = [
  */
 const ALLOWED_STATEMENT = [
   /^GRANT\s+CREATE\s+ON\s+DATABASE\s+:"dbname"\s+TO\s+backenly_user$/i,
+  /^GRANT\s+pg_read_all_stats\s+TO\s+backenly_user$/i,
   /^SELECT\b/i,
   /^DO\s+\$\$/i,
 ]
@@ -137,6 +156,14 @@ export function auditGrantSql(sql: string): AuditFinding[] {
   }
 
   return findings
+}
+
+/**
+ * The grant script as a `check` runs it: every GRANT replaced by a line that
+ * says it was skipped, so measuring an environment cannot change it.
+ */
+export function withoutGrants(sql: string): string {
+  return sql.replace(/^GRANT\s[^;]*;$/gim, '\\echo (check mode: GRANT skipped)')
 }
 
 export function readGrantSql(root: string): string {

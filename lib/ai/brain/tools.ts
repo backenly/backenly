@@ -23,6 +23,7 @@ import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { publicOrigin } from '@/lib/branches/preview'
 import type { BuildBranch } from '@/lib/branches/build-branch'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
+import { currentDiagnosis } from '@/lib/autonomy/finding-fingerprint'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
 const ACTOR_AUDITED_ACTIONS = new Set<string>(['TRIGGER_DEPLOY', 'ROLLBACK_DEPLOY'])
@@ -480,7 +481,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {}),
   fn('get_table_schema',
     'ONE table from the live catalog: columns (type, nullable, default, key, max length), primary and foreign keys (with ON DELETE), indexes, CHECK constraints with their ACTUAL allowed values, triggers, RLS / FORCE RLS, the policies (command, ROLES, permissive or restrictive, USING and WITH CHECK) and the exact row count. A `USING (true)` policy granted only to an internal role is not open access: read `roles` before calling a table exposed. To edit a policy with set_rls, send back its `editableUsing` / `editableCheck`, never the raw `using` / `withCheck`, which are refused. Call it before writing a query, insert or migration against a table, and ALWAYS before changing one command of a policy. Side-effect free.',
-    { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
+    {
+      tableName: { type: 'string', description: 'The table to describe (snake_case).' },
+      branchId: { type: 'string', description: 'A preview branch id (branch action "list"): describe the table on that branch instead of production.' },
+    },
     ['tableName']),
   fn('create_table',
     'Create a new database table with columns. Columns: {name, type (text|int|bigint|boolean|timestamp|uuid|jsonb|numeric, or an array of any of them such as text[]), nullable?, unique?, fkTo? (other table name), default?}. `id`, `createdAt` and `updatedAt` are provisioned automatically — do not declare them. CHECK constraints are not part of this contract: create the table, then add them with add_constraint (or send the whole thing as SQL to apply_migration, which does both). RLS is applied automatically from the schema and the chosen policy is reported in the result — read it, because a two-party table gets `participants` rather than owner-only access.',
@@ -547,7 +551,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         type: 'boolean',
         description:
           'Enforce uniqueness over the whole column tuple. On a table with soft delete (`deleted_at`) it counts ' +
-          'live rows only (the index is scoped WHERE deleted_at IS NULL) unless `where` says otherwise.',
+          'live rows only (the index is scoped WHERE deleted_at IS NULL) unless `where` or `asWritten` says otherwise.',
       },
       indexName: { type: 'string', description: 'Optional explicit index name. Omit and one is derived from the table and columns.' },
       method: {
@@ -568,6 +572,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           'Optional predicate for a PARTIAL index: only rows matching it are indexed. "true" indexes every row, ' +
           'soft-deleted ones included; an upsert (ON CONFLICT, or on_conflict on the REST API) can only target a ' +
           'unique index like that.',
+      },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'true: create the index exactly as given, so a unique one covers every row, soft-deleted ones included, ' +
+          'with no WHERE added. apply_migration sets it for CREATE INDEX.',
       },
     },
     ['tableName', 'columns']),
@@ -1000,6 +1010,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         description: 'For trigger=http only — the HTTP verb of the endpoint. Defaults to the one the module exports.',
       },
       functionId: { type: 'string', description: 'To replace a specific existing function; its name must match.' },
+      description: { type: 'string', description: 'What the function does, as the Functions page shows it. Left out, a replaced function keeps its own.' },
     },
     ['name', 'code', 'trigger']),
   // ── Monitoring: request log ───────────────────────────────────────────────
@@ -1125,7 +1136,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
     }),
   fn('adopt_external_schema',
-    "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS + realtime), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
+    "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
     {}),
   // ── Read tools (live state of every section) ──────────────────────────────
   fn('run_query',
@@ -1698,6 +1709,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       method: a.method,
       operatorClasses: a.operatorClasses,
       where: a.where,
+      // From SQL: the index is created as the statement declares it.
+      ...(a.asWritten === true ? { asWritten: true } : {}),
     },
   }),
   rename_column: (a) => ({ action: 'RENAME_COLUMN', params: { tableName: a.tableName, oldName: a.oldName, newName: a.newName } }),
@@ -2445,7 +2458,7 @@ export async function dispatchTool(
         '- **Never use your own MCP key (`mcp_live_…`) here.** It drives these tools only. The runtime API refuses it from anywhere, browser or server, with `MCP_KEY_IN_APP`, so an app built on it does not work and ships a credential that can change the backend.',
         '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely; one sent from a browser is refused with `SERVICE_ROLE_IN_BROWSER`. An app with no end-user sign-in that must write does it in a Backenly function or its own server, never by shipping a service-role key.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
-        '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PATCH /db/<table>/<id>` (PUT is accepted as the same update), `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route.',
+        '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PATCH /db/<table>/<id>` (PUT is accepted as the same update), `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route. `DELETE /db/<table>/<id>` removes the row, as a DELETE on `/api/v2` does; the SDK\'s `delete()` sets `"deleted_at"` and keeps the row, and `/db` reads skip it.',
         '- PostgREST grammar is also available at `/api/v2/<projectId>/<table>` — `?select=*,author(*)`, `?price=gte.100`, `?order=createdAt.desc`. Same auth, same RLS.',
         '- Functions: `GET/POST /fn/<name>`. Function names are normalised to lowercase kebab-case (`list_products` deploys as `list-products`); `read_backend_state { section: "functions" }` gives each one\'s exact `url`.',
         // Spelled out because the bucket-scoped shape (/storage/{bucket}/upload)
@@ -2602,9 +2615,30 @@ export async function dispatchTool(
     if (name === 'get_table_schema') {
       const table = String(args.tableName ?? '').trim()
       if (!table) return finalize({ ok: false, summary: 'get_table_schema needs a `tableName`.' })
+      // With a branchId, the branch's own copy of the table, found the way
+      // read_backend_state finds it: on this project and only while active.
+      // An id that names no such branch is refused, never answered for
+      // production, which is what an agent working on its branch would
+      // otherwise read without knowing (production QA re-test, 2026-11-16).
+      const branchId = args.branchId == null ? '' : String(args.branchId).trim()
+      let branch: { name: string; schemaName: string } | null = null
+      if (branchId) {
+        const { prisma } = await import('@/lib/db/prisma')
+        branch = await prisma.workspaceBranch.findFirst({
+          where: { id: branchId, projectId: ctx.projectId, status: 'active' },
+          select: { name: true, schemaName: true },
+        })
+        if (!branch) {
+          return finalize({
+            ok: false,
+            code: 'BRANCH_NOT_FOUND',
+            summary: 'No active preview branch with that id on this project. branch { action: "list" } shows the ids.',
+          })
+        }
+      }
       const { getTableSchema } = await import('@/lib/mcp/schema-introspection')
       try {
-        const s = await getTableSchema(ctx.projectId, table)
+        const s = await getTableSchema(ctx.projectId, table, { branchSchema: branch?.schemaName })
         const cols = s.columns
           .map((c) => `  • ${c.name} ${c.type}${c.primaryKey ? ' PK' : ''}${c.nullable ? '' : ' NOT NULL'}${c.default ? ` default ${c.default}` : ''}`)
           .join('\n')
@@ -2617,9 +2651,10 @@ export async function dispatchTool(
         const rls = s.rlsEnabled
           ? `\n**RLS:** enabled${s.forceRls ? ' (FORCE)' : ''} · ${s.policies.length} policies`
           : '\n**RLS:** disabled'
+        const where = branch ? ` on preview branch "${branch.name}"` : ''
         const summary =
-          `**${s.table}** — ${s.recordCount} rows\n\n**Columns:**\n${cols}${fks}${checks}${rls}`
-        return finalize({ ok: true, summary: clip(summary), data: s })
+          `**${s.table}**${where} — ${s.recordCount} rows\n\n**Columns:**\n${cols}${fks}${checks}${rls}`
+        return finalize({ ok: true, summary: clip(summary), data: branch ? { branch: branch.name, ...s } : s })
       } catch (e: any) {
         return finalize({ ok: false, summary: e?.message ?? `Could not read schema for "${table}".` })
       }
@@ -2853,9 +2888,11 @@ export async function dispatchTool(
         const review = r.review?.length
           ? ` ${r.review.length} change(s) need the governed path rather than an automatic apply — a merge never reshapes a live column silently:\n  • ${r.review.join('\n  • ')}`
           : ''
+        // A table the merge made does not stream until realtime is turned on for it.
+        const realtime = r.realtime?.note ? `\n${r.realtime.note}` : ''
         return finalize({
           ok: true,
-          summary: `Merge of "${r.branch}" ${r.fullyMerged ? 'complete' : 'partial'}. ${applied}${review}`,
+          summary: `Merge of "${r.branch}" ${r.fullyMerged ? 'complete' : 'partial'}. ${applied}${review}${realtime}`,
           data: r,
         })
       }
@@ -3561,7 +3598,8 @@ export async function dispatchTool(
           status: f.status,
           detectedAt: f.detectedAt.toISOString(),
           summary: summariseFinding(f.type, f.details as Record<string, unknown>),
-          diagnosis: withProvenance(((f.details ?? {}) as Record<string, unknown>).diagnosis),
+          // Only a diagnosis made from the evidence the finding carries now.
+          diagnosis: withProvenance(currentDiagnosis(f.type, (f.details ?? {}) as Record<string, unknown>)),
         }))
       // A repair is "fixed" only when a re-check confirmed it. The rest ran
       // without confirmation and are reported as exactly that.
@@ -3677,6 +3715,19 @@ export async function dispatchTool(
       const mode = args.mode === 'READ_WRITE' ? 'READ_WRITE' as const : 'READ_ONLY' as const
       const da = await import('@/lib/services/direct-access')
       const status = await da.getDirectAccessStatus(ctx.projectId)
+      // Nothing outside Backenly can reach this region's database yet, so no
+      // string is issued, and the answer says what does work instead.
+      if (!status.available) {
+        return finalize({
+          ok: false,
+          code: 'DIRECT_ACCESS_UNAVAILABLE',
+          summary:
+            `${status.unavailable ?? da.DIRECT_ACCESS_UNAVAILABLE_MESSAGE} Read with run_query (SQL, read-only, ` +
+            'nothing to install), change rows through the REST API, change the schema with apply_migration, and take a ' +
+            'full pg_dump file from Connect → Postgres → Backups.',
+          data: { available: false },
+        })
+      }
       const existing = status.credentials.find((c) => c.mode === mode)
 
       const describe = (c: typeof status.credentials[number], provisioned: boolean) => ({
@@ -4198,6 +4249,12 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
 function withProvenance(diagnosis: unknown): unknown {
   if (!diagnosis || typeof diagnosis !== 'object' || Array.isArray(diagnosis)) return diagnosis
   const d = diagnosis as Record<string, unknown>
+  // A hypothesis that failed the investigator's own checks is not passed on as
+  // one: only that an investigation ran and what it got wrong.
+  const validation = d.validation as { ok?: unknown; problems?: unknown } | undefined
+  if (validation && validation.ok === false) {
+    return { provenance: 'ai_hypothesis', verdict: 'uncertain', failedChecks: validation.problems ?? [], at: d.at }
+  }
   return {
     ...d,
     provenance: d.model === 'deterministic-investigation' ? 'investigation' : 'ai_hypothesis',

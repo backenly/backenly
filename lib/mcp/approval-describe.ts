@@ -21,6 +21,12 @@
  *     the ledger is on; without it the old answer, irreversible, is the true one.
  *   • Truncation deletes rows, which are data rather than schema, and nothing
  *     keeps them, so it stays irreversible.
+ *   • A deleted function, schedule or trigger is reversible while the ledger is
+ *     on: the change records it whole and restoring the change puts it back
+ *     (lib/changes/resources/functions.ts, webhooks.ts). A trigger that signs
+ *     its deliveries is the exception: its secret is not kept, so it does not
+ *     come back. These read "Not auto-reversible" while the result said
+ *     History can restore them (production QA, 2026-11-16).
  */
 export async function describeApproval(
   projectId: string,
@@ -147,25 +153,30 @@ export async function describeApproval(
       // read as `unknown`, so the deletion was approved unseen (WH-F15).
       const triggerId = str('triggerId')
       let label = triggerId ? `\`${triggerId}\`` : namedThing ? `\`${namedThing}\`` : null
+      // Only a trigger known to keep no signing secret is said to come back.
+      let signs = true
       if (triggerId) {
         try {
           const { prisma } = await import('@/lib/db')
-          const found = await prisma.appTrigger.findFirst({ where: { id: triggerId, projectId }, select: { name: true } })
+          const found = await prisma.appTrigger.findFirst({ where: { id: triggerId, projectId }, select: { name: true, webhookSecret: true } })
           label = found ? `\`${found.name}\`` : `\`${triggerId}\` (no such trigger in this project)`
+          signs = found ? Boolean(found.webhookSecret) : true
         } catch { /* keep the id */ }
       }
       return {
         tool,
         target: label ? `the trigger ${label}` : 'no trigger (the call names none)',
         rowCount: null,
-        reversible: false,
+        reversible: kept && !signs,
         confirmPhrase: 'Confirm — delete the trigger',
       }
     }
     case 'delete_ai_function':
-      return { tool, target: `the function \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the function' }
+      // Recorded whole by the change, code and switch included; its restore puts it back.
+      return { tool, target: `the function \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: kept, confirmPhrase: 'Confirm — delete the function' }
     case 'delete_cron_job':
-      return { tool, target: `the scheduled job \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the scheduled job' }
+      // A schedule is a function with a cron trigger, recorded and restored the same way.
+      return { tool, target: `the scheduled job \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: kept, confirmPhrase: 'Confirm — delete the scheduled job' }
     case 'remove_integration_key':
       return { tool, target: `the ${namedThing ?? ''} integration (functions calling it will fail)`.trim(), rowCount: null, reversible: false, confirmPhrase: 'Confirm — disconnect the integration' }
     case 'delete_webhook': {

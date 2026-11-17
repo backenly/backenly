@@ -88,6 +88,7 @@ import { prisma } from '@/lib/db/prisma'
 import { extractIndexCandidate } from '@/lib/ai/infra-intelligence'
 import { IMPROVEMENT, LATENCY_MIN_MS, LATENCY_RATIO } from '@/lib/evolution-engine/benefit'
 import { SLOW_QUERY_MIN_CALLS } from './slow-query-index'
+import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRoles } from './statement-attribution'
 import { addTimes, blocksPerCall, NO_TIMES, timesFromStatement, timesSince, welch, type TimeSums } from './index-trial-stats'
 
 export const LEDGER_TYPE = 'index_trial'
@@ -376,19 +377,24 @@ export async function readIndexTrial(
     return empty('unreadable')
   }
 
-  let rows: Array<{ id: string | null; calls: number; total: number; sd: number; blocks: number; query: string }>
+  let rows: Array<{ id: string | null; calls: number; total: number; sd: number; blocks: number; query: string; by_own_role: boolean }>
   let statsReset: string | null = null
   try {
-    // Scoped to this database and to statements naming this project's schema;
-    // the text is parsed below, never stored.
+    // Scoped to this database and to this project's statements
+    // (./statement-attribution.ts); the text is parsed below, never stored.
+    const roles = statementRoles(schema, projectId)
     rows = await q(
-      `SELECT queryid::text AS id, calls::float8 AS calls, total_exec_time::float8 AS total,
-              stddev_exec_time::float8 AS sd, (shared_blks_hit + shared_blks_read)::float8 AS blocks,
-              LEFT(query, 4000) AS query
-         FROM pg_stat_statements
-        WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-          AND position($1 in query) > 0`,
+      `SELECT s.queryid::text AS id, s.calls::float8 AS calls, s.total_exec_time::float8 AS total,
+              s.stddev_exec_time::float8 AS sd, (s.shared_blks_hit + s.shared_blks_read)::float8 AS blocks,
+              LEFT(s.query, 4000) AS query,
+              ${byOwnRoleColumn('r', '$2')} AS by_own_role
+         FROM pg_stat_statements s
+         JOIN pg_roles r ON r.oid = s.userid
+        WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND ${projectStatementScope({ s: 's', r: 'r', schema: '$1', ownRoles: '$2', platformRoles: '$3' })}`,
       schema,
+      roles.own,
+      roles.platform,
     )
     const info = await q<{ stats_reset: Date | string | null }>(`SELECT stats_reset FROM pg_stat_statements_info`).catch(() => [])
     const r = info[0]?.stats_reset
@@ -403,6 +409,7 @@ export async function readIndexTrial(
   for (const row of rows) {
     if (!row.id) continue
     const query = String(row.query ?? '')
+    if (!projectStatement({ query, byOwnRole: row.by_own_role === true }, schema)) continue
     const sums = timesFromStatement(row.calls, row.total, row.sd, row.blocks)
     const cand = extractIndexCandidate(query, schema)
     // One statement can have a row per role; they add up.

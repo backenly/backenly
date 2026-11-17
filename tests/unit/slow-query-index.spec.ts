@@ -173,3 +173,31 @@ describe('extractIndexCandidate — names written without quotes', () => {
     expect(extractIndexCandidate(`SELECT * FROM orders WHERE total >= $1`, SCHEMA, { tables })).toBeNull()
   })
 })
+
+/**
+ * A statement read as SQL. pg_stat_statements keeps a statement's text as it
+ * was sent, comments included, and a utility statement keeps its literals. A
+ * table, a filter or a WHERE inside a comment, a string or a function body is
+ * not one the statement reads.
+ */
+describe('extractIndexCandidate — comments and strings are not SQL', () => {
+  it('reads nothing from a comment', () => {
+    expect(extractIndexCandidate(`SELECT 1 /* FROM "${SCHEMA}"."orders" WHERE "status" = $1 */`, SCHEMA)).toBeNull()
+    expect(extractIndexCandidate(`SELECT 1 -- FROM "${SCHEMA}"."orders" WHERE "status" = $1`, SCHEMA)).toBeNull()
+  })
+
+  it('reads through a nested comment as PostgreSQL does', () => {
+    const q = `SELECT 1 /* outer /* inner */ FROM "${SCHEMA}"."orders" WHERE "status" = $1 */`
+    expect(extractIndexCandidate(q, SCHEMA)).toBeNull()
+  })
+
+  it('reads nothing from a string or a dollar-quoted body', () => {
+    expect(extractIndexCandidate(`SELECT 'FROM "${SCHEMA}"."orders" WHERE "status" = 1'`, SCHEMA)).toBeNull()
+    expect(extractIndexCandidate(`SELECT $$ FROM "${SCHEMA}"."orders" WHERE "status" = 1 $$`, SCHEMA)).toBeNull()
+  })
+
+  it('still reads the statement around a comment', () => {
+    const q = `SELECT * /* list */ FROM "${SCHEMA}"."orders" -- open orders\nWHERE "status" = $1`
+    expect(extractIndexCandidate(q, SCHEMA)).toEqual({ table: 'orders', column: 'status' })
+  })
+})

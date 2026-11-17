@@ -48,7 +48,8 @@ import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { KIT, KitConfirmDialog, KitModal } from '@/components/inspector/kit'
 import { InstrumentBar, type BarFact } from '@/components/console/InstrumentBar'
 import { recordNav, useRecordParam } from '@/components/console/RecordDrawer'
-import { EmptyPanel, ErrorRow } from '@/components/console/states'
+import { ErrorRow } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { FOCUS_INSET, RULE } from '@/components/console/tokens'
 import { BucketPolicyDialog } from './BucketPolicyDialog'
 import { BucketUploadsDialog } from './BucketUploadsDialog'
@@ -460,14 +461,15 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             </div>
           ) : noBuckets ? (
             <div className="min-w-0 flex-1 overflow-y-auto">
-              <EmptyPanel
+              <FirstRun
+                picture="files"
                 title="No buckets yet"
-                sentence="Your agent creates a bucket when your app needs to store files."
+                sentence="Buckets hold your app’s files, each with its own read rule. Ask your agent for uploads and it creates the bucket."
                 requests={['Add profile photo uploads: a private bucket, and only the owner can read their files.']}
+                projectId={projectId}
                 agent={role.loading ? null : { status: agent.status, client: agent.client }}
                 canConnect={canAdminister}
                 docs={{ label: 'Storage docs', slug: 'storage' }}
-                headingLevel={2}
               />
             </div>
           ) : (

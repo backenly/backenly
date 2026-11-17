@@ -102,8 +102,9 @@ app.use(cors({
   // half a fix: PostgREST answers the count in that header, and cross-origin
   // JavaScript cannot see a response header unless it is named here. The client
   // would send a correct request and get a body with no way to read the total.
-  // `Location` is the same story for a created row's URI.
-  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied', 'X-Backenly-Environment'],
+  // `Location` is the same story for a created row's URI, and `Retry-After` for
+  // when to send again after a 503 the data plane could not serve yet, or a 429.
+  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied', 'X-Backenly-Environment', 'Retry-After'],
   maxAge: 86400,
 }))
 

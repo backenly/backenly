@@ -286,6 +286,40 @@ describe('building on a branch', () => {
     expect(other.body.code).toBe('BRANCH_SECTION_UNSUPPORTED')
   }, 60_000)
 
+  // Production QA re-test (2026-11-16): get_table_schema took no branchId, so
+  // a branch's table read "does not exist in this project" from production.
+  it('describes a table that exists only on the branch, with get_table_schema { branchId }', async () => {
+    const onBranch = await call('get_table_schema', { tableName: 'invoices', branchId })
+    expect(onBranch.status).toBe(200)
+    expect(onBranch.body.ok).toBe(true)
+    expect(onBranch.body.data.branch).toBe('add-invoices')
+    expect(onBranch.body.data.schema).toBe(branchSchema)
+    expect(onBranch.body.data.columns.map((c: any) => c.name)).toEqual(expect.arrayContaining(['amount', 'user_id']))
+    expect(onBranch.body.summary).toContain('on preview branch "add-invoices"')
+
+    // A column the branch added to a table production has too is the branch's.
+    const orders = await call('get_table_schema', { tableName: 'orders', branchId })
+    expect(orders.body.data.columns.map((c: any) => c.name)).toContain('note')
+
+    // Without branchId it is production's catalog, which has neither.
+    const onMain = await call('get_table_schema', { tableName: 'invoices' })
+    expect(onMain.body.ok).toBe(false)
+    expect(onMain.body.error).toMatch(/does not exist in this project/)
+    const mainOrders = await call('get_table_schema', { tableName: 'orders' })
+    expect(mainOrders.body.data.columns.map((c: any) => c.name)).not.toContain('note')
+  }, 60_000)
+
+  it('refuses a branch id that names no active branch of this project, rather than reading production', async () => {
+    const r = await call('get_table_schema', { tableName: 'orders', branchId: crypto.randomUUID() })
+    expect(r.body.ok).toBe(false)
+    expect(r.body.code).toBe('BRANCH_NOT_FOUND')
+    expect(r.body.data).toBeNull()
+
+    const missing = await call('get_table_schema', { tableName: 'ghosts', branchId })
+    expect(missing.body.ok).toBe(false)
+    expect(missing.body.error).toMatch(/does not exist on this preview branch/)
+  }, 60_000)
+
   it('diffs as the migrations a merge would replay, with no conflict', async () => {
     const d = await diffBranch(projectId, branchId)
     expect(d.ok).toBe(true)
@@ -328,6 +362,12 @@ describe('building on a branch', () => {
     expect(branch?.status).toBe('merged')
     expect(await schemaExists(branchSchema)).toBe(false)
   }, 240_000)
+
+  it('refuses get_table_schema on the branch once it is merged', async () => {
+    const r = await call('get_table_schema', { tableName: 'invoices', branchId })
+    expect(r.body.ok).toBe(false)
+    expect(r.body.code).toBe('BRANCH_NOT_FOUND')
+  }, 60_000)
 
   it('lets the same branch name be used again once merged', async () => {
     const again = await createBranch(projectId, ownerId, 'add-invoices')

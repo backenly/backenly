@@ -18,6 +18,7 @@ import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { asyncRoute } from '../lib/async-route'
+import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import { touchProjectActivity } from '@/lib/projects/activity'
 
 /**
@@ -340,8 +341,12 @@ async function fetchProviderUser(provider: string, accessToken: string): Promise
 async function handleOAuthInit(req: Request, res: Response) {
   const { projectId, provider } = req.params
 
+  // Not a provider: a path no auth route serves, such as /auth/user. Answered
+  // as one, with the auth routes there are, rather than as a provider this
+  // project does not support (production QA re-test, 2026-11-16, N15).
   if (!PROVIDER_AUTH_URLS[provider]) {
-    return jsonError(res, 404, `Provider "${provider}" is not supported. Supported: google, github, discord, facebook`, 'NOT_FOUND')
+    res.status(404).json(v1NotFoundBody(projectId, ['auth', provider]))
+    return
   }
 
   const [config, project] = await Promise.all([
@@ -419,7 +424,8 @@ async function handleOAuthCallback(req: Request, res: Response) {
     return jsonError(res, 400, `OAuth error: ${providerError}`, 'OAUTH_DENIED')
   }
   if (!PROVIDER_AUTH_URLS[provider]) {
-    return jsonError(res, 404, `Provider "${provider}" is not supported.`, 'NOT_FOUND')
+    res.status(404).json(v1NotFoundBody(req.params.projectId, ['auth', provider, 'callback']))
+    return
   }
   if (!code || !stateRaw) {
     return jsonError(res, 400, 'Missing code or state parameter', 'VALIDATION_ERROR')

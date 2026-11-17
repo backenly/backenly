@@ -12,6 +12,19 @@ import { getProjectQuota } from '@/lib/services/storageQuota'
 import { UploadRejectedError, assertFileAllowed, assertFileSize } from '@/lib/storage/upload-policy'
 import { NEW_BUCKET_UPLOADS, uploadRuleOf, type UploadRule } from '@/lib/storage/upload-access'
 
+/**
+ * The thumbnail storage processing made for a file, or null. Processing writes
+ * it beside the file as thumb_<name>.webp (lib/services/storageProcessing.ts)
+ * and records that path in processingResult; the recorded path is used only
+ * when it is exactly that one, so a stored value can never name another file.
+ */
+export function ownThumbnailPath(filePath: unknown, processingResult: unknown): string | null {
+  const recorded = (processingResult as { thumbnailPath?: unknown } | null)?.thumbnailPath
+  if (typeof recorded !== 'string' || typeof filePath !== 'string' || !filePath) return null
+  const expected = path.join(path.dirname(filePath), `thumb_${path.basename(filePath, path.extname(filePath))}.webp`)
+  return path.resolve(recorded) === path.resolve(expected) ? path.resolve(expected) : null
+}
+
 /** Bucket writes are governed changes (lib/changes/ledger.ts); one made inside another change joins it. */
 const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
 
@@ -859,10 +872,10 @@ export class LocalStorageService implements StorageService {
     }
 
     // Delete associated thumbnail if one was generated (#595)
-    const processingResult = file.processingResult as { thumbnailPath?: string } | null
-    if (processingResult?.thumbnailPath) {
+    const thumbnailPath = ownThumbnailPath(file.path, file.processingResult)
+    if (thumbnailPath) {
       try {
-        await fs.unlink(processingResult.thumbnailPath)
+        await fs.unlink(thumbnailPath)
       } catch (error) {
         // Non-fatal if thumbnail file is missing or already cleaned up
       }
@@ -917,10 +930,10 @@ export class LocalStorageService implements StorageService {
         }
 
         // Delete associated thumbnail if one was generated (#595)
-        const processingResult = file.processingResult as { thumbnailPath?: string } | null
-        if (processingResult?.thumbnailPath) {
+        const thumbnailPath = ownThumbnailPath(file.path, file.processingResult)
+        if (thumbnailPath) {
           try {
-            await fs.unlink(processingResult.thumbnailPath)
+            await fs.unlink(thumbnailPath)
           } catch (error) {
             // Non-fatal if thumbnail is already deleted
           }

@@ -128,6 +128,7 @@ const FORWARD_MIGRATIONS = [
   '20261111120000_webhook_tables',
   '20261116120000_project_imported_from',
   '20261116140000_bucket_upload_policy',
+  '20261117120000_project_purge_after',
 ]
 
 describe('the assembled migration workspace', () => {

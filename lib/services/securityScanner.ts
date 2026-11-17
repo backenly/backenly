@@ -66,7 +66,7 @@ async function scanApiKeys(projectId?: string): Promise<SecurityIssue[]> {
         },
         aiFixPreview: {
           configChanges: `// Before
-API_KEY=sk_live_1234567890
+API_KEY=sk_live_••••••••
 
 // After
 API_KEY=\${process.env.SECRET_API_KEY}

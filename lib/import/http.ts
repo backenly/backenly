@@ -14,9 +14,23 @@ import { redactedMessage } from './redact'
 
 export const NO_STORE = { 'Cache-Control': 'no-store' }
 
-/** 404 off Cloud: on a self-hosted deployment the capability does not exist. */
+/**
+ * Whether this deployment offers the import: Backenly Cloud, once the
+ * deployment turns it on with BACKENLY_IMPORT=enabled. On a self-hosted
+ * deployment the capability does not exist.
+ */
+export function importEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isCloudEdition() && env.BACKENLY_IMPORT === 'enabled'
+}
+
+/**
+ * 404 unless the import is offered here (importEnabled). Every /api/import
+ * route asks this first, and the console offers importing only where
+ * GET /api/import answers (components/onboarding/useOrgImports.ts), so with the
+ * import off none of it shows.
+ */
 export function cloudOnly(): NextResponse | null {
-  if (isCloudEdition()) return null
+  if (importEnabled()) return null
   return NextResponse.json({ error: 'Not found', code: 'CLOUD_ONLY_FEATURE' }, { status: 404 })
 }
 

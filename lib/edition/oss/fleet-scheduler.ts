@@ -42,7 +42,9 @@ export async function activeTargets(options?: FleetTargetOptions): Promise<Fleet
 export async function maintenanceTargets(): Promise<FleetTarget[]> {
   return prisma.project
     .findMany({
-      where: { expiresAt: null }, // only active (non-expired) projects
+      // Only active projects: not expired, and not asked to be deleted
+      // (lib/projects/deletion.ts), which the daily purge removes.
+      where: { expiresAt: null, deletedAt: null },
       select: { id: true, userId: true },
     })
     .catch(() => [])
