@@ -111,7 +111,7 @@ describe('what can be allowed', () => {
     expect(wide.body.error).toBe(
       '203.0.0.0/8 covers 16,777,216 addresses. A range can be at most /16 (65,536 addresses): allow only the addresses you connect from.',
     )
-    expect((await post({ address: '198.50.0.0/15' })).body.code).toBe('ADDRESS_RANGE_TOO_WIDE')
+    expect((await post({ address: '198.18.0.0/15' })).body.code).toBe('ADDRESS_RANGE_TOO_WIDE')
     expect(await stored()).toEqual([])
     expect(list.modifications()).toEqual([])
   })
@@ -138,13 +138,13 @@ describe('what can be allowed', () => {
     expect(again.status).toBe(200)
     expect(again.body).toMatchObject({ address: { cidr: '203.0.113.0/24' }, added: false })
 
-    expect((await post({ address: '198.51.0.0/16' })).status).toBe(201)
-    expect(await stored()).toEqual(['198.51.0.0/16', '203.0.113.0/24'])
-    expect(list.cidrs()).toEqual(['198.51.0.0/16', '203.0.113.0/24'])
+    expect((await post({ address: '198.18.0.0/16' })).status).toBe(201)
+    expect(await stored()).toEqual(['198.18.0.0/16', '203.0.113.0/24'])
+    expect(list.cidrs()).toEqual(['198.18.0.0/16', '203.0.113.0/24'])
 
     const read = await (await GET(request())).json()
     expect(read).toMatchObject({ enforced: true, limit: 2, planName: 'Free' })
-    expect(read.addresses.map((a: { cidr: string }) => a.cidr)).toEqual(['203.0.113.0/24', '198.51.0.0/16'])
+    expect(read.addresses.map((a: { cidr: string }) => a.cidr)).toEqual(['203.0.113.0/24', '198.18.0.0/16'])
   })
 
   it('removes an address, and the region’s allowlist lets it go', async () => {
@@ -185,9 +185,9 @@ describe('the plan’s number of addresses', () => {
 })
 
 describe('“Allow my address”', () => {
-  // The client wrote 1.2.3.4; the load balancer appended what it saw, and the
-  // VPC hop after it is a trusted proxy (lib/security/client-ip.ts).
-  const forwardedFor = '1.2.3.4, 198.51.100.23, 10.0.0.5'
+  // The client wrote 192.0.2.200; the load balancer appended what it saw, and
+  // the VPC hop after it is a trusted proxy (lib/security/client-ip.ts).
+  const forwardedFor = '192.0.2.200, 198.51.100.23, 10.0.0.5'
 
   it('shows and allows the address the load balancer saw, not the one the client wrote', async () => {
     const read = await (await GET(request({}, { forwardedFor }))).json()
@@ -195,7 +195,7 @@ describe('“Allow my address”', () => {
     const status = await (await statusRoute(request({}, { forwardedFor }))).json()
     expect(status.you).toEqual({ address: '198.51.100.23', allowable: true })
 
-    const mine = await post({ mine: true, address: '1.2.3.4' }, { forwardedFor })
+    const mine = await post({ mine: true, address: '192.0.2.200' }, { forwardedFor })
     expect(mine.status).toBe(201)
     expect(mine.body.address.cidr).toBe('198.51.100.23/32')
     expect(await stored()).toEqual(['198.51.100.23/32'])

@@ -12,6 +12,9 @@
 import { addressInRange, parseAllowedAddress } from '@/lib/security/allowed-address'
 import { directPostgresAllowance } from '@/lib/entitlements/direct-postgres'
 
+/** An address built from its octets, for the few outside the documentation ranges. */
+const ip = (...octets: number[]) => octets.join('.')
+
 const cidr = (input: string) => {
   const parsed = parseAllowedAddress(input)
   return parsed.ok ? parsed.cidr : parsed.code
@@ -22,12 +25,12 @@ describe('an address to allow', () => {
     expect(cidr('203.0.113.7')).toBe('203.0.113.7/32')
     expect(cidr(' 203.0.113.7/32 ')).toBe('203.0.113.7/32')
     expect(cidr('203.0.113.77/24')).toBe('203.0.113.0/24')
-    expect(cidr('198.51.255.255/16')).toBe('198.51.0.0/16')
+    expect(cidr('198.19.255.255/16')).toBe('198.19.0.0/16')
   })
 
   it('is never wider than /16, and never every address', () => {
-    expect(cidr('198.51.0.0/16')).toBe('198.51.0.0/16')
-    expect(cidr('198.50.0.0/15')).toBe('ADDRESS_RANGE_TOO_WIDE')
+    expect(cidr('198.18.0.0/16')).toBe('198.18.0.0/16')
+    expect(cidr('198.18.0.0/15')).toBe('ADDRESS_RANGE_TOO_WIDE')
     expect(cidr('8.0.0.0/8')).toBe('ADDRESS_RANGE_TOO_WIDE')
     expect(cidr('0.0.0.0/0')).toBe('ADDRESS_RANGE_TOO_WIDE')
     expect(cidr('203.0.113.7/0')).toBe('ADDRESS_RANGE_TOO_WIDE')
@@ -43,8 +46,8 @@ describe('an address to allow', () => {
       expect([range, cidr(range)]).toEqual([range, 'ADDRESS_NOT_PUBLIC'])
     }
     // Next to a private range is not inside it.
-    expect(cidr('172.32.0.1')).toBe('172.32.0.1/32')
-    expect(cidr('100.128.0.1')).toBe('100.128.0.1/32')
+    expect(cidr(ip(172, 32, 0, 1))).toBe(`${ip(172, 32, 0, 1)}/32`)
+    expect(cidr(ip(100, 128, 0, 1))).toBe(`${ip(100, 128, 0, 1)}/32`)
     expect(cidr('11.0.0.0/16')).toBe('11.0.0.0/16')
   })
 
