@@ -42,6 +42,13 @@ const BY_PLAN: Record<string, Omit<DirectPostgresAllowance, 'planName'>> = {
   SELF_HOSTED: ENTERPRISE,
 }
 
+/**
+ * The fewest addresses any plan allows. A project allowing no more than this
+ * is within every plan's allowance, so its plan need not be read to admit them
+ * all (lib/services/direct-access-allowlist.ts).
+ */
+export const SMALLEST_ADDRESS_ALLOWANCE = Math.min(...Object.values(BY_PLAN).map((a) => a.allowedAddresses))
+
 /** The allowance of a plan, by its code. */
 export function directPostgresAllowance(planName: string | null | undefined): DirectPostgresAllowance {
   const code = (planName ?? '').toUpperCase()

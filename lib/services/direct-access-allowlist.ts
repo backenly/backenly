@@ -53,6 +53,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { projectRegion, regionSetting } from '@/lib/data-plane/regional'
+import { directPostgresAllowanceFor, SMALLEST_ADDRESS_ALLOWANCE } from '@/lib/entitlements/direct-postgres'
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 
 export const PREFIX_LIST_VARIABLE = 'DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID'
@@ -126,9 +127,17 @@ const backoff = (retry: number) => sleep(Math.min(3_000, 200 * 2 ** retry) + Mat
 // ── What should be on the list ───────────────────────────────────────────────
 
 /**
- * Every address a project in `region` allows, earliest allowed first, each
+ * Every address a project in `region` admits, earliest allowed first, each
  * once. A project asked to be deleted no longer counts; restoring it brings
  * its addresses back, and its purge removes them.
+ *
+ * A project admits at most its plan's number of addresses, its earliest
+ * (admittedAddresses). Adding one past the number is refused, but a restore
+ * from History can bring one back, and a plan can change to one that includes
+ * fewer: the addresses past the number stay on the project's list, marked not
+ * admitted, and are not put on the region's. So no project takes more of the
+ * shared list than its plan includes. Only a project with more addresses than
+ * the smallest plan's number has its plan read.
  */
 export async function allowedAddressesIn(region: CloudRegionId): Promise<string[]> {
   const rows = await prisma.directAccessAddress.findMany({
@@ -139,10 +148,31 @@ export async function allowedAddressesIn(region: CloudRegionId): Promise<string[
         ...(region === HOME_REGION ? { OR: [{ region: null }, { region }] } : { region }),
       },
     },
-    select: { cidr: true },
+    select: { projectId: true, cidr: true },
     orderBy: [{ createdAt: 'asc' }, { cidr: 'asc' }],
   })
-  return [...new Set(rows.map((r) => r.cidr))]
+  const byProject = new Map<string, string[]>()
+  for (const r of rows) {
+    const list = byProject.get(r.projectId) ?? []
+    list.push(r.cidr)
+    byProject.set(r.projectId, list)
+  }
+  const admitted = new Set<string>()
+  for (const [projectId, cidrs] of byProject) {
+    const limit =
+      cidrs.length <= SMALLEST_ADDRESS_ALLOWANCE ? cidrs.length : (await directPostgresAllowanceFor(projectId)).allowedAddresses
+    for (const cidr of admittedAddresses(cidrs, limit)) admitted.add(`${projectId} ${cidr}`)
+  }
+  return [...new Set(rows.filter((r) => admitted.has(`${r.projectId} ${r.cidr}`)).map((r) => r.cidr))]
+}
+
+/**
+ * The addresses of one project that are admitted: the first `limit`, in the
+ * order allowed (earliest first, then by range), which is the order both the
+ * region's list and the project's own are read in.
+ */
+export function admittedAddresses<T>(inOrder: T[], limit: number): T[] {
+  return inOrder.slice(0, Math.max(0, limit))
 }
 
 // ── One sync ─────────────────────────────────────────────────────────────────

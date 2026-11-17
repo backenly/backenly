@@ -13,7 +13,10 @@
  *   - removing one is an entry; restoring it puts the address back, on the
  *     list and on the region's allowlist;
  *   - an address refused (too wide, or past the plan's number) leaves no
- *     entry, and nothing changes.
+ *     entry, and nothing changes;
+ *   - a restore can bring back an address past the plan's number (one was
+ *     added in its place since): it is on the project's list, not admitted,
+ *     and the region's list holds only the plan's number, the earliest.
  *
  * Real database, the real ledger and restore; the EC2 prefix list is a
  * stand-in (tests/helpers/fake-prefix-list.ts).
@@ -40,7 +43,7 @@ import { prisma } from '@/lib/db/prisma'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import { recoverChange } from '@/lib/changes/recovery'
 import { closeChangeLockPool } from '@/lib/changes/lock'
-import { AllowedAddressError, allowAddress, removeAddress } from '@/lib/services/direct-access-addresses'
+import { AllowedAddressError, allowAddress, allowlistState, removeAddress } from '@/lib/services/direct-access-addresses'
 import { prefixLists, type FakePrefixList } from '../helpers/fake-prefix-list'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
@@ -145,4 +148,24 @@ it('an address refused, as too wide or past the plan’s number, leaves no entry
   expect(refused.code).toBe('ADDRESS_LIMIT_REACHED')
   expect(await prisma.backendChange.count({ where: { projectId } })).toBe(after)
   expect(await stored()).toEqual(['192.0.2.1/32', '192.0.2.2/32'])
+}, 60_000)
+
+it('a restore that brings an address back past the plan’s number leaves it off the region’s list, the earliest kept', async () => {
+  await prisma.directAccessAddress.deleteMany({ where: { projectId } })
+  await allowAddress(projectId, '192.0.2.10', { userId: ownerId })
+  await allowAddress(projectId, '192.0.2.11', { userId: ownerId })
+  await removeAddress(projectId, '192.0.2.10', { userId: ownerId })
+  const removal = await latest()
+  // Free allows two: another takes the place of the one removed.
+  await allowAddress(projectId, '192.0.2.12', { userId: ownerId })
+
+  expect(await restore(removal.id)).toMatchObject({ ok: true })
+  expect(await stored()).toEqual(['192.0.2.10/32', '192.0.2.11/32', '192.0.2.12/32'])
+  expect(list.cidrs()).toEqual(['192.0.2.11/32', '192.0.2.12/32'])
+  const state = await allowlistState(projectId)
+  expect(state.addresses.map((a) => [a.cidr, a.admitted])).toEqual([
+    ['192.0.2.11/32', true],
+    ['192.0.2.12/32', true],
+    ['192.0.2.10/32', false],
+  ])
 }, 60_000)

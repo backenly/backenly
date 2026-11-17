@@ -14,7 +14,12 @@
  *     the client wrote into X-Forwarded-For;
  *   - each add and remove reaches the region's allowlist at once;
  *   - until one is allowed, the status and MCP say "Allow an address first",
- *     before anything about the login;
+ *     before anything about the login, and never that this project's list is
+ *     the only way in: the endpoint admits every project's addresses in the
+ *     region, and the login's password is what reaches this project;
+ *   - an address past the plan's number (a restore, a smaller plan) stays on
+ *     the project's list, is said to be not admitted, and is left off the
+ *     region's;
  *   - over MCP, database_credentials takes allowAddress and removeAddress,
  *     validated the same way, with a plain refusal;
  *   - where the region does not limit addresses, there is no list to change.
@@ -42,7 +47,8 @@ import { prisma } from '@/lib/db/prisma'
 import { encryptValue } from '@/lib/security/projectEnvCrypto'
 import { prefixLists, type FakePrefixList } from '../helpers/fake-prefix-list'
 import { directAccessRoleNames, getDirectAccessStatus } from '@/lib/services/direct-access'
-import { dispatchTool } from '@/lib/ai/brain/tools'
+import { BRAIN_TOOLS, dispatchTool } from '@/lib/ai/brain/tools'
+import { syncAllowlistForProject } from '@/lib/services/direct-access-allowlist'
 import { DELETE, GET, POST } from '@/app/api/projects/[id]/database-access/allowed-addresses/route'
 import { GET as statusRoute } from '@/app/api/projects/[id]/database-access/route'
 
@@ -219,9 +225,20 @@ describe('until an address is allowed', () => {
 
     const res = await dispatchTool('get_database_credentials', { mode: 'READ_ONLY' }, { projectId: mockProjectId })
     expect(res.ok).toBe(true)
-    expect(res.summary.startsWith('Allow an address first: this project allows no address yet')).toBe(true)
+    expect(res.summary.startsWith(
+      'Allow an address first: this project allows no address yet. The database endpoint is shared by the projects in this ' +
+        'region and refuses an address none of them allows, so allow the public IPv4 address you connect from',
+    )).toBe(true)
     expect(res.summary.indexOf('Allow an address first')).toBeLessThan(res.summary.indexOf('read-only Postgres access'))
+    expect(res.summary).not.toMatch(/refuses every connection|whatever the login|nothing connects until/)
     expect(res.data).toMatchObject({ allowlistEnforced: true, allowedAddresses: [], addressLimit: 2 })
+  })
+
+  it('tells the agent the endpoint is shared, never that the project’s own list is the only way in', () => {
+    const tool = BRAIN_TOOLS.find((t) => t.function?.name === 'get_database_credentials')!
+    const description = String(tool.function.description)
+    expect(description).toContain('that endpoint is shared by the projects in the region and admits an address any of them allows')
+    expect(description).not.toMatch(/nothing connects until/)
   })
 
   it('MCP stops saying it once an address is allowed', async () => {
@@ -252,8 +269,36 @@ describe('over MCP (connect database_credentials)', () => {
     expect(list.cidrs()).toEqual(['198.51.100.23/32'])
 
     const off = await dispatchTool('get_database_credentials', { removeAddress: '198.51.100.23/32' }, { projectId: mockProjectId })
-    expect(off.summary.split('\n')[0]).toBe('Removed 198.51.100.23/32 from the allowed addresses.')
+    expect(off.summary.split('\n')[0]).toBe(
+      'Removed 198.51.100.23/32 from the allowed addresses. New connections from it are refused unless another project in this ' +
+        "region allows it too; connections already open stay open until a login's password is rotated.",
+    )
     expect(list.cidrs()).toEqual([])
+  })
+})
+
+describe('an address past the plan’s number', () => {
+  it('stays on the project’s list as not admitted, is left off the region’s, and the status and MCP say so', async () => {
+    // Three on Free, as a restore or a move from Pro can leave them.
+    for (const [i, cidr] of ['198.51.100.1/32', '198.51.100.2/32', '198.51.100.3/32'].entries()) {
+      await prisma.directAccessAddress.create({ data: { projectId: mockProjectId, cidr, createdAt: new Date(Date.UTC(2026, 10, 17, i)) } })
+    }
+    expect(await syncAllowlistForProject(mockProjectId)).toMatchObject({ status: 'synced', added: 2 })
+    expect(list.cidrs()).toEqual(['198.51.100.1/32', '198.51.100.2/32'])
+
+    const { allowlist } = await getDirectAccessStatus(mockProjectId)
+    expect(allowlist!.addresses.map((a) => [a.cidr, a.admitted])).toEqual([
+      ['198.51.100.1/32', true],
+      ['198.51.100.2/32', true],
+      ['198.51.100.3/32', false],
+    ])
+    expect(allowlist!.notAdmitted).toBe('Not admitted on the Free plan: remove one, or move to Pro for up to 10.')
+
+    const res = await dispatchTool('get_database_credentials', { mode: 'READ_ONLY' }, { projectId: mockProjectId })
+    expect(res.data).toMatchObject({ allowedAddresses: ['198.51.100.1/32', '198.51.100.2/32', '198.51.100.3/32'], notAdmittedAddresses: ['198.51.100.3/32'] })
+    expect(res.summary).toContain(
+      '198.51.100.3/32 is not admitted: the Free plan includes 2 addresses and this project allows 3. Remove one, or move to Pro for up to 10.',
+    )
   })
 })
 

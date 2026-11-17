@@ -1119,7 +1119,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     "The backend briefing: everything Backenly's autonomous operator detected, fixed, or queued while nobody was watching. Returns open findings with evidence, changes awaiting human approval in the Review Queue, fixes auto-applied in the last 24h, pending external schema drift, and the latest restore point. Call this FIRST when starting a session on an existing backend, or when the user asks \"what happened?\" / \"any issues?\". Side-effect free.",
     {}),
   fn('get_database_credentials',
-    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). Where the region's database endpoint admits only allowed addresses (`data.allowlistEnforced`), nothing connects until the project allows the public IPv4 address it connects from: pass allowAddress (an address, or a CIDR range no wider than /16) to allow one, removeAddress to take one off; `data.allowedAddresses` lists them. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
+    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). Where the region's database endpoint admits only allowed addresses (`data.allowlistEnforced`), that endpoint is shared by the projects in the region and admits an address any of them allows; the login's password is what reaches this project. Allow the public IPv4 address you connect from with allowAddress (one address, or a CIDR range no wider than /16), take one off with removeAddress; `data.allowedAddresses` lists this project's, and `data.notAdmittedAddresses` those past its plan's number. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
     {
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
       allowAddress: { type: 'string', description: 'A public IPv4 address, or a CIDR range no wider than /16, to allow to connect.' },
@@ -3705,6 +3705,17 @@ export async function dispatchTool(
         })
       }
 
+      /** The allowlist as every answer carries it. */
+      const addressDataOf = (list: typeof status.allowlist) =>
+        list
+          ? {
+              allowlistEnforced: list.enforced,
+              allowedAddresses: list.addresses.map((a) => a.cidr),
+              ...(list.addresses.some((a) => !a.admitted) ? { notAdmittedAddresses: list.addresses.filter((a) => !a.admitted).map((a) => a.cidr) } : {}),
+              addressLimit: list.limit,
+            }
+          : {}
+
       // ── Allowed addresses: what may connect, asked for in the same call ────
       //
       // Where the region's endpoint admits only allowed addresses, no string
@@ -3717,7 +3728,10 @@ export async function dispatchTool(
       try {
         if (args.removeAddress !== undefined) {
           const removed = await addresses.removeAddress(ctx.projectId, args.removeAddress)
-          did.push(`Removed ${removed.cidr} from the allowed addresses.`)
+          did.push(
+            `Removed ${removed.cidr} from the allowed addresses. New connections from it are refused unless another project ` +
+              'in this region allows it too; connections already open stay open until a login\'s password is rotated.',
+          )
         }
         if (args.allowAddress !== undefined) {
           const allowed = await addresses.allowAddress(ctx.projectId, args.allowAddress)
@@ -3726,28 +3740,23 @@ export async function dispatchTool(
         }
       } catch (err) {
         if (!(err instanceof addresses.AllowedAddressError)) throw err
-        const list = status.allowlist
-        return finalize({
-          ok: false,
-          code: err.code,
-          summary: err.message,
-          data: list ? { allowlistEnforced: list.enforced, allowedAddresses: list.addresses.map((a) => a.cidr), addressLimit: list.limit } : {},
-        })
+        return finalize({ ok: false, code: err.code, summary: err.message, data: addressDataOf(status.allowlist) })
       }
       const allowlist = did.length > 0 ? await addresses.allowlistState(ctx.projectId) : status.allowlist
+      const notAdmitted = allowlist?.enforced ? addresses.notAdmittedLine(allowlist) : null
       const addressLines = [
         ...did,
         ...(allowlist?.enforced && allowlist.addresses.length === 0
           ? [
-              'Allow an address first: this project allows no address yet, so the database refuses every connection, whatever the ' +
-                'login. Call this again with allowAddress set to the public IPv4 address you connect from (or a range no wider than ' +
-                '/16), or ask the person to press Allow my address in Connect → Postgres.',
+              'Allow an address first: this project allows no address yet. The database endpoint is shared by the projects in ' +
+                'this region and refuses an address none of them allows, so allow the public IPv4 address you connect from: call ' +
+                'this again with allowAddress (one address, or a range no wider than /16), or ask the person to press Allow my ' +
+                'address in Connect → Postgres.',
             ]
           : []),
+        ...(notAdmitted ? [notAdmitted] : []),
       ]
-      const addressData = allowlist
-        ? { allowlistEnforced: allowlist.enforced, allowedAddresses: allowlist.addresses.map((a) => a.cidr), addressLimit: allowlist.limit }
-        : {}
+      const addressData = addressDataOf(allowlist)
 
       const existing = status.credentials.find((c) => c.mode === mode)
 

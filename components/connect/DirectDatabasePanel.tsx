@@ -25,13 +25,19 @@
  *   offered, and the logins that exist are listed by name with Revoke.
  *
  *   Allowed addresses                                    (where the region's
- *   [203.0.113.7 or 203.0.113.0/24        ] [Allow]       endpoint admits only
- *   203.0.113.7/32        Added Nov 17                ⋯   allowed addresses)
- *   Postgres takes connections only from these addresses: 1 of 2 on the Free plan.
+ *   The database endpoint is shared by the projects in   endpoint admits only
+ *   this region and admits only the addresses they allow. allowed addresses)
+ *   [203.0.113.7 or 203.0.113.0/24        ] [Allow]
+ *   203.0.113.7/32        Added Nov 17                ⋯
+ *   1 of 2 on the Free plan.
  *
  *   Until one is allowed, the section comes first and says so ("Allow an
  *   address first"), with "Allow my address", the address the request came
- *   from as the load balancer saw it.
+ *   from as the load balancer saw it. The endpoint holds every project's
+ *   addresses in the region, so nothing here claims an address is the only
+ *   way in: the login's password is what reaches this project. An address
+ *   past the plan's number (after a restore, or a move to a smaller plan) is
+ *   listed as not admitted.
  *
  *   Backups
  *   [Full backup (.sql)]  Schema only  Data only
@@ -94,11 +100,14 @@ interface Credential {
 
 /** The addresses this project lets connect (lib/services/direct-access-addresses.ts). */
 interface Allowlist {
-  /** The region's endpoint admits only allowed addresses. */
+  /** The region's endpoint admits only the addresses its projects allow. */
   enforced: boolean
-  addresses: Array<{ cidr: string; createdAt: string }>
+  /** Earliest first; one past the plan's number is not admitted. */
+  addresses: Array<{ cidr: string; createdAt: string; admitted?: boolean }>
   limit: number
   planName: string
+  /** Beside an address that is not admitted: what to do. */
+  notAdmitted?: string
 }
 
 /** The address this request came from, and whether "Allow my address" can allow it. */
@@ -289,14 +298,18 @@ function AllowedAddresses({
     ) : null
 
   return (
-    <Section id="postgres-addresses" title="Allowed addresses" count={count}>
+    <Section
+      id="postgres-addresses"
+      title="Allowed addresses"
+      count={count}
+      description="The database endpoint is shared by the projects in this region and admits only the addresses they allow. Allow the ones you connect from; a login's password is what lets a connection into this project."
+    >
       <Panel clip={false}>
         {count === 0 && (
           <div className="border-b border-white/[0.06] px-[20px] py-[14px]">
             <p className={ROW_TITLE}>Allow an address first</p>
             <p className={ROW_TEXT}>
-              Postgres refuses every connection until this project allows the address it comes from. Allow the address you
-              connect from.
+              The endpoint refuses an address no project in this region allows. Allow the one you connect from.
             </p>
             {mine ? (
               <div className="mt-[10px]">{mine}</div>
@@ -359,6 +372,7 @@ function AllowedAddresses({
                   <Facts className="!mt-[4px]">
                     <Fact>Added {formatTime(a.createdAt, 'date')}</Fact>
                     {you?.allowable && addressInRange(you.address, a.cidr) && <Fact>Your address</Fact>}
+                    {a.admitted === false && <Fact strong>{allowlist.notAdmitted ?? `Not admitted on the ${allowlist.planName} plan.`}</Fact>}
                   </Facts>
                 </Row>
               ))}
@@ -367,7 +381,7 @@ function AllowedAddresses({
         )}
       </Panel>
       <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
-        Postgres takes connections only from these addresses: {count} of {allowlist.limit} on the {allowlist.planName} plan.
+        {count} of {allowlist.limit} on the {allowlist.planName} plan.
       </p>
 
       <KitConfirmDialog
@@ -380,7 +394,7 @@ function AllowedAddresses({
         }}
         danger
         title={`Remove ${removing ?? 'this address'}?`}
-        description="New connections from it are refused."
+        description="New connections from it are refused, unless another project in this region allows it too. Connections already open stay open: rotate a login's password to end them."
         undoable
         confirmLabel="Remove address"
       />
