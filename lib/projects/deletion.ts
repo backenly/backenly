@@ -101,11 +101,22 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
  *
  * The caller checks the plan's project limit first (the restore route asks
  * projectCreationVerdict, which no longer counts this project while deleted).
+ *
+ * Once `purgeAfter` has passed the project is the daily purge's, and is not
+ * restored (`due`): the purge lists every project past its date and then removes
+ * them one by one, so a restore in between would be reported done and then
+ * undone by the purge, part of it already dropped. Decided under the same lock
+ * the purge re-checks under (purgeDeletedProjects).
  */
-export async function restoreDeletedProject(projectId: string, actor: LifecycleActor, now: Date = new Date()): Promise<{ restored: boolean }> {
-  const restored = await withProjectLifecycleLock(projectId, async (tx) => {
-    const row = await tx.project.findUnique({ where: { id: projectId }, select: { deletedAt: true, pauseReason: true } })
-    if (!row?.deletedAt) return false
+export async function restoreDeletedProject(
+  projectId: string,
+  actor: LifecycleActor,
+  now: Date = new Date(),
+): Promise<{ restored: boolean; due?: boolean }> {
+  const outcome = await withProjectLifecycleLock(projectId, async (tx) => {
+    const row = await tx.project.findUnique({ where: { id: projectId }, select: { deletedAt: true, purgeAfter: true, pauseReason: true } })
+    if (!row?.deletedAt) return 'not-deleted' as const
+    if (row.purgeAfter && row.purgeAfter.getTime() <= now.getTime()) return 'due' as const
     await tx.project.update({
       where: { id: projectId },
       data: {
@@ -116,9 +127,10 @@ export async function restoreDeletedProject(projectId: string, actor: LifecycleA
           : {}),
       },
     })
-    return true
+    return 'restored' as const
   })
-  if (!restored) return { restored: false }
+  if (outcome === 'due') return { restored: false, due: true }
+  if (outcome !== 'restored') return { restored: false }
 
   // As after a resume: this process's gates serve it now, the runtime within its
   // cache's bound, its region once the region has the change. Registration was
@@ -160,6 +172,12 @@ export async function isUnfinishedImport(projectId: string): Promise<boolean> {
  * passed. Run daily, from the home region (the deletion reaches every region,
  * as deleting did from a request). One project failing never stops the rest;
  * it is tried again the next day.
+ *
+ * Each project is checked again, under its lifecycle lock, just before it is
+ * removed: still deleted and still past its date. The list is read once and
+ * removing a project takes a while, so without the re-check a project restored
+ * meanwhile would be removed anyway (restoreDeletedProject also refuses once a
+ * project is past its date).
  */
 export async function purgeDeletedProjects(now: Date = new Date(), limit = 50): Promise<{ purged: string[]; failed: string[] }> {
   const due = await prisma.project.findMany({
@@ -172,6 +190,11 @@ export async function purgeDeletedProjects(now: Date = new Date(), limit = 50): 
   const failed: string[] = []
   for (const { id } of due) {
     try {
+      const stillDue = await withProjectLifecycleLock(id, async (tx) => {
+        const row = await tx.project.findUnique({ where: { id }, select: { deletedAt: true, purgeAfter: true } })
+        return !!row?.deletedAt && !!row.purgeAfter && row.purgeAfter.getTime() <= now.getTime()
+      })
+      if (!stillDue) continue
       await deleteProjectCompletely(id)
       purged.push(id)
     } catch (err: any) {

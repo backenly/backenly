@@ -9,8 +9,9 @@
  * Free, as the Pricing page says ("The dashboard assistant answers questions
  * free"): the platform pays for its model call, so it never holds or spends
  * the account's AI credits and still answers when they are used up. What
- * bounds it is the per-user rate limit and the platform's own monthly AI
- * budget. History is client-held; nothing is persisted here.
+ * bounds it is the per-user rate limit, the daily answer budgets below, the
+ * operator's AI switch and the platform's own monthly AI budget. History is
+ * client-held; nothing is persisted here.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -22,9 +23,22 @@ import { assistantPrompt } from '@/lib/ai/brain/prompts'
 import { buildConnectManifest } from '@/lib/services/connect-manifest'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 import { agentConnectionFor } from '@/lib/mcp/agent-connection'
+import { assertAiAllowed } from '@/lib/platform-controls'
+import { consume } from '@/lib/security/auth-rate-limit'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
+
+/**
+ * The assistant is free to the person asking and paid by the platform, so its
+ * answers are budgeted: per person, per project and for the whole platform each
+ * day. Counted atomically before the model is called, and refused rather than
+ * waved through when the count cannot be made, so free accounts cannot turn it
+ * into an unmetered model or spend the platform's AI budget, which autonomy and
+ * support answers share. The operator's AI switch stops it too.
+ */
+const DAY_MS = 24 * 60 * 60 * 1000
+export const ASSISTANT_DAILY_ANSWERS = { user: 40, project: 120, platform: 2000 } as const
 
 const MAX_TURNS = 12
 const MAX_MESSAGE_CHARS = 4_000
@@ -102,6 +116,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Send { messages: [{ role, content }] } ending with a user message.' },
         { status: 400 },
+      )
+    }
+
+    const aiGuard = await assertAiAllowed()
+    if (!aiGuard.ok) {
+      return NextResponse.json({ error: 'The assistant is not available right now.' }, { status: aiGuard.status })
+    }
+    for (const [key, limit] of [
+      [`assistant:user:${userId}`, ASSISTANT_DAILY_ANSWERS.user],
+      [`assistant:project:${projectId}`, ASSISTANT_DAILY_ANSWERS.project],
+      ['assistant:platform', ASSISTANT_DAILY_ANSWERS.platform],
+    ] as const) {
+      const budget = await consume(key, limit, DAY_MS)
+      if (budget.allowed) continue
+      const unavailable = budget.outcome === 'store_unavailable'
+      return NextResponse.json(
+        {
+          error: unavailable
+            ? 'The assistant is not available right now. Try again in a moment.'
+            : 'The assistant has answered as many questions as it can for today. It answers again tomorrow.',
+        },
+        { status: unavailable ? 503 : 429, headers: { 'Retry-After': String(budget.retryAfter) } },
       )
     }
 

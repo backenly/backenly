@@ -10409,6 +10409,22 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     ct === 'foreign_key' ||
     !!referencedTable ||
     (!constraintDefinition && !ct && /(_id|Id)$/.test(columnName))
+  // Every name reaches a statement, the key's through fk-repair as the platform's
+  // own role: checked before any branch, the referenced table's included
+  // (fk-repair checks them again where it builds the statement).
+  {
+    const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+    for (const ident of [tableName, columnName, referencedTable].filter(Boolean)) {
+      if (!SAFE_IDENT.test(String(ident))) {
+        return {
+          success: false,
+          message: `"${String(ident).slice(0, 80)}" is not a valid PostgreSQL identifier.`,
+          error: 'Invalid identifier',
+          code: 'VALIDATION',
+        }
+      }
+    }
+  }
   if (looksLikeFk && tableName && columnName) {
     // `expression` carries "target(column)" from the migration parser; prefer an
     // explicit referencedTable, then the expression, then inference.
