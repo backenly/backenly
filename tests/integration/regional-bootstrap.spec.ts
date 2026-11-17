@@ -681,6 +681,13 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
   // asks for it, as this database's sessions of backenly_app do (sql/roles.sql),
   // so the logins here are made in sessions with it unset. The definer then
   // holds ADMIN on each and none of its privileges, as on RDS.
+  //
+  // A deletion keeps the schema PostgREST served for the region's later pass
+  // (lib/postgrest/retire-schema.ts), and the logins cannot be dropped before
+  // it (lib/projects/logins.ts). So the deletion stops serving the schema and
+  // retires every login at once, unable to log in, and the pass drops the
+  // schema and the logins together. Each test runs that pass as if its two
+  // minutes had gone by.
   const REGION = 'us-east-1'
   const saved = { edition: process.env.BACKENLY_EDITION }
   let ownerId = ''
@@ -755,6 +762,17 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
       [logins],
     )
   const REFUSED = /password authentication failed|not permitted to log in/
+  const served = async (schema: string) =>
+    String((await rows<{ list: string | null }>(superUrl(), `SELECT public.backenly_pgrst_current_schemas() AS list`))[0]?.list ?? '')
+      .split(',')
+      .includes(schema)
+  const schemaLeft = async (schema: string) =>
+    (await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).length > 0
+  /** The region's pass, as it runs once the deletion's two minutes have gone by. */
+  async function laterPass() {
+    const { dropRetiredSchemas, DROP_AFTER_MS } = await import('@/lib/postgrest/retire-schema')
+    return dropRetiredSchemas(REGION, new Date(Date.now() + DROP_AFTER_MS + 1_000))
+  }
 
   beforeAll(async () => {
     process.env.DATABASE_URL_US_EAST_1 = loginUrl('backenly_app')
@@ -785,24 +803,42 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
       // database, they fill the scheduler's batch for the next suite that runs
       // it (project-region.spec.ts), so they go with the projects.
       await prisma.backgroundJob
-        .deleteMany({ where: { type: 'purge_project', OR: created.map((id) => ({ payload: { path: ['projectId'], equals: id } })) } })
+        .deleteMany({
+          where: {
+            type: { in: ['purge_project', 'drop_retired_schemas'] },
+            OR: created.map((id) => ({ payload: { path: ['projectId'], equals: id } })),
+          },
+        })
         .catch(() => {})
     }
   })
 
   it('are all dropped with their project, and nothing of them is left', async () => {
     const { deleteProjectCompletely } = await import('@/lib/projects/delete')
-    const { projectId, schema, logins } = await projectWithLogins()
+    const { projectId, schema, logins, passwords } = await projectWithLogins()
     const oids = (await rows<{ oid: string }>(superUrl(), `SELECT oid::text AS oid FROM pg_roles WHERE rolname = ANY($1)`, [logins])).map((r) => r.oid)
     expect(oids).toHaveLength(3)
     const others = `SELECT roleid::regrole::text AS role, admin_option, inherit_option, set_option
                       FROM pg_auth_members WHERE member = $1::regrole AND NOT roleid = ANY($2::oid[]) ORDER BY 1, 2, 3, 4`
     const adminElsewhere = await rows(superUrl(), others, [ADMIN, oids])
+    expect(await served(schema)).toBe(true)
 
     const result = await deleteProjectCompletely(projectId)
 
-    expect(result.schemasDropped).toContain(schema)
-    expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+    // No longer served, and kept for the pass; nothing of the project can log in from now.
+    expect(result.schemasRetired).toEqual([schema])
+    expect(result.schemasDropped).not.toContain(schema)
+    expect(await served(schema)).toBe(false)
+    expect([...result.loginsDroppedLater].sort()).toEqual(logins)
+    expect(await loginStates(logins)).toEqual(logins.map((rolname) => ({ rolname, login: false, no_password: true })))
+    for (const login of logins) expect(await refusal(url(login, passwords[login]), 'SELECT 1')).toMatch(REFUSED)
+    expect(await rows(superUrl(), others, [ADMIN, oids])).toEqual(adminElsewhere)
+
+    const pass = await laterPass()
+
+    expect(pass.dropped).toContain(schema)
+    expect([...pass.loginsDropped].sort()).toEqual(logins)
+    expect(await schemaLeft(schema)).toBe(false)
     expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
     expect(
       await rows(superUrl(), `SELECT 1 FROM pg_auth_members WHERE roleid = ANY($1::oid[]) OR member = ANY($1::oid[])`, [oids]),
@@ -849,10 +885,18 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
     try {
       const result = await deleteProjectCompletely(projectId)
 
-      expect([...result.retiredLogins].sort()).toEqual(logins)
-      expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+      // Unable to log in from the deletion on.
+      expect([...result.loginsDroppedLater].sort()).toEqual(logins)
       expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
       expect(await prisma.databaseCredential.count({ where: { projectId } })).toBe(0)
+      expect(await loginStates(logins)).toEqual(logins.map((rolname) => ({ rolname, login: false, no_password: true })))
+      for (const login of logins) expect(await refusal(url(login, passwords[login]), 'SELECT 1')).toMatch(REFUSED)
+
+      // The pass drops the schema, and retires rather than drops what the other database names.
+      const pass = await laterPass()
+
+      expect([...pass.loginsRetired].sort()).toEqual(logins)
+      expect(await schemaLeft(schema)).toBe(false)
       expect(await loginStates(logins)).toEqual(logins.map((rolname) => ({ rolname, login: false, no_password: true })))
       for (const login of logins) expect(await refusal(url(login, passwords[login]), 'SELECT 1')).toMatch(REFUSED)
       // Nothing of them is left in this database, and the other is as it was.
@@ -932,16 +976,18 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
     }
 
     const result = await deleteProjectCompletely(projectId)
-
     expect(result.retiredLogins).toEqual([])
+    await laterPass()
+
     expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
   })
 
   it('a function login a failed deletion retired in the region is found and recorded by the retry', async () => {
     // The region's step commits before the platform's (dropRegionalProjectData).
-    // When the platform step then fails, the region's schema is already gone, so
-    // the retry cannot derive the function login from it: the name comes from
-    // the project instead, and the retry records the retirement.
+    // When the platform step then fails, the region's step stands: its schema is
+    // no longer served and every login is retired, with no row for the pass.
+    // The retry drops the schema, which nothing serves any more, and the
+    // logins, and records the one it can only retire.
     const { deleteProjectCompletely } = await import('@/lib/projects/delete')
     const { projectId, schema, logins } = await projectWithLogins()
     const fn = logins.find((login) => login.startsWith('bkn_fn_'))!
@@ -960,15 +1006,18 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
       await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public."${refuse}"()`)
     }
     try {
-      // The region's step stands: its schema is gone and the login retired.
+      // The region's step stands: its schema no longer served, every login retired.
       // The platform's rolled back: the project is still there.
-      expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
-      expect(await loginStates([fn])).toEqual([{ rolname: fn, login: false, no_password: true }])
+      expect(await served(schema)).toBe(false)
+      expect(await loginStates(logins)).toEqual(logins.map((rolname) => ({ rolname, login: false, no_password: true })))
       expect(await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } })).toEqual({ id: projectId })
 
       const result = await deleteProjectCompletely(projectId)
 
+      expect(result.schemasDropped).toEqual([schema])
+      expect(await schemaLeft(schema)).toBe(false)
       expect(result.retiredLogins).toEqual([fn])
+      expect(await loginStates(logins)).toEqual([{ rolname: fn, login: false, no_password: true }])
       const audit = await prisma.auditLog.findFirst({
         where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: projectId } },
         select: { details: true },
@@ -990,9 +1039,10 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
     const ro = logins.find((login) => login.startsWith('bkn_ro_'))!
     await rows(superUrl(), `GRANT TEMPORARY ON DATABASE postgres TO "${ro}"`)
     try {
-      const result = await deleteProjectCompletely(projectId)
+      await deleteProjectCompletely(projectId)
+      const pass = await laterPass()
 
-      expect(result.retiredLogins).toEqual([ro])
+      expect(pass.loginsRetired).toEqual([ro])
       expect(await loginStates(logins)).toEqual([{ rolname: ro, login: false, no_password: true }])
       expect(await refusal(url(ro, passwords[ro]), 'SELECT 1')).toMatch(REFUSED)
     } finally {
