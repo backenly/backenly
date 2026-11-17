@@ -707,9 +707,9 @@ If the column is deliberately different now, tell your coding agent to rebuild i
         const instead =
           variable === 'JWT_SECRET'
             ? `To sign a user in once the function has proved who they are, it calls createSession(userId) from ` +
-              `'@/lib/auth/session', which returns the session Backenly signs. To check a caller's session, it ` +
-              `calls verifyToken(token) from '@/lib/auth/jwt'.`
-            : `To admit only the project's admin key, it calls isAdminRequest(request) from '@/lib/auth/jwt', ` +
+              `'@backenly/functions', which returns the session Backenly signs. To check a caller's session, it ` +
+              `calls verifyToken(token) from the same module.`
+            : `To admit only the project's admin key, it calls isAdminRequest(request) from '@backenly/functions', ` +
               `which checks the key without the function holding it.`
         return (
           `${name} ${triggerPhrase(details?.trigger, details?.tableName)}, and its code reads ` +
