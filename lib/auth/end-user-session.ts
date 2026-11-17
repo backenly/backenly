@@ -14,7 +14,7 @@
  * checks its own proof of who the user is (a code sent by SMS, an external
  * identity) asks the platform for the session once it is satisfied:
  *
- *   route module:  import { createSession } from '@/lib/auth/session'
+ *   route module:  import { createSession } from '@backenly/functions'
  *                  const { token, user } = await createSession(userId)
  *   ctx function:  const { token, user } = await ctx.auth.createSession(userId)
  *

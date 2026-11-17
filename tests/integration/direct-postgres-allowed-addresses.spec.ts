@@ -149,7 +149,7 @@ describe('what can be allowed', () => {
     expect(list.cidrs()).toEqual(['198.18.0.0/16', '203.0.113.0/24'])
 
     const read = await (await GET(request())).json()
-    expect(read).toMatchObject({ enforced: true, limit: 2, planName: 'Free' })
+    expect(read).toMatchObject({ enforced: true, limit: 2, planCode: 'SANDBOX', planName: 'Free' })
     expect(read.addresses.map((a: { cidr: string }) => a.cidr)).toEqual(['203.0.113.0/24', '198.18.0.0/16'])
   })
 

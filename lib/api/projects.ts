@@ -69,6 +69,8 @@ export interface Project {
    * regionApiOrigin). Null when the server has no API address for that region.
    */
   apiBaseUrl?: string | null
+  /** The REST API's base, {origin}/api/v2/{projectId}: a table is {restBaseUrl}/{table}. */
+  restBaseUrl?: string | null
   metrics?: {
     totalFunctions: number
     totalTables: number

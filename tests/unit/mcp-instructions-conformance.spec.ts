@@ -117,13 +117,14 @@ describe('get_instructions names only advertised tools', () => {
     expect(advertised.has('get_table_schema')).toBe(true)
   })
 
-  it('documents the /db/ CRUD path and no bare-table alternative', () => {
+  it('documents one REST path for tables, /api/v2, and /db only as deprecated', () => {
     // Three different surfaces once claimed three different paths: the guide
     // said `/db/<table>`, generate_api's response said "live at /products", and
-    // a 404 body said "CRUD is /{table} and /{table}/{id}". Exactly one of those
-    // is real.
-    expect(guide).toContain('/db/<table>')
-    expect(guide).toMatch(/no bare `?\/<table>`? route/i)
+    // a 404 body said "CRUD is /{table} and /{table}/{id}". Then /db and
+    // /api/v2 were offered side by side (production QA, #22). /api/v2 is the
+    // one REST API; /db is kept for existing apps (lib/api/v1/deprecation.ts).
+    expect(guide).toContain('the REST API is `/api/v2/<projectId>/<table>`')
+    expect(guide).toMatch(/`\/db\/<table>` under the base URL is deprecated: it is kept for existing apps/)
   })
 
   it('warns that function names are kebab-cased', () => {
@@ -158,8 +159,9 @@ describe('get_instructions deployment URLs', () => {
     const res = await dispatchTool('get_instructions', {}, { projectId })
 
     expect(res.ok).toBe(true)
-    expect(res.data).toEqual({ projectId, apiBase: `${origin}/api/v1/${projectId}` })
+    expect(res.data).toEqual({ projectId, apiBase: `${origin}/api/v1/${projectId}`, restBase: `${origin}/api/v2/${projectId}` })
     expect(res.summary).toContain(`Base URL: \`${origin}/api/v1/${projectId}\``)
+    expect(res.summary).toContain(`Tables over REST: \`${origin}/api/v2/${projectId}/<table>\``)
     const urls = [...res.summary.matchAll(/https?:\/\/[^\s`]+/g)]
     expect(urls.length).toBeGreaterThan(0)
     for (const [url] of urls) expect(new URL(url).origin).toBe(origin)

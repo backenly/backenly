@@ -67,6 +67,8 @@ export interface ConnectManifest {
     id: string
     name: string
     apiBaseUrl: string
+    /** The REST API's base: tables at {restBaseUrl}/{table}, in PostgREST's grammar. */
+    restBaseUrl: string
   }
   apiKey: string
   sdk: {
@@ -331,6 +333,8 @@ export async function buildConnectManifest(
       id: project.id,
       name: project.name,
       apiBaseUrl: `${apiOrigin}/api/v1/${project.id}`,
+      // /db under apiBaseUrl is deprecated, kept for existing apps (lib/api/v1/deprecation.ts).
+      restBaseUrl: `${apiOrigin}/api/v2/${project.id}`,
     },
     apiKey: anonKey,
     sdk: {

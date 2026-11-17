@@ -126,21 +126,24 @@ export interface EvolutionReport {
 function clientMigration(spec: ExtractionSpec, fkColumn: string): ProposalView['clientMigration'] {
   const cols = spec.members.join(',')
   const first = spec.members[0]
+  // PostgREST's grammar, so the REST API it is written for: /api/v2. The
+  // deprecated /db refuses `select=`, `eq.` and embeds (lib/postgrest/translate.ts).
+  const v2 = '/api/v2/{projectId}'
   return [
     {
       purpose: 'read the concern with its parent',
-      before: `GET /db/${spec.host}?select=id,${cols}`,
-      after: `GET /db/${spec.host}?select=id,${spec.satellite}(${cols})`,
+      before: `GET ${v2}/${spec.host}?select=id,${cols}`,
+      after: `GET ${v2}/${spec.host}?select=id,${spec.satellite}(${cols})`,
     },
     {
       purpose: 'record it',
-      before: `PATCH /db/${spec.host}?id=eq.<id>  { "${first}": … }`,
-      after: `POST /db/${spec.satellite}  { "${fkColumn}": "<id>", "${first}": … }`,
+      before: `PATCH ${v2}/${spec.host}?id=eq.<id>  { "${first}": … }`,
+      after: `POST ${v2}/${spec.satellite}  { "${fkColumn}": "<id>", "${first}": … }`,
     },
     {
       purpose: 'remove it',
-      before: `PATCH /db/${spec.host}?id=eq.<id>  { ${spec.members.map(m => `"${m}": null`).join(', ')} }`,
-      after: `DELETE /db/${spec.satellite}?${fkColumn}=eq.<id>`,
+      before: `PATCH ${v2}/${spec.host}?id=eq.<id>  { ${spec.members.map(m => `"${m}": null`).join(', ')} }`,
+      after: `DELETE ${v2}/${spec.satellite}?${fkColumn}=eq.<id>`,
     },
   ]
 }

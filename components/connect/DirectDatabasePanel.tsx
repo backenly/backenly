@@ -79,6 +79,7 @@ import { formatTime } from '@/components/console/format'
 import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import { findRegion, HOME_REGION } from '@/lib/regions'
 import { addressInRange } from '@/lib/security/allowed-address'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 type Mode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -118,6 +119,7 @@ interface Allowlist {
   /** Earliest first; one past the plan's number is not admitted. */
   addresses: Array<{ cidr: string; createdAt: string; admitted?: boolean }>
   limit: number
+  planCode: string
   planName: string
   /** Beside an address that is not admitted: what to do. */
   notAdmitted?: string
@@ -422,7 +424,7 @@ function AllowedAddresses({
                   <Facts className="!mt-[4px]">
                     <Fact>Added {formatTime(a.createdAt, 'date')}</Fact>
                     {you?.allowable && addressInRange(you.address, a.cidr) && <Fact>Your address</Fact>}
-                    {a.admitted === false && <Fact strong>{allowlist.notAdmitted ?? `Not admitted on the ${allowlist.planName} plan.`}</Fact>}
+                    {a.admitted === false && <Fact strong>{allowlist.notAdmitted ?? `Not admitted on the ${planDisplayName(allowlist.planCode)} plan.`}</Fact>}
                   </Facts>
                 </Row>
               ))}
@@ -431,7 +433,7 @@ function AllowedAddresses({
         )}
       </Panel>
       <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
-        {count} of {allowlist.limit} on the {allowlist.planName} plan.
+        {count} of {allowlist.limit} on the {planDisplayName(allowlist.planCode)} plan.
       </p>
 
       <KitConfirmDialog

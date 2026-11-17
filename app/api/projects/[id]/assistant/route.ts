@@ -78,6 +78,7 @@ async function buildProjectContext(projectId: string, projectName: string, origi
     return [
       `- Project: "${manifest.project.name}" (id: ${manifest.project.id})`,
       `- Runtime API base: ${manifest.project.apiBaseUrl}`,
+      `- REST API for tables: ${manifest.project.restBaseUrl}/<table>, in PostgREST's grammar. /db under the runtime base is deprecated, kept for existing apps.`,
       `- Tables (${tableNames.length}): ${tableNames.length ? tableNames.join(', ') : 'none yet'}`,
       `- End-user auth: ${authMethods} · Storage buckets: ${manifest.storage.buckets.length} · Realtime: ${manifest.realtime.enabled ? 'available' : 'available (no subscriptions yet)'}`,
       `- Frontend SDK: \`${manifest.sdk.importLine}\` then \`${manifest.sdk.initLine}\``,

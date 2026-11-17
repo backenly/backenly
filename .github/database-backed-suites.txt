@@ -2177,6 +2177,13 @@ tests/integration/function-redeploy-in-history.spec.ts
 # update and still reaches nothing outside the project. Real policies and role.
 tests/integration/function-trusted-work.spec.ts
 
+# A function that imports only @backenly/functions and answers with
+# Response.json deploys through deploy_code and answers at /fn as its caller
+# (db, asService, verifyToken, isAdminRequest, createSession, a text Response);
+# one written with next/server and @/lib/* still answers the same, and its
+# receipt names the module. Real runtime, API key, policies and role.
+tests/integration/functions-import-backenly-functions.spec.ts
+
 # The release step for stored functions that read the withheld variables:
 # reports every one, rewrites only Backenly's template code as governed
 # changes History can restore, and deploy says when code runs as the service
@@ -2441,3 +2448,7 @@ tests/integration/receipts-say-what-delete-does.spec.ts
 # An approval card says a deleted function, schedule or trigger can be undone
 # when History restores it, and that what nothing keeps cannot. Real rows.
 tests/integration/approval-cards-know-what-history-restores.spec.ts
+# Every /api/v1/{projectId}/db response says /db is deprecated (RFC 9745
+# Deprecation, Link rel="successor-version" to the table on /api/v2), from the
+# runtime over a real socket and from Next's handlers; /api/v2 says neither (#22).
+tests/integration/v1-db-deprecated-on-both-servers.spec.ts
