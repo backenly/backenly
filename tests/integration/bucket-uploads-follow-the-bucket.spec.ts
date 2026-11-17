@@ -69,7 +69,7 @@ import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
 const PROJECT_JWT_SECRET = `bucket-uploads-${'u'.repeat(40)}`
 const USER = randomUUID()
-const MIGRATION = 'prisma/migrations-canonical/20261116140000_bucket_upload_policy/migration.sql'
+const MIGRATION = 'prisma/migrations-canonical/20261117160000_bucket_upload_policy/migration.sql'
 
 const originalEdition = process.env.BACKENLY_EDITION
 const originalEngineMode = process.env.ENGINE_MODE
