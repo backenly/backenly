@@ -15,7 +15,7 @@ export interface RequestLogFilter {
   method?: string
   /** Only responses with at least this status, e.g. 400 for failures, 500 for server errors. */
   minStatus?: number
-  /** Only paths starting with this, e.g. "/db/orders" or "/fn/". */
+  /** Only paths starting with this, e.g. "/orders" (a table over /api/v2), "/db/orders" or "/fn/". */
   pathPrefix?: string
   /** Only the last N minutes. */
   sinceMinutes?: number

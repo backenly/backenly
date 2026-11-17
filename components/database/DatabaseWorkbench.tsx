@@ -139,12 +139,12 @@ export function DatabaseWorkbench({ projectId }: { projectId: string }) {
   }
 
   // ── What the panes need from the project ───────────────────────────────────
-  const [apiBaseUrl, setApiBaseUrl] = useState<string | null>(null)
+  const [restBaseUrl, setRestBaseUrl] = useState<string | null>(null)
   const [windowDays, setWindowDays] = useState<number | null>(null)
   useEffect(() => {
     let cancelled = false
     getProject(projectId)
-      .then((p) => !cancelled && setApiBaseUrl(p.apiBaseUrl ?? null))
+      .then((p) => !cancelled && setRestBaseUrl(p.restBaseUrl ?? null))
       .catch(() => {})
     // How long History can undo a dropped table or column, from History itself.
     fetch(`/api/projects/${projectId}/changes?limit=1`, { credentials: 'include' })
@@ -242,7 +242,7 @@ export function DatabaseWorkbench({ projectId }: { projectId: string }) {
             }}
             onOpenSchema={() => setTab('schema')}
             onRefreshTables={() => loadTables(true)}
-            apiBaseUrl={apiBaseUrl}
+            restBaseUrl={restBaseUrl}
             windowDays={windowDays}
           />
         ) : (
