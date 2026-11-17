@@ -48,6 +48,7 @@ import { KitButton, OverflowMenu, TextWithCode, type GlyphState } from '@/compon
 import { groupFindings, CATEGORY_LABEL, type FindingGroup } from '@/lib/core/finding-groups'
 import { Disclosure, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
+import { classifyFix } from '@/lib/core/fix-classifier'
 import { sharedRead } from '@/lib/client/shared-read'
 import { ErrorRow, RefusedLine } from '@/components/console/states'
 import { Time } from '@/components/console/Time'
@@ -104,15 +105,25 @@ function dispositionCopy(level: Level | undefined): string | null {
   return null
 }
 
-/** What happens to a row next, as its lead and its first fact. */
-function nextFor(level: Level | undefined, repairable: boolean): { glyph: GlyphState; word: string } {
+/**
+ * What happens to a row next, as its lead and its first fact. "Fixed on the
+ * next pass" only for a repair the loop applies on its own: one its class rates
+ * automatic. A row whose class waits for a person (a hot table's index since
+ * #679) was promised the next pass and sat open for days (production QA,
+ * 2026-11-16); its repair runs when someone clicks Fix now.
+ */
+function nextFor(level: Level | undefined, repairable: boolean, appliedByLoop: boolean): { glyph: GlyphState; word: string } {
   if (!repairable) return { glyph: 'waiting', word: 'Needs your agent' }
-  if (level === 'AGGRESSIVE' || level === 'BALANCED') return { glyph: 'busy', word: 'Fixed on the next pass' }
+  if (appliedByLoop && (level === 'AGGRESSIVE' || level === 'BALANCED')) return { glyph: 'busy', word: 'Fixed on the next pass' }
   return { glyph: 'waiting', word: 'Fix now to apply it' }
 }
 
 /** Whether Backenly can run a repair for any member (the same test the Review Queue uses). */
 const repairable = (g: FindingGroup<HealthFinding>) => g.members.some(m => hasExecutableFix(m.type, m.details))
+
+/** Whether every member's repair is one the loop applies without asking, by its current class. */
+const appliedByLoop = (g: FindingGroup<HealthFinding>) =>
+  g.members.every(m => hasExecutableFix(m.type, m.details) && classifyFix(m.type, m.details).decision === 'auto')
 
 /**
  * Where the affected object lives, so a finding links to it: a table to
@@ -365,7 +376,7 @@ function DetectedRow({
   const head = g.members[0]
   const many = g.members.length > 1
   const title = <p className={ROW_TITLE}><TextWithCode text={g.title} codeClassName="text-zinc-100" /></p>
-  const next = nextFor(level, !!onFix)
+  const next = nextFor(level, !!onFix, appliedByLoop(g))
 
   if (state.phase === 'verified' || state.phase === 'dismissed') {
     const fixed = state.phase === 'verified'

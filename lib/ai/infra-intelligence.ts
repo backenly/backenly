@@ -23,6 +23,7 @@ import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRole
 import { statementClauses } from '@/lib/autonomy/statement-text'
 import { literalPrefix } from '@/lib/projects/backend-presence'
 import { sizeWords } from '@/lib/core/size-words'
+import { classifyFix } from '@/lib/core/fix-classifier'
 
 // Warn once per server restart if pg_stat_statements is unavailable.
 // Avoids spamming logs on every cron invocation.
@@ -926,10 +927,11 @@ export async function runAndStoreInfraIntelligence(
     // the gate now sits after the resolve pass below.
     const { prisma } = await import('@/lib/db/prisma')
 
-    // Deduplicate against open findings
+    // Deduplicate against the findings still in front of someone: open, and a
+    // hot table waiting for a person's approval, which is one too.
     const existing = await prisma.healthFinding.findMany({
-      where: { projectId, status: 'open', type: { startsWith: literalPrefix('infra_') } },
-      select: { id: true, type: true, details: true },
+      where: { projectId, status: { in: ['open', 'pending_approval'] }, type: { startsWith: literalPrefix('infra_') } },
+      select: { id: true, type: true, status: true, details: true },
     }).catch(() => [])
     const existingTypes = new Set(existing.map(e => e.type))
     // A hot table a person dismissed is not raised again: only Backenly's own
@@ -967,8 +969,12 @@ export async function runAndStoreInfraIntelligence(
     // details forever — including the `created_at` SQL that could not run. The
     // fix would be deployed and the finding would still be dead.
     //
-    // Only `details` is touched. Status, severity and detectedAt are the
-    // finding's own history and are not rewritten by a re-scan.
+    // Severity and detectedAt are the finding's own history and are not
+    // rewritten by a re-scan. Status follows the finding's current class
+    // (hotTableStatus): a row raised while hot tables were repaired on their own
+    // kept "open" after #679 made their index wait for a person, and the
+    // Autonomy page went on listing it as queued for Backenly's next pass, with
+    // no approval needed, six days later (production QA, 2026-11-16).
     // ── Bloat findings are NOT raised here ───────────────────────────────────
     //
     // Bloat is owned by the per-minute invariant probe (detectTableBloat), which
@@ -988,26 +994,15 @@ export async function runAndStoreInfraIntelligence(
     const hotByType = new Map(
       indexPressureTables.map(f => [`infra_hot_table_${f.table}`, f]),
     )
-    for (const [type, f] of hotByType) {
-      if (!existingTypes.has(type)) continue
-      await prisma.healthFinding.updateMany({
-        where: { projectId, type, status: 'open' },
-        data: {
-          details: {
-            title: f.kind === 'bloat' ? `Table bloat: ${f.table}` : `Hot table: ${f.table}`,
-            description: f.recommendation,
-            source: 'infra_intelligence',
-            table: f.table,
-            tableName: f.table,
-            columnName: f.indexColumn ?? null,
-            idxHitPct: f.idxHitPct,
-            seqScans: f.seqScans,
-            deadTupRatio: f.deadTupRatio,
-            fix: f.suggestedIndex ?? null,
-            requiresApproval: false,
-            detectedAt: report.scannedAt,
-          } as any,
-        },
+    for (const row of existing) {
+      const f = hotByType.get(row.type)
+      if (!f) continue
+      const fresh = hotTableDetails(f, report.scannedAt)
+      // Kept: what later passes wrote on the row (an investigation, a hold).
+      const details = { ...((row.details ?? {}) as Record<string, unknown>), ...fresh }
+      await prisma.healthFinding.update({
+        where: { id: row.id },
+        data: { details: details as any, status: hotTableStatus(row.type, details) },
       }).catch(() => {})
     }
 
@@ -1070,32 +1065,17 @@ export async function runAndStoreInfraIntelligence(
     // anything stale, so there is nothing left to raise.
     if (report.overallPressure === 'none') return
 
-    // Hot tables → HealthFinding
+    // Hot tables → HealthFinding, filed with the status of their class.
     for (const f of indexPressureTables) {
       const type = `infra_hot_table_${f.table}`
       if (dismissedHot && !existingTypes.has(type) && !dismissedHot.has(type)) {
+        const details = hotTableDetails(f, report.scannedAt)
         toCreate.push({
           projectId,
           type,
           severity: mapPressureToSeverity(f.pressure),
-          details: {
-            title: f.kind === 'bloat' ? `Table bloat: ${f.table}` : `Hot table: ${f.table}`,
-            description: f.recommendation,
-            source: 'infra_intelligence',
-            table: f.table,
-            // buildFixAction reads tableName/columnName. `table` alone left the
-            // repair path with nothing to build CREATE_INDEX from, so every
-            // "Fix now" click on a hot-table finding failed.
-            tableName: f.table,
-            columnName: f.indexColumn ?? null,
-            idxHitPct: f.idxHitPct,
-            seqScans: f.seqScans,
-            deadTupRatio: f.deadTupRatio,
-            fix: f.suggestedIndex ?? null,
-            requiresApproval: false,
-            detectedAt: report.scannedAt,
-          },
-          status: 'open',
+          details,
+          status: hotTableStatus(type, details),
           autoFixed: false,
         })
       }
@@ -1172,6 +1152,38 @@ export async function runAndStoreInfraIntelligence(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** What a hot-table finding carries, as the scan measured it. */
+function hotTableDetails(f: HotTableFinding, scannedAt: string): Record<string, unknown> {
+  const details = {
+    title: f.kind === 'bloat' ? `Table bloat: ${f.table}` : `Hot table: ${f.table}`,
+    description: f.recommendation,
+    source: 'infra_intelligence',
+    table: f.table,
+    // buildFixAction reads tableName/columnName. `table` alone left the
+    // repair path with nothing to build CREATE_INDEX from, so every
+    // "Fix now" click on a hot-table finding failed.
+    tableName: f.table,
+    columnName: f.indexColumn ?? null,
+    idxHitPct: f.idxHitPct,
+    seqScans: f.seqScans,
+    deadTupRatio: f.deadTupRatio,
+    fix: f.suggestedIndex ?? null,
+    detectedAt: scannedAt,
+  }
+  return { ...details, requiresApproval: hotTableStatus(`infra_hot_table_${f.table}`, details) === 'pending_approval' }
+}
+
+/**
+ * Where a hot-table finding belongs now, by its class (lib/core/fix-classifier.ts):
+ * with a measured column its index waits for a person, so it is in "Waiting on
+ * you"; with none there is nothing to run and it stays open, for the coding
+ * agent. No loop repairs an open hot-table finding on its own: the repair loop
+ * acts on the invariants it probes, and this is not one of them.
+ */
+export function hotTableStatus(type: string, details: Record<string, unknown>): 'open' | 'pending_approval' {
+  return classifyFix(type, details).decision === 'approval' ? 'pending_approval' : 'open'
+}
 
 function mapPressureToSeverity(p: InfraPressure): string {
   switch (p) {
