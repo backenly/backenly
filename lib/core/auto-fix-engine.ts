@@ -1162,6 +1162,11 @@ export interface RevertEligibility {
  *     anyone made since. Format 3 records the governed changes the fix made, and
  *     undoes exactly those (lib/changes/recovery.ts).
  */
+/** A format-3 fix whose governed changes were recorded: undone by restoring exactly those. */
+function recordedChanges(rollbackData: Record<string, unknown>): boolean {
+  return rollbackData.rollbackFormat === 3 && Array.isArray(rollbackData.changeIds) && rollbackData.changeIds.length > 0
+}
+
 export function revertEligibility(
   findingType: string,
   details: Record<string, unknown> | null | undefined,
@@ -1220,7 +1225,14 @@ export function revertEligibility(
   // earlier platform value (an approved held action setting a secret or a key's
   // permissions) has no undo. Offered anyway, it reported "Fix reverted." and
   // reopened the finding with the change still in place.
-  if (rollbackData.schemaTouching !== true && !rollbackData.preMetadata) {
+  //
+  // A fix that recorded governed changes has one, whatever its finding type's
+  // snapshot habit: undo restores exactly those changes, as History does. The
+  // index a slow-query fix builds is recorded so ("Added an index to
+  // product_views", change #46, which History restored), yet its card said
+  // nothing could be undone, because slow_query_missing_index is not in
+  // SCHEMA_TOUCHING (production QA, 2026-11-16).
+  if (rollbackData.schemaTouching !== true && !rollbackData.preMetadata && !recordedChanges(rollbackData)) {
     return {
       revertible: false,
       requiresConfirmation: false,
@@ -1298,7 +1310,7 @@ export async function revertAutoFix(
   // belongs in History, where the person sees exactly what is kept.
   let appliedSteps = 0
   let schemaMessage = ''
-  if (rollbackData.schemaTouching === true) {
+  if (rollbackData.schemaTouching === true || recordedChanges(rollbackData)) {
     const { previewRecovery, recoverChange } = await import('@/lib/changes/recovery')
     const { currentAttribution } = await import('@/lib/changes/attribution')
     const ids = Array.isArray(rollbackData.changeIds) ? (rollbackData.changeIds as string[]) : []
