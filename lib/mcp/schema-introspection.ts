@@ -353,7 +353,11 @@ export async function getTableSchema(
   const schema = schemaFor(projectId, scope)
   const db = await workspaceRawClient(projectId)
   if (!(await tableExists(db, schema, table))) {
-    throw new Error(`Table "${table}" does not exist in this project.`)
+    throw new Error(
+      scope.branchSchema
+        ? `Table "${table}" does not exist on this preview branch.`
+        : `Table "${table}" does not exist in this project.`,
+    )
   }
 
   const [colsRaw, pkRaw, fksRaw, idxRaw, checksRaw, trigRaw, rlsRaw, polRaw, count] =
