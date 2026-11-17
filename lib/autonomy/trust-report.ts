@@ -26,7 +26,16 @@ import {
 } from './autonomy-level'
 import { explainAutonomyEvent } from './because-copy'
 import { summariseFinding } from '@/lib/core/finding-summaries'
-import { isVerifiedFix, isVerificationError } from '@/lib/core/fix-verification'
+import { isVerifiedFix } from '@/lib/core/fix-verification'
+import {
+  activitySentence,
+  CHANGE_PREFIX,
+  FEED_ACTIONS,
+  findingsNamedBy,
+  LOOP_LOG_TYPES,
+  parseDetails,
+  ROLLBACK_PREFIX,
+} from './activity-sentences'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
@@ -251,40 +260,10 @@ export interface TrustReport {
   executionMode: ExecutionModeState
 }
 
-const ROLLBACK_PREFIX = 'ROLLBACK_'
-
-// Internal cadence/billing bookkeeping rows — written on every cron tick purely
-// to gate scan frequency, never a "guardrail action" a user would recognize.
-// Excluded from the activity feed so it doesn't fill up with "autonomy tick".
-// Run-markers, not user-meaningful actions: a live run's per-tick bookkeeping
-// (attempted/applied counts) is noise in the human feed — the individual
-// HEALTH_AUTO_FIXED rows carry the real "what happened + why". Keeping the run
-// marker out means the "last action" surfaces the actual fix, not "autonomy
-// live run". The audit rows still exist for the breaker + precision analysis.
-//
-// HEALTH_FIX_DEFERRED belongs here for the same reason. auto-fix-engine writes
-// it as, in its own words, "a low-noise audit row for observability" — the loop
-// deciding to retry a finding on the next tick. It changes nothing, asks
-// nothing, and leaves the finding exactly where it was. But it was missing from
-// this list, so it fell through humanize()'s default branch and printed to
-// users as the bare string "health fix deferred", once per finding per tick.
-// Half of a real project's guardrail feed was this row: an internal retry
-// marker, rendered as if it were a guardrail action, saying nothing about what
-// or why. The audit rows still exist for the breaker and precision analysis —
-// they just stop pretending to be news.
-//
-// AUTONOMY_INVESTIGATION too: the row is the investigator's own bookkeeping
-// (lib/autonomy/escalation-diagnosis.ts counts it against the daily cap). What
-// it found is written on the finding it looked into and shown there, in the
-// Review Queue, the dashboard and the agent's briefing. In the feed it printed
-// as the bare "autonomy investigation" (production QA, 2026-11-09).
-const INTERNAL_ONLY_ACTIONS = [
-  'AUTONOMY_TICK',
-  'AUTONOMY_SCAN_CONSUMED',
-  'AUTONOMY_LIVE_RUN',
-  'HEALTH_FIX_DEFERRED',
-  'AUTONOMY_INVESTIGATION',
-]
+// The feed's rows and their sentences: one labeller, shared with the project's
+// activity feed (lib/activity/feed.ts). Only actions with a sentence are read;
+// the loop's own bookkeeping (ticks, deferrals, gate receipts whose outcome
+// another row tells) has none and stays out. See lib/autonomy/activity-sentences.ts.
 
 function classify(action: string): ActivityItem['kind'] {
   // Before the AUTONOMOUS_AUDIT_ACTIONS test, not after. This action is in
@@ -303,103 +282,6 @@ function classify(action: string): ActivityItem['kind'] {
   if (action === 'HEALTH_FIX_EXECUTED') return 'applied'
   if (action === 'HEALTH_FIX_EXECUTION_FAILED') return 'failed'
   return 'other'
-}
-
-/** Human-readable label for the actions the feed shows verbatim today. */
-function prettyAction(action: string): string {
-  switch (action) {
-    case 'HEALTH_FIX_APPROVED':       return 'You approved a fix — applying it now'
-    case 'AUTONOMY_LEVEL_CHANGED':    return 'You changed the autonomy level'
-    case 'HEALTH_FINDING_DISMISSED':  return 'You dismissed a finding'
-    case 'HEALTH_FIX_UNVERIFIED':
-      return 'Applied a fix but could not confirm it worked — re-checking next pass'
-    default:                          return action.replace(/_/g, ' ').toLowerCase()
-  }
-}
-
-function humanize(action: string, details: string | null): string {
-  let d: any = {}
-  try { d = details ? JSON.parse(details) : {} } catch { /* details may be free text */ }
-  switch (classify(action)) {
-    case 'auto_fix':
-      // The trust UI's headline rows — render the canonical "what because why"
-      // sentence so the trust feed and the activity feed agree word-for-word.
-      // Only a recorded 'confirmed' outcome is a verified fix: the retired
-      // orchestrator's AGENT_AUTO_FIXED rows and FIX_PLAN_AUTO_EXECUTED record
-      // none, so they read as what they were.
-      return `${explainAutonomyEvent(d).full}${isVerifiedFix(d.verification) ? '' : ' (it ran, but could not be confirmed)'}`
-    case 'escalation':
-      if (!d.findingType && typeof d.summary === 'string' && d.summary) return d.summary
-      // Never the raw type. `Held back for your approval: rls_expression_invalid`
-      // told the user nothing they could act on, and every escalation on a
-      // different table produced a byte-identical row — six lines that looked
-      // like one line repeated six times. summariseFinding is the single
-      // finding→sentence renderer and it names the table, so each row is
-      // distinguishable and legible.
-      return d.findingType
-        ? `Held back for your approval: ${summariseFinding(d.findingType, d)}`
-        : 'Held back for your approval'
-    case 'breaker':
-      return `Safety circuit tripped — autonomous actions paused (${d.reason ?? 'rate ceiling reached'})`
-    case 'applied': {
-      const what = d.title || (d.findingType ? d.findingType.replace(/_/g, ' ') : null)
-      // Only claim verification when the kernel actually re-probed and confirmed
-      // it. This row asserted "verified & snapshotted" on every applied fix,
-      // including the ones whose type no probe can re-check — the ledger was
-      // vouching for work nothing had looked at.
-      //
-      // And only claim a snapshot when one was kept: the approve route records
-      // its id on this row, and a fix that takes none (an index, say) records
-      // null. Production QA (2026-11-09) read "snapshot captured" beside an
-      // approve response that said snapshotId: null.
-      const snapshot = typeof d.snapshotId === 'string' && d.snapshotId.length > 0
-      const suffix = isVerifiedFix(d.verification)
-        ? ` — re-checked and confirmed${snapshot ? ', snapshot captured' : ''}`
-        : isVerificationError(d.verification)
-          ? ' — applied, but the check that would confirm it could not run'
-          : ` — applied${snapshot ? ' and snapshotted' : ''} (not independently re-checked)`
-      return what
-        ? `Applied your approved fix: ${what}${suffix}`
-        : `Applied your approved fix${suffix}`
-    }
-    case 'failed':
-      return `Approved fix could not be applied${d.findingType ? ` (${d.findingType.replace(/_/g, ' ')})` : ''} — left for your review`
-    case 'rollback':
-      if (action === 'HEALTH_FIX_ROLLED_BACK') {
-        return d.findingType ? `You undid a fix: ${summariseFinding(d.findingType, d)}` : 'You undid a fix'
-      }
-      // A governed change's recovery writes its own sentence (lib/changes/recovery.ts).
-      if (typeof d.summary === 'string' && d.summary) return d.summary
-      return `Rolled back a previous change${d.findingType ? `: ${d.findingType.replace(/_/g, ' ')}` : ''}`
-    case 'shadow':
-      return d.summary ?? 'Evaluated what it would do (shadow mode)'
-    default:
-      if (action === 'AUTONOMY_LEVEL_CHANGED' && d.level) {
-        return `You set the autonomy level to ${String(d.level).toLowerCase()}`
-      }
-      if (action === 'AUTONOMY_DETECTOR_RETIRED') {
-        const n = Number(d.withdrawn) || 0
-        const kept = Number(d.kept) || 0
-        return (
-          `Withdrew ${n} finding${n === 1 ? '' : 's'} from a retired check` +
-          (kept > 0 ? `; ${kept} you had acted on ${kept === 1 ? 'stays' : 'stay'} listed` : '')
-        )
-      }
-      // Same bare-type leak as the escalation rows: this printed as
-      // "health fix requested", which names neither what was requested nor
-      // what came of it — and the outcome is always a separate row directly
-      // beside it. Kept in the feed (it is a real thing a human did, and the
-      // audit row exists so History can show who asked) but given the subject
-      // that makes it worth a line.
-      // Governed-change rows write their own sentence (lib/changes/recovery.ts).
-      if (action.startsWith('CHANGE_') && typeof d.summary === 'string' && d.summary) return d.summary
-      if (action === 'HEALTH_FIX_REQUESTED') {
-        return d.findingType
-          ? `You asked Backenly to fix: ${summariseFinding(d.findingType, d)}`
-          : 'You asked Backenly to fix a finding'
-      }
-      return prettyAction(action)
-  }
 }
 
 /**
@@ -576,13 +458,12 @@ export async function buildTrustReport(
       where: {
         projectId,
         timestamp: { gte: since },
-        action: { notIn: INTERNAL_ONLY_ACTIONS },
         OR: [
-          { type: { in: ['autonomy', 'health'] } },
+          { type: { in: [...LOOP_LOG_TYPES] }, action: { in: [...FEED_ACTIONS] } },
           { action: { startsWith: ROLLBACK_PREFIX } },
           // Governed changes: a recovery waiting for a person, one that needs
           // attention, one kept as it is, one reapplied (lib/changes/recovery.ts).
-          { action: { startsWith: 'CHANGE_' } },
+          { action: { startsWith: CHANGE_PREFIX } },
         ],
       },
       orderBy: { timestamp: 'desc' },
@@ -651,11 +532,22 @@ export async function buildTrustReport(
     ...activityRows.map(r => ({ ...r, architecture: false })),
     ...architectureRows.map(r => ({ ...r, architecture: true })),
   ].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+  // Rows written at approval keep only the finding's type; its card's words
+  // come from the finding itself while it is on record.
+  const findings = await findingsNamedBy(projectId, activityRows.map(r => parseDetails(r.details)))
   const recentActivity: ActivityItem[] = []
   for (const r of merged) {
-    const { kind, summary } = r.architecture
-      ? architectureItem(r.details ?? null)
-      : { kind: classify(r.action), summary: humanize(r.action, r.details ?? null) }
+    let kind: ActivityItem['kind']
+    let summary: string | null
+    if (r.architecture) {
+      ({ kind, summary } = architectureItem(r.details ?? null))
+    } else {
+      const d = parseDetails(r.details)
+      kind = classify(r.action)
+      summary = activitySentence(r.action, d, typeof d.findingId === 'string' ? findings.get(d.findingId) : null)
+    }
+    // No sentence: bookkeeping that reached the query, never shown by its name.
+    if (summary === null) continue
     const prev = recentActivity[recentActivity.length - 1]
     if (prev && prev.action === r.action && prev.summary === summary) {
       prev.repeat += 1
