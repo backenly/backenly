@@ -112,7 +112,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     },
     argText: {
       bucketName: 'The bucket.', path: 'The file\'s path in the bucket.',
-      uploads: 'signed_in: any signed-in user of the app. server_only: only your server, with a service-role key.',
+      uploads: 'signed_in: any signed-in app user. server_only: your server only (service-role key).',
     },
   },
   {
