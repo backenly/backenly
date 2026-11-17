@@ -68,7 +68,20 @@ async function triggerOn(schema: string, table: string): Promise<boolean> {
   return rows.length > 0
 }
 
-const enable = (projectId: string, tableName?: string) =>
+/** The realtime trigger's oid: a re-created trigger gets a new one. */
+async function triggerOid(schema: string, table: string): Promise<string | null> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ oid: string }>>(
+    `SELECT t.oid::text AS oid FROM pg_trigger t
+      JOIN pg_class c ON c.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = 'backenly_realtime'`,
+    schema,
+    table
+  )
+  return rows[0]?.oid ?? null
+}
+
+const enable =(projectId: string, tableName?: string) =>
   executeAction(
     // Project-wide is opt-in by name since enabling became per table.
     { action: 'ENABLE_REALTIME', params: { ...(tableName ? { tableName } : { allTables: true }), confirmed: true } } as any,
@@ -148,6 +161,21 @@ describe('project-wide', () => {
     const enabledSection = String(result.message).match(/\*\*Enabled by this call:\*\*\n([^*]*)/)?.[1] ?? ''
     expect(enabledSection).toContain('`orders`')
     expect(enabledSection).not.toContain('`users`')
+  })
+
+  it('when every table already streams, nothing is re-created and nothing is reported as enabled', async () => {
+    const f = await fixtureProject()
+    await prisma.$executeRawUnsafe(`CREATE TABLE "${f.schema}"."orders" (id serial primary key)`)
+    expect((await enable(f.projectId, 'orders')).success).toBe(true)
+    const trigger = await triggerOid(f.schema, 'orders')
+
+    const result = await enable(f.projectId)
+
+    expect(result.success).toBe(true)
+    expect(await triggerOid(f.schema, 'orders')).toBe(trigger)
+    expect((result.data as any)?.enabledNow).toEqual([])
+    expect((result.data as any)?.alreadyEnabled).toEqual(['orders'])
+    expect(result.message).toContain('Realtime is already active on 1 table(s); this call changed nothing.')
   })
 
   it('an empty project is told nothing was installed, not "active for 0 table(s)"', async () => {

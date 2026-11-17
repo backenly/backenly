@@ -579,7 +579,8 @@ async function checkApiExposure(projectId: string): Promise<ReadinessCheck> {
     ...base,
     status: 'pass',
     message: `${tables.length} table${tables.length > 1 ? 's are' : ' is'} exposed over REST with full CRUD`,
-    details: tables.map((t) => `✓ /db/${t.name} — list, get, create, update, delete`),
+    // Named on /api/v2, the REST API; /db is deprecated (lib/api/v1/deprecation.ts).
+    details: tables.map((t) => `✓ /api/v2/{projectId}/${t.name} — list, get, create, update, delete`),
     fixApplied: false,
   }
 }
@@ -1085,7 +1086,7 @@ async function checkSecurityAudit(projectId: string): Promise<ReadinessCheck> {
 async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'function_triggers',
-    name: 'AI function trigger configuration',
+    name: 'Function trigger configuration',
     description: 'Placeholder functions must not have live triggers; signup functions must have on-signup triggers',
     severity: 'warning',
   }
@@ -1097,7 +1098,7 @@ async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promi
     })
 
     if (fns.length === 0) {
-      return { ...base, status: 'skip', message: 'No AI functions defined', details: [], fixApplied: false }
+      return { ...base, status: 'skip', message: 'No functions defined', details: [], fixApplied: false }
     }
 
     const { isPlaceholderDescription, PLACEHOLDER_NAME_RE } = await import('@/lib/ai/function-validation')
@@ -1149,7 +1150,7 @@ async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promi
       return {
         ...base,
         status: 'pass',
-        message: `All ${fns.length} AI function${fns.length !== 1 ? 's' : ''} have correct trigger configuration`,
+        message: `All ${fns.length} function${fns.length !== 1 ? 's' : ''} have correct trigger configuration`,
         details: [],
         fixApplied: false,
       }

@@ -373,14 +373,10 @@ export function buildFixAction(
         params: { issue: type, provider: details.provider },
       }
 
-    case 'auth_spike':
-      // Auth-spike anomalies are diagnostic, not actionable — but FIX_AUTH at
-      // minimum re-validates the auth subsystem (jwtSecret, users table, etc.)
-      // so any concurrent corruption gets repaired. We still surface the anomaly.
-      return {
-        action: 'FIX_AUTH',
-        params: { issue: 'auth_spike' },
-      }
+    // auth_spike has no repair: a run of failed sign-ins is diagnosed, not
+    // fixed. It mapped to FIX_AUTH, which re-checks auth configuration a wave of
+    // wrong passwords says nothing about, and that put "Approve & fix" on it.
+    // getManualRemediationHint says what to look at.
 
     // ── Integrations ────────────────────────────────────────────────────────
     case 'integration_key_invalid':
@@ -562,6 +558,25 @@ export function getManualRemediationHint(
       )
     }
 
+    // A table anyone with the publishable key can read in full, holding
+    // columns named like credentials or personal data
+    // (drift-detector.ts detectSensitiveColumnsAnyoneCanRead). Nothing to
+    // repair on Backenly's side: the hint is what to ask for.
+    case 'sensitive_columns_exposed': {
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      const cols = Array.isArray(details?.columnNames)
+        ? (details!.columnNames as unknown[]).filter((c): c is string => typeof c === 'string')
+        : []
+      const which = cols.length ? cols.join(', ') : 'columns named like credentials or personal data'
+      return (
+        `Anyone with your publishable key, which ships in your frontend, can read every row of "${t}", ` +
+        `including ${which}. If those rows should be private, tell your coding agent, for example: set_rls ` +
+        `on ${t} so a row is visible only to the signed-in user it belongs to, or so only your server (the ` +
+        `service role) reads it. If the table is meant to be public, keep ${which} out of it. Backenly will ` +
+        'not change who can read it on its own.'
+      )
+    }
+
     case 'architecture_evolution': {
       const ev = (details?.evolution ?? {}) as { summary?: { change?: string; reason?: string } }
       return (
@@ -692,9 +707,9 @@ If the column is deliberately different now, tell your coding agent to rebuild i
         const instead =
           variable === 'JWT_SECRET'
             ? `To sign a user in once the function has proved who they are, it calls createSession(userId) from ` +
-              `'@/lib/auth/session', which returns the session Backenly signs. To check a caller's session, it ` +
-              `calls verifyToken(token) from '@/lib/auth/jwt'.`
-            : `To admit only the project's admin key, it calls isAdminRequest(request) from '@/lib/auth/jwt', ` +
+              `'@backenly/functions', which returns the session Backenly signs. To check a caller's session, it ` +
+              `calls verifyToken(token) from the same module.`
+            : `To admit only the project's admin key, it calls isAdminRequest(request) from '@backenly/functions', ` +
               `which checks the key without the function holding it.`
         return (
           `${name} ${triggerPhrase(details?.trigger, details?.tableName)}, and its code reads ` +
@@ -751,6 +766,19 @@ If the column is deliberately different now, tell your coding agent to rebuild i
     case 'rls_denies_everything': {
       if (details?.rlsBasis !== 'undecidable') return null
       const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      // An always-true write policy on a table with no owner column
+      // (drift-detector.ts detectOverPermissiveRls). RLS is on; the question is
+      // who may change rows, which only the owner can answer.
+      if (details?.openWrites === true) {
+        const policy = typeof details?.policyName === 'string' ? `"${details.policyName}"` : 'A policy'
+        const cmd = typeof details?.policyCommand === 'string' ? details.policyCommand : 'change'
+        return (
+          `${policy} lets anyone it covers ${cmd} any row of "${t}": its condition is always true. ` +
+          `No column on "${t}" says whose a row is, so Backenly will not choose who may. Tell your coding ` +
+          `agent who should, for example: set_rls on ${t} so only your server (the service role) changes ` +
+          `rows, or so a row can be changed when <column> equals the signed-in user. If anyone should, dismiss this.`
+        )
+      }
       const rationale = typeof details?.rlsRationale === 'string' ? ` ${details.rlsRationale}` : ''
       return (
         `Backenly will not enable row-level security on "${t}" until it knows who owns a row, ` +
@@ -792,6 +820,20 @@ If the column is deliberately different now, tell your coding agent to rebuild i
         `anyone who views your site's source, and it still works from curl or any server. ` +
         `Three steps: swap the browser code to a client key (Project → API keys), move this key ` +
         `to a server route or a Backenly function, then revoke and reissue it.`
+      )
+    }
+
+    // A run of failed sign-ins (workspace-observer.ts detectAuthSpike). Nothing
+    // to repair; the hint says what tells the two usual causes apart.
+    case 'auth_spike': {
+      const failed = Number(details?.failedSignIns ?? details?.errorCount) || 0
+      const ok = Number(details?.successfulSignIns) || 0
+      const counts = failed > 0 ? `${failed} password sign-ins failed and ${ok} succeeded in the last 10 minutes. ` : ''
+      return (
+        `${counts}Backenly already refuses an address or an account after repeated failures, so no ` +
+        'setting needs changing. If one of your clients keeps sending a password that has since ' +
+        'changed, fix that client. If your users do not sign in at this rate, someone is trying ' +
+        'passwords; magic-link sign-in (Auth settings) leaves no password to guess. Dismiss this once you know which.'
       )
     }
 

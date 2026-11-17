@@ -321,17 +321,27 @@ export interface StructuredApiError {
  * 42P10 on an upsert: no unique index covers exactly the conflict columns.
  *
  * On a table with soft delete the usual cause is Backenly's own: a UNIQUE index
- * there is scoped to live rows (WHERE deleted_at IS NULL), and Postgres cannot
- * match `ON CONFLICT (cols)`, which is all on_conflict can say, to a partial
- * index. The caller was told only "Request could not be completed". Postgres's
- * text for this error describes the request, never a row or another tenant.
+ * create_index makes there is scoped to live rows (WHERE deleted_at IS NULL),
+ * and Postgres cannot match `ON CONFLICT (cols)`, which is all on_conflict can
+ * say, to a partial index. One declared in SQL is created as written, over
+ * every row, so the statement itself is an answer. The caller was told only
+ * "Request could not be completed". Postgres's text for this error describes
+ * the request, never a row or another tenant.
  */
 const UPSERT_TARGET_MESSAGE =
   'No unique index covers exactly the on_conflict columns, so the upsert has nothing to match against.'
 const UPSERT_TARGET_HINT =
-  'On a table with soft delete, a UNIQUE index counts live rows only (WHERE deleted_at IS NULL), and an upsert ' +
-  'cannot target that. Create one over every row: create_index { tableName, columns, unique: true, where: "true" }, ' +
-  'or CREATE UNIQUE INDEX … WHERE true.'
+  'On a table with soft delete, a UNIQUE index made with create_index counts live rows only (WHERE deleted_at IS NULL), ' +
+  'and an upsert cannot target that. Create one over every row: create_index { tableName, columns, unique: true, ' +
+  'where: "true" }, or CREATE UNIQUE INDEX … ON <table> (<columns>) in SQL, which is created as written.'
+
+/**
+ * PGRST002 once the gateway's own retries are spent. Says the request did not
+ * run, because for a write that is what the caller needs to know before
+ * sending it again.
+ */
+const SCHEMA_CACHE_REFUSAL_MESSAGE =
+  'The data plane is reloading its schema cache and did not run this request. Retry in a second.'
 
 /**
  * The API's code for a database error in PG_STATUS. A value of the wrong type,
@@ -365,6 +375,15 @@ const PG_STATUS: Record<string, number> = {
 }
 
 /**
+ * A refusal of a caller with no signed-in user (PostgreSQL 42501, which
+ * PostgREST answers 401 for the anonymous role and 403 for a signed-in one).
+ * The table may well allow the same request from a signed-in user.
+ */
+export const ANONYMOUS_REFUSAL =
+  "The table's row-level security or grants do not allow this without a signed-in user. " +
+  "Send the user's session token in X-User-Token."
+
+/**
  * PostgREST's error body → Backenly's `{error, code}` shape.
  *
  * PostgREST echoes the failing SQL construct in `message`/`details`, which can
@@ -382,10 +401,18 @@ export function toApiError(
   const message = typeof b.message === 'string' ? b.message : ''
 
   // Checked before the constraint map so a privilege error can never take the
-  // message-echoing path.
+  // message-echoing path. The code says what the status says: a 401 is
+  // UNAUTHORIZED (an anonymous insert refused 401 used to carry FORBIDDEN,
+  // production QA re-test 2026-11-16, N15), a 403 FORBIDDEN.
   if (pgCode === '42501' || status === 401 || status === 403) {
+    if (status === 401) {
+      return {
+        status: 401,
+        body: { error: pgCode === '42501' ? ANONYMOUS_REFUSAL : 'Not authorized to perform this operation', code: 'UNAUTHORIZED' },
+      }
+    }
     return {
-      status: status === 401 ? 401 : 403,
+      status: 403,
       body: { error: 'Not authorized to perform this operation', code: 'FORBIDDEN' },
     }
   }
@@ -427,13 +454,18 @@ export function toApiError(
     }
   }
 
-  // PGRST002 — the schema cache failed to build. Instance-wide, not caller's
-  // fault, and clears only on a restart (see lib/postgrest/health.ts).
+  // PGRST002 — PostgREST's schema cache is empty because a reload failed. Not
+  // the caller's fault, and usually brief: PostgREST tries the reload again 1 s
+  // later, backing off to every 32 s while it keeps failing (v14.15,
+  // AppState.hs retryingSchemaCacheLoad). The request never ran, since
+  // PostgREST refuses it before reading the body, so the gateway has already
+  // sent it again for about 2 s (lib/postgrest/schema-cache-retry.ts); this is
+  // the answer once that budget is spent, with Retry-After: 1.
   if (pgCode === 'PGRST002') {
     return {
       status: 503,
       body: {
-        error: 'The data plane is temporarily unavailable.',
+        error: SCHEMA_CACHE_REFUSAL_MESSAGE,
         code: 'DATA_PLANE_UNAVAILABLE',
       },
     }
@@ -532,7 +564,7 @@ export function stripUpstreamError(
         message:
           pgCode === 'PGRST106'
             ? 'This project\'s data plane is still being provisioned. Retry shortly.'
-            : 'The data plane is temporarily unavailable.',
+            : SCHEMA_CACHE_REFUSAL_MESSAGE,
       },
     }
   }
@@ -564,10 +596,25 @@ export function stripUpstreamError(
     }
   }
 
-  if (pgCode === '42501' || status === 401 || status === 403) {
+  // PostgREST's own code and statuses: 42501, answered 401 for a caller with
+  // no signed-in user and 403 for a signed-in one, which is what a PostgREST
+  // client (postgrest-js, supabase-js) checks. The message stays Backenly's:
+  // PostgreSQL's names a table, possibly not the one the caller asked for.
+  if (pgCode === '42501') {
     return {
       status: status === 401 ? 401 : 403,
-      body: { code: 'FORBIDDEN', message: 'Not authorized to perform this operation' },
+      body: {
+        code: '42501',
+        message: 'Not authorized to perform this operation',
+        details: null,
+        hint: status === 401 ? ANONYMOUS_REFUSAL : null,
+      },
+    }
+  }
+  if (status === 401 || status === 403) {
+    return {
+      status,
+      body: { code: status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN', message: 'Not authorized to perform this operation' },
     }
   }
 

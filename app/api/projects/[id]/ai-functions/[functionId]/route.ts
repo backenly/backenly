@@ -38,12 +38,24 @@ export async function PUT(
       data: { status },
     }), { actorUserId: auth.userId })
 
+    // Switched off, it stops at once: the runs queued for it from row changes
+    // are dropped, after the switch, so the drain queues no more of them.
+    // Should that fail, they still never run (the executor refuses them).
+    let droppedQueuedRuns = 0
+    if (status === 'inactive') {
+      const { discardQueuedRuns } = await import('@/lib/services/ai-functions/run-queue')
+      droppedQueuedRuns = await discardQueuedRuns(params.id, params.functionId).catch((err: any) => {
+        console.warn(`[AI Functions] queued runs of ${params.functionId} were not dropped:`, err?.message ?? err)
+        return 0
+      })
+    }
+
     // A row-event function going on or off changes what the database-level
     // capture must record.
     const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
     await syncCaptureForFunctionChange(params.id, existing.triggerType)
 
-    return NextResponse.json({ success: true, status })
+    return NextResponse.json({ success: true, status, ...(status === 'inactive' ? { droppedQueuedRuns } : {}) })
   } catch (error: any) {
     console.error('[AI Functions] PUT error:', error)
     return NextResponse.json({ error: 'Failed to update function' }, { status: 500 })

@@ -43,6 +43,12 @@ import {
 } from '@/lib/postgrest/translate'
 import { checkExposure, operationFor, tableHasSoftDelete } from '@/lib/postgrest/exposure'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
+import { v1TableDeprecationHeaders } from '@/lib/api/v1/deprecation'
+import {
+  isSchemaCacheRefusal,
+  retrySchemaCacheRefusals,
+  SCHEMA_CACHE_RETRY_AFTER_SECONDS,
+} from '@/lib/postgrest/schema-cache-retry'
 import { projectPostgrest, workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface PostgrestCallerContext {
@@ -209,6 +215,12 @@ export async function handleViaPostgrest(
     })
     res.setHeader(REQUEST_ID_HEADER, requestId)
     res.setHeader(LAYER_HEADER, outcome.layer)
+    // v1's table CRUD is deprecated on every path that reaches it, the legacy
+    // ones without /db included: /api/v2 serves the same table
+    // (lib/api/v1/deprecation.ts).
+    for (const [name, value] of Object.entries(v1TableDeprecationHeaders(ctx.projectId, table, recordId))) {
+      res.setHeader(name, value)
+    }
     const enriched =
       status >= 400 || outcome.silentFailure
         ? {
@@ -348,6 +360,26 @@ export async function handleViaPostgrest(
   }
 
   let text = await upstream.text()
+
+  // PGRST002: PostgREST's schema cache is empty while a failed reload is
+  // retried, and it refuses the request before running it. The identical
+  // request (same url, method, headers and body string) is sent again for
+  // about 2 s, so a reload that recovers within it never reaches the caller.
+  ;({ upstream, text } = await retrySchemaCacheRefusals(
+    { upstream, text },
+    async () => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
+      try {
+        const again = await fetch(url, { method, headers, body, signal: controller.signal })
+        return { upstream: again, text: await again.text() }
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+    `${req.method} ${ctx.projectId}/${table}`,
+  ))
+
   let parsed: unknown = null
   if (text) {
     try {
@@ -457,6 +489,10 @@ export async function handleViaPostgrest(
     // The full text goes to the log; the caller gets the sanitised mapping.
     console.error(`[postgrest] upstream ${upstream.status} for ${table}:`, text.slice(0, 500))
     const mapped = toApiError(upstream.status, parsed)
+    // Still refused after the retries above: tell the caller when to try again.
+    if (isSchemaCacheRefusal({ upstream, text })) {
+      res.setHeader('Retry-After', String(SCHEMA_CACHE_RETRY_AFTER_SECONDS))
+    }
     // The upstream CODE is passed through to the classifier (not to the caller):
     // PGRST106 is a platform fault. PGRST205 is only one when the catalog
     // confirms the table exists; genuine misses must keep their 404 diagnosis.

@@ -43,8 +43,12 @@ export const V1_ROUTES: Record<string, string[]> = {
     // its own 404's hint retried the same shape forever.
     'POST   /auth/signup           { email, password } → { data: { user, token } }',
     'POST   /auth/signin           { email, password } → { data: { user, token } }',
+    'GET    /auth/me               Authorization: Bearer <token> → { data: { user } }',
     'POST   /auth/logout           Authorization: Bearer <token>',
     'POST   /auth/refresh          Authorization: Bearer <token> → { data: { token, user } }',
+    'POST   /auth/forgot-password  { email } → a password reset email',
+    'POST   /auth/magic-link       { email } → a sign-in link by email',
+    'GET    /auth/{provider}       google, github, discord or facebook: starts that sign-in',
   ],
   storage: [
     'POST   /storage/upload            multipart: file, bucket, path, isPublic',
@@ -73,10 +77,16 @@ export const V1_ROUTES: Record<string, string[]> = {
  * caller to infer it from a route list.
  */
 export const V1_SECTION_NOTES: Record<string, string> = {
+  auth:
+    'Auth has no user or session route: GET /auth/me returns the signed-in user, ' +
+    'with their session token in Authorization: Bearer.',
   storage:
     'Buckets are a parameter, not a path segment: POST /storage/upload with `bucket` in the form body, ' +
     'and GET /storage/files?bucket=<name> to list. There is no /storage/{bucket}/… route.',
-  db: 'The /db/ prefix is required. There is no bare /{table} route.',
+  // /api/v2 is the REST API; /db is deprecated (lib/api/v1/deprecation.ts).
+  db:
+    '/db is deprecated, kept for existing apps: new work uses /api/v2/{projectId}/{table}, in PostgREST\'s grammar. ' +
+    'On /db the /db/ prefix is required. There is no bare /{table} route.',
   fn:
     'Function names are normalised to lowercase kebab-case (list_products deploys as list-products). ' +
     "GET /functions returns each one's exact URL.",

@@ -397,6 +397,9 @@ const OBSERVER_LOCATABLE_REAPABLE_TYPES: ReadonlySet<string> = new Set([
   // Located by function (gapIdentity), so a function whose integration is
   // connected, or whose code stops using it, is withdrawn on its own.
   'function_integration_missing',
+  // Located by table: withdrawn once the table's reads are narrowed or the
+  // columns are gone (drift-detector.ts detectSensitiveColumnsAnyoneCanRead).
+  'sensitive_columns_exposed',
 ])
 
 /**

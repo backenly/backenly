@@ -2,7 +2,6 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
-import { HybridDatabase, type DatabaseType } from '@/lib/db/hybrid'
 import { prisma } from '@/lib/db'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { getWorkspaceMongoDB } from '@/lib/services/workspaceDatabase'
@@ -77,12 +76,13 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
 
     let result: { data: any[]; total: number; page: number; limit: number }
 
-    // At this point, project access is already verified by withProjectAccess middleware
-    // If workspace schema is detected (starts with 'workspace_'), use workspace database
-    const isWorkspaceSchema = validated.schema?.startsWith('workspace_')
-    
-    if (isWorkspaceSchema && validated.type === 'postgresql') {
-      const expectedSchema = `workspace_${projectId}`
+    // Only this project's own rows. withProjectAccess verified the project; the
+    // rows themselves come only from its workspace schema (PostgreSQL) or its own
+    // database (MongoDB). Any other schema is refused, not looked up: the
+    // connection that reads rows is the platform's own, so a schema named by the
+    // caller would otherwise read outside the project.
+    const expectedSchema = `workspace_${projectId}`
+    if (validated.type === 'postgresql') {
       if (validated.schema !== expectedSchema) {
         return NextResponse.json(
           {
@@ -123,8 +123,8 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
           throw error
         }
       }
-    } else if (validated.view === 'workspace' && validated.type === 'mongodb') {
-      // Use workspace-specific query for MongoDB
+    } else {
+      // MongoDB: the project's own database, whichever view was asked for.
       const mongoDb = await getWorkspaceMongoDB(projectId)
       if (!mongoDb) {
         throw new Error('MongoDB workspace database not available')
@@ -166,22 +166,6 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
         page,
         limit,
       }
-    } else {
-      // Use standard HybridDatabase for platform database
-      result = await HybridDatabase.getRows(
-        projectId,
-        validated.type as DatabaseType,
-        validated.schema,
-        validated.table,
-        {
-          page: validated.page,
-          limit: validated.limit,
-          sortBy: validated.sortBy,
-          sortOrder: validated.sortOrder,
-          search: validated.search,
-        },
-        filters
-      )
     }
 
     // Secret-bearing columns (the end-user table's password hash, tokens,
@@ -245,12 +229,15 @@ export const POST = withProjectAccess(async (request: NextRequest, { user, proje
       )
     }
 
-    // Check if workspace schema (starts with 'workspace_')
-    const isWorkspaceSchema = schema?.startsWith('workspace_')
-    
+    if (typeof table !== 'string' || typeof data !== 'object' || Array.isArray(data)) {
+      return NextResponse.json({ success: false, error: 'table must be a name and data an object' }, { status: 400 })
+    }
+
+    // Only this project's own rows, as GET: its workspace schema (PostgreSQL) or
+    // its own database (MongoDB). Any other schema or type is refused.
     let result: any
-    
-    if (isWorkspaceSchema && type === 'postgresql') {
+
+    if (type === 'postgresql') {
       const expectedSchema = `workspace_${projectId}`
       if (schema !== expectedSchema) {
         return NextResponse.json(
@@ -270,25 +257,18 @@ export const POST = withProjectAccess(async (request: NextRequest, { user, proje
         console.error('Error inserting row into workspace schema:', error)
         throw error
       }
-    } else if (projectId && type === 'mongodb') {
-      // Use workspace-specific insert for MongoDB
+    } else if (type === 'mongodb') {
+      // MongoDB: the project's own database.
       const mongoDb = await getWorkspaceMongoDB(projectId)
       if (!mongoDb) {
         throw new Error('MongoDB workspace database not available')
       }
-      
+
       const collection = mongoDb.collection(table)
       const insertResult = await collection.insertOne(data)
       result = { ...data, _id: insertResult.insertedId }
     } else {
-      // Use standard HybridDatabase for platform database
-      result = await HybridDatabase.insertRow(
-        projectId,
-        type as DatabaseType,
-        schema,
-        table,
-        data
-      )
+      return NextResponse.json({ success: false, error: 'type must be postgresql or mongodb' }, { status: 400 })
     }
 
     // Bust the unified row-count cache so the dashboard "Database" card and

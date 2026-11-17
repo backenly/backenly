@@ -5,6 +5,7 @@ import { generateFunctionCode } from '@/lib/services/ai-functions/generator'
 import { validateAiFunctionData } from '@/lib/ai/function-validation'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { rowLastError, withLastErrors } from '@/lib/services/ai-functions/run-records'
+import { recordRunState } from '@/lib/services/ai-functions/run-state'
 import { governedChange, withChangeAttribution } from '@/lib/changes/ledger'
 import { isGeneratedEndpoint, projectGeneratedRoutes } from '@/lib/services/domain-endpoints'
 import { functionCaptureHealth, ROW_EVENT_FUNCTION_TRIGGERS } from '@/lib/webhooks/function-capture'
@@ -94,10 +95,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       Promise.allSettled(
         toHeal.map(async fn => {
           // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
-          await prisma.aiFunction.update({
-            where: { id: fn.id },
-            data: { status: 'active', lastError: null },
-          })
+          // Never back on if someone switched it off meanwhile (run-state.ts).
+          await recordRunState(fn.id, { lastError: null }, 'active')
           await rowLastError(params.id, fn.id, null)
         })
       ).catch(() => {})

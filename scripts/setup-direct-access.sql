@@ -23,11 +23,16 @@
 --                                     (hardened: connection limit, timeouts,
 --                                     search_path pinned to the one schema).
 --   3. backenly_direct_set_password — rotate.
+--   3b. backenly_direct_set_connection_limit — how many connections a login
+--                                     may hold at once: its project's plan's.
 --   4. backenly_direct_drop_role    — take the role's privileges, terminate
 --                                     sessions, strip policies, reassign owned
 --                                     objects, drop; or, when another database
 --                                     on the cluster still names the role,
 --                                     retire it (NOLOGIN, no password).
+--   4b. backenly_direct_retire_role — retire a login at once and end its
+--                                     sessions, for a deletion that drops its
+--                                     schema later and the login with it.
 --   5. backenly_direct_sync_schema  — idempotent grants/ownership/RLS-policy
 --                                     sync for a workspace schema, including the
 --                                     backup role's read, which every workspace
@@ -156,10 +161,10 @@ BEGIN
     EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', p_role, p_password);
   ELSE
     -- Low per-role connection caps are a shared-cluster self-own guard: the app,
-    -- every tenant's runtime, AND these direct roles all draw from one Postgres
-    -- (max_connections=100). A burst of direct connections must never starve the
-    -- app's own pool. ro 3 / rw 2 is ample for psql/BI/migrations at this scale;
-    -- raise per-role once the cluster is per-tenant isolated.
+    -- every tenant's runtime, AND these direct roles all draw from one Postgres.
+    -- A burst of direct connections must never starve the app's own pool. ro 3 /
+    -- rw 2 is what a login starts with; the application then sets its project's
+    -- plan's number (section 3b).
     EXECUTE format(
       'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS CONNECTION LIMIT %s',
       p_role, p_password, CASE WHEN p_mode = 'READ_ONLY' THEN 3 ELSE 2 END
@@ -217,6 +222,42 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_set_password(text, text) FROM PUBLIC;
+-- ── 3b. How many connections a login may hold at once ────────────────────────
+--
+-- By the project's plan (lib/entitlements/direct-postgres.ts): the application
+-- sets it when it creates a login and again whenever it reads the login's
+-- credentials, so a plan change applies at the next read. PostgreSQL enforces
+-- CONNECTION LIMIT for every role that is not a superuser, and none of these
+-- is. Bounded here as well as in the application: 1 to 100, never unlimited
+-- (-1), whatever the caller passes. The definer created the login, so it holds
+-- ADMIN on it, which is what ALTER ROLE ... CONNECTION LIMIT needs from a role
+-- that is not a superuser (PostgreSQL 16, ALTER ROLE). Sessions already open
+-- are not ended: a lower limit refuses new connections until enough close.
+-- Returns false, changing nothing, when the login does not exist.
+CREATE OR REPLACE FUNCTION public.backenly_direct_set_connection_limit(
+  p_role  text,
+  p_limit integer
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+AS $fn$
+BEGIN
+  IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'backenly_direct_set_connection_limit: invalid role name %', p_role;
+  END IF;
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
+    RAISE EXCEPTION 'backenly_direct_set_connection_limit: limit % is outside 1 to 100', p_limit;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+    RETURN false;
+  END IF;
+  IF (SELECT rolconnlimit FROM pg_roles WHERE rolname = p_role) IS DISTINCT FROM p_limit THEN
+    EXECUTE format('ALTER ROLE %I CONNECTION LIMIT %s', p_role, p_limit);
+  END IF;
+  RETURN true;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_set_connection_limit(text, integer) FROM PUBLIC;
 -- ── 4. Drop a role cleanly ────────────────────────────────────────────────────
 --
 -- The definer needs the PRIVILEGES of the role it drops, not only ADMIN over
@@ -394,6 +435,89 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_drop_role(text) FROM PUBLIC;
+-- ── 4b. Retire a login now, to drop it with its schema later ─────────────────
+--
+-- Deleting a project keeps a schema PostgREST served for two minutes before
+-- dropping it (lib/postgrest/retire-schema.ts), and the project's logins cannot
+-- go before it. backenly_direct_drop_role's DROP OWNED revokes what the login
+-- was granted on the schema's objects, which belong to the project's owner
+-- role, and on Amazon RDS this definer holds none of that role's privileges.
+-- So the deletion retires each login at once, as backenly_direct_drop_role
+-- retires one that another database names: NOLOGIN with no password, so it
+-- authenticates by no means, and its sessions ended. The pass that drops the
+-- schema then drops the login with backenly_direct_drop_role.
+--
+-- Ending a login's sessions needs its privileges. They are taken for the call
+-- and given back as backenly_direct_drop_role gives back what it took for a
+-- login it retires: compared before and after, because Amazon RDS records
+-- every grant its master makes as rdsadmin's. A session that logged in before
+-- this transaction commits outlives it, so the caller calls again after its
+-- commit.
+--
+-- Returns true: the login cannot log in, or does not exist.
+CREATE OR REPLACE FUNCTION public.backenly_direct_retire_role(
+  p_role text
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+AS $fn$
+DECLARE
+  granted    boolean := false;
+  v_before   jsonb;
+  v_after    jsonb;
+  v_key      text;
+  back_login boolean := false;
+  login_i    boolean;
+  login_s    boolean;
+BEGIN
+  IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'backenly_direct_retire_role: invalid role name %', p_role;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+    RETURN true;
+  END IF;
+
+  EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', p_role);
+
+  IF NOT pg_has_role(current_user, p_role, 'USAGE') THEN
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                        THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
+                        ELSE 'GRANT %I TO %I' END, p_role, current_user);
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+      granted := true;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        back_login := true;
+        login_i := (v_before -> v_key ->> 0)::boolean;
+        login_s := (v_before -> v_key ->> 1)::boolean;
+      END IF;
+    END IF;
+  END IF;
+
+  PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = p_role;
+
+  IF granted THEN
+    EXECUTE format('REVOKE %I FROM %I', p_role, current_user);
+  ELSIF back_login THEN
+    EXECUTE format('GRANT %I TO %I WITH INHERIT %s, SET %s', p_role, current_user,
+                   CASE WHEN coalesce(login_i, false) THEN 'TRUE' ELSE 'FALSE' END,
+                   CASE WHEN coalesce(login_s, false) THEN 'TRUE' ELSE 'FALSE' END);
+  END IF;
+  RETURN true;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_retire_role(text) FROM PUBLIC;
 -- ── 5. Idempotent grants / ownership / RLS-policy sync for one schema ────────
 --
 -- Called for EVERY workspace, with or without direct access: when the schema is
@@ -1607,7 +1731,9 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_create_role(text, text, text, text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_connection_limit(text, integer) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_retire_role(text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_schema_changes(text, boolean) TO %I', r);
     -- Read by the application to say why schema changes cannot be allowed.

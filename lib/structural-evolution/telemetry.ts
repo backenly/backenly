@@ -100,6 +100,7 @@ import { reconcileExtraction } from './reconcile'
 import { isOurSatellite } from './primitives'
 import { columnHistory, MAX_SNAPSHOTS, readRepairs, readSnapshots, readUnsettledProblems, UNSETTLED_FINDING, type SnapshotRow } from './sensing'
 import { hostStem, readName } from './lexicon'
+import { notAnotherProjectsRole, statementRoles } from '@/lib/autonomy/statement-attribution'
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -352,13 +353,18 @@ const refersTo = (schema: string, table: string) => `(^|[^A-Za-z0-9_"])${qualifi
 const writesTo = (schema: string, table: string) =>
   `(insert\\s+into|update|delete\\s+from)\\s+(only\\s+)?${qualified(schema, table)}($|[^A-Za-z0-9_"])`
 
+// Every role's statements but Backenly's own (reconciliation and backfill) and
+// another project's roles, whose statements are that project's whatever they
+// name (lib/autonomy/statement-attribution.ts). $5 is this project's roles.
 const CLASS_SQL = (toplevel: boolean) => `
   WITH s AS (
-    SELECT calls, total_exec_time, rows, query
-      FROM pg_stat_statements
-     WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-       ${toplevel ? 'AND toplevel' : ''}
-       AND userid <> (SELECT oid FROM pg_roles WHERE rolname = current_user)
+    SELECT st.calls, st.total_exec_time, st.rows, st.query
+      FROM pg_stat_statements st
+      JOIN pg_roles r ON r.oid = st.userid
+     WHERE st.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+       ${toplevel ? 'AND st.toplevel' : ''}
+       AND r.rolname <> current_user
+       AND ${notAnotherProjectsRole('r', '$5')}
   ), k AS (
     SELECT calls, total_exec_time, rows,
            query ~* $1 AS hw, query ~* $2 AS ha, query ~* $3 AS sw, query ~* $4 AS sa
@@ -397,6 +403,8 @@ export async function readStatementClasses(
   run: Query,
   /** Whether the project's records at home may quote the database's words (./residency.ts). */
   quote: boolean,
+  /** The project whose statements these are; by default the one the schema name carries. */
+  projectId?: string,
 ): Promise<StatementReading> {
   const none = (state: StatementCapability, detail: string, hidden = 0): StatementReading => ({
     state,
@@ -415,7 +423,7 @@ export async function readStatementClasses(
     return none('unreadable', `the extension list could not be read: ${words(err, quote)}`)
   }
 
-  const params = [writesTo(schema, host), refersTo(schema, host), writesTo(schema, satellite), refersTo(schema, satellite)]
+  const params = [writesTo(schema, host), refersTo(schema, host), writesTo(schema, satellite), refersTo(schema, satellite), statementRoles(schema, projectId).own]
   let row: Record<string, unknown> | undefined
   try {
     row = (await run(CLASS_SQL(true), ...params))[0]
@@ -632,7 +640,7 @@ export async function snapshotExtraction(
       unavailable.push({ metric: 'tables', reason: 'not_yet_measurable', detail: `table statistics could not be read: ${words(err, quote)}` })
       return { host: null, satellite: null, statsReset: null }
     }),
-    readStatementClasses(plan.schema, host, satellite, run, quote),
+    readStatementClasses(plan.schema, host, satellite, run, quote, projectId),
   ])
   if (statements.state !== 'available') {
     unavailable.push({

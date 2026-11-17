@@ -18,21 +18,27 @@ import {
   auditGrantSql,
   GRANT_SQL_PATH,
   REQUIRED_ROLE_PRIVILEGES,
+  withoutGrants,
 } from '../../tools/managed-db/role-privilege-spec'
 
 const ROOT = join(__dirname, '..', '..')
 const SQL = readFileSync(join(ROOT, GRANT_SQL_PATH), 'utf8')
 
 describe('the manifest', () => {
-  it('asks for exactly one privilege, for one role', () => {
-    expect(REQUIRED_ROLE_PRIVILEGES).toHaveLength(1)
-    expect(REQUIRED_ROLE_PRIVILEGES[0]).toMatchObject({ role: 'backenly_user', privilege: 'CREATE' })
+  it('asks for two privileges, both for the application role', () => {
+    expect(REQUIRED_ROLE_PRIVILEGES).toHaveLength(2)
+    expect(REQUIRED_ROLE_PRIVILEGES).toEqual([
+      expect.objectContaining({ role: 'backenly_user', privilege: 'CREATE' }),
+      expect.objectContaining({ role: 'backenly_user', privilege: 'pg_read_all_stats' }),
+    ])
   })
 
-  it('records what breaks without it, with repository evidence', () => {
-    const entry = REQUIRED_ROLE_PRIVILEGES[0]
-    expect(entry.requiredBy).toMatch(/42501|project creation throws/)
-    expect(entry.evidence).toContain('lib/projects/provision.ts')
+  it('records what breaks without each one, with repository evidence', () => {
+    const [create, stats] = REQUIRED_ROLE_PRIVILEGES
+    expect(create.requiredBy).toMatch(/42501|project creation throws/)
+    expect(create.evidence).toContain('lib/projects/provision.ts')
+    expect(stats.requiredBy).toMatch(/<insufficient privilege>/)
+    expect(stats.evidence).toContain('lib/autonomy/slow-query-index.ts')
   })
 })
 
@@ -41,17 +47,26 @@ describe('the shipped SQL passes its own audit', () => {
     expect(auditGrantSql(SQL)).toEqual([])
   })
 
-  it('grants CREATE on the database to the named role, and nothing else', () => {
+  it('grants CREATE on the database and the statistics role to the named role, and nothing else', () => {
     const grants = SQL.split(/\r?\n/).filter(l => /^\s*GRANT\b/i.test(l))
-    expect(grants).toHaveLength(1)
-    expect(grants[0]).toMatch(/GRANT CREATE ON DATABASE :"dbname" TO backenly_user;/)
+    expect(grants).toEqual([
+      'GRANT CREATE ON DATABASE :"dbname" TO backenly_user;',
+      'GRANT pg_read_all_stats TO backenly_user;',
+    ])
   })
 
-  it('verifies the grant took effect rather than trusting silence', () => {
+  it('verifies each grant took effect rather than trusting silence', () => {
     // The staging bootstrap issued this same GRANT with `>/dev/null 2>&1` and
     // never checked it, which is why a failure there would have been invisible.
     expect(SQL).toMatch(/the GRANT reported success but the privilege is still absent/)
+    expect(SQL).toMatch(/the GRANT of pg_read_all_stats reported success but backenly_user does not hold its privileges/)
     expect(SQL).toMatch(/ON_ERROR_STOP on/)
+  })
+
+  it('grants nothing when run as a check', () => {
+    const check = withoutGrants(SQL)
+    expect(check.split(/\r?\n/).filter(l => /^\s*GRANT\b/i.test(l))).toEqual([])
+    expect(check.match(/check mode: GRANT skipped/g)).toHaveLength(2)
   })
 
   it('refuses to proceed if the role has been widened elsewhere', () => {

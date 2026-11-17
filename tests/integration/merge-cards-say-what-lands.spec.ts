@@ -130,7 +130,9 @@ it("says what the merge does to production's rows and what Backenly adds, and of
   expect(request.message).toContain("• orders: the 3 existing rows get 'pending' in the new column stage")
   expect(request.message).toContain('What Backenly adds to the new tables:')
   expect(request.message).toMatch(/• refunds: the columns id, "createdAt", "updatedAt", deleted_at/)
-  expect(request.message).toMatch(/indexes on "createdAt", "updatedAt", deleted_at, order_id/)
+  // A table declared in SQL gets the indexes its SQL declares, none guessed
+  // from its column names (sql-tables-only-declared-indexes.spec.ts).
+  expect(request.message).toContain('• refunds: the columns id, "createdAt", "updatedAt", deleted_at, row-level security (1 policy: ALL)\n')
   // The statements stay last, as the card sets them.
   expect(request.message).toMatch(/These statements will be applied to production, in order:\n  ALTER TABLE orders RENAME COLUMN stage TO legacy_stage\n/)
   await prisma.agentApprovalRequest.update({ where: { id: request.id }, data: { status: 'rejected' } })

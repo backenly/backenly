@@ -1012,7 +1012,7 @@ function CaptureFailed({ error }: { error: string }) {
 /**
  * How a receiver verifies what it got: the contract in two lines, and a
  * snippet that implements it exactly (lib/webhooks/index.ts signs
- * 'sha256=' + hex HMAC-SHA256 of the raw body).
+ * "<timestamp>.<delivery id>.<raw body>" as X-Webhook-Signature-V2).
  */
 function VerifySection() {
   const [open, setOpen] = useState(false)
@@ -1021,10 +1021,13 @@ function VerifySection() {
       <Panel>
         <div className="px-[20px] py-[14px]">
           <p className="text-[13px] leading-[20px] text-zinc-400 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-200">
-            Each delivery is signed with <code>X-Webhook-Signature</code>, an HMAC-SHA256 of the raw body under the endpoint’s secret.
+            Each delivery is signed with <code>X-Webhook-Signature-V2</code>, an HMAC-SHA256 of{' '}
+            <code>&lt;timestamp&gt;.&lt;delivery id&gt;.&lt;raw body&gt;</code> under the endpoint’s secret, with the time in{' '}
+            <code>X-Webhook-Timestamp</code>. Refuse a delivery more than 5 minutes old, so a captured one can’t be sent again.
           </p>
           <p className="mt-[4px] text-[13px] leading-[20px] text-zinc-400 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-200">
-            Retries repeat <code>X-Webhook-Delivery</code>, so drop the ones you’ve handled.
+            Retries repeat <code>X-Webhook-Delivery</code>, so drop the ones you’ve handled. <code>X-Webhook-Signature</code>, over the
+            body alone, is still sent for older receivers.
           </p>
           <div className="mt-[10px] flex flex-wrap items-center gap-x-[14px] gap-y-[4px]">
             <CopyButton value={VERIFY_SNIPPET} label="Copy verify.js" showLabel className="-ml-[8px]" />

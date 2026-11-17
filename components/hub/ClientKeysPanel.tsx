@@ -38,14 +38,15 @@ import { SecretOnceDialog } from '@/components/console/SecretOnceDialog'
 import { Time, useNow } from '@/components/console/Time'
 import { formatTime } from '@/components/console/format'
 import { useProjectRole } from '@/lib/hooks/useProjectRole'
-import { isSharedKey, sharedKeyWindow, shortWindow } from '@/lib/security/shared-key'
+import { shortWindow } from '@/lib/security/shared-key'
 
 interface ApiKey {
   id: string
   name: string
   key?: string
   keyPrefix: string
-  keyType?: 'dashboard' | 'public'
+  /** What the key is (lib/auth/key-prefix.ts). */
+  kind?: 'publishable' | 'service' | 'server' | 'mcp' | 'dashboard'
   role: 'admin' | 'read-only' | 'write' | 'ai-only' | 'client' | 'service' | 'custom'
   permissions: string[]
   capabilities?: string[]
@@ -57,6 +58,8 @@ interface ApiKey {
   expiresAt?: string | null
   rateLimit?: number
   rateLimitWindow?: number
+  /** The window that decides the key's requests, as the runtime counts them (lib/security/shared-key-rate.ts). */
+  clientWindow?: { limit: number; windowSeconds: number; perAddress: boolean }
 }
 
 type NewRole = 'admin' | 'read-only' | 'write' | 'client'
@@ -241,9 +244,9 @@ export function ClientKeysPanel({ projectId: given }: { projectId?: string } = {
                 </Fact>
                 {key.serviceRole && <Fact strong>Service role: bypasses row security, servers only</Fact>}
                 <Fact>
-                  {/* Every user of an app sends a shared key, so its limit is each address's (lib/security/shared-key.ts). */}
-                  {isSharedKey(key)
-                    ? `${shortWindow(sharedKeyWindow(key))} per address`
+                  {/* Every user of an app sends a shared key, so its limit is each address's; the server says which (clientWindow). */}
+                  {key.clientWindow
+                    ? `${shortWindow(key.clientWindow)}${key.clientWindow.perAddress ? ' per address' : ''}`
                     : shortWindow({ limit: key.rateLimit ?? 1000, windowSeconds: key.rateLimitWindow ?? 3600 })}
                 </Fact>
                 <Fact>{key.lastUsed ? <Time iso={key.lastUsed} prefix="Last used" /> : 'Never used'}</Fact>

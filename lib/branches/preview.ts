@@ -33,9 +33,9 @@ export interface PreviewEndpoint {
   branch: string
   /** The project's base URL; the same one production uses. */
   baseUrl: string
-  /** `${baseUrl}/db/{table}`: the branch-scoped data API. */
+  /** `${baseUrl}/db/{table}`: deprecated, kept for existing apps (lib/api/v1/deprecation.ts). */
   dataUrl: string
-  /** PostgREST's own grammar, also branch-scoped. */
+  /** The REST API, in PostgREST's grammar; branch-scoped like the rest of the data API. */
   v2Url: string
   /** Every data-API response carries this; a test should assert it. */
   environmentHeader: { name: typeof ENVIRONMENT_HEADER; value: string }
@@ -78,7 +78,7 @@ export function previewEndpoint(
 
 /** A one-request smoke test against the branch, with the key's slot named. */
 export function previewCurl(endpoint: PreviewEndpoint, table = 'your_table', key = '$BACKENLY_PREVIEW_KEY'): string {
-  return `curl -i "${endpoint.baseUrl}/db/${table}?limit=5" -H "x-api-key: ${key}"`
+  return `curl -i "${endpoint.v2Url.replace('{table}', table)}?limit=5" -H "x-api-key: ${key}"`
 }
 
 /**
@@ -122,7 +122,7 @@ export function previewAgentInstructions(endpoint: PreviewEndpoint, key = '$BACK
     `- Base URL: ${endpoint.baseUrl} (the same as production; the key selects the branch).`,
     `- Send the preview key as the x-api-key header: ${key}. Never use a production key for these tests.`,
     `- With the SDK, always pass apiKey explicitly: without one it fetches the production anon key.`,
-    `- Data API: ${endpoint.dataUrl} and ${endpoint.v2Url}.`,
+    `- REST API: ${endpoint.v2Url}, in PostgREST's grammar. ${endpoint.dataUrl} is deprecated, kept for existing apps.`,
     `- Every data and auth response must carry ${endpoint.environmentHeader.name}: ` +
       `${endpoint.environmentHeader.value}. Fail the test if it says "main".`,
     `- End-user auth runs on the branch: POST ${endpoint.baseUrl}/auth/signup, /auth/signin, ` +

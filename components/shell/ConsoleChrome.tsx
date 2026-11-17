@@ -666,11 +666,17 @@ export function SidebarNav({ children, footer }: { children: ReactNode; footer?:
   )
 }
 
+/**
+ * Rows are 32px with 6px between them on a laptop, so the gap between two
+ * names is half as wide again as the 28px rows with 1px gaps they replaced
+ * (the founder's call, 2026-11-17: "1.5x"). A phone keeps its taller 38px
+ * touch rows with 2px between. Groups part by 22px, half as much again too.
+ */
 export function NavGroup({ label, children, first = false }: { label?: string; children: ReactNode; first?: boolean }) {
   return (
-    <div className={first ? '' : 'mt-3'}>
-      {label && <p className="px-2.5 text-[12px] font-medium leading-[18px] text-faint">{label}</p>}
-      <ul className="space-y-px">{children}</ul>
+    <div className={first ? '' : 'mt-[22px]'}>
+      {label && <p className="mb-[6px] px-2.5 text-[12px] font-medium leading-[18px] text-faint">{label}</p>}
+      <ul className="space-y-[2px] md:space-y-[6px]">{children}</ul>
     </div>
   )
 }
@@ -709,7 +715,7 @@ export function NavItem({
         title={title}
         aria-current={active ? 'page' : undefined}
         {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
-        className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[28px] ${FOCUS} ${
+        className={`group flex h-[38px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[32px] ${FOCUS} ${
           active
             ? 'bg-white/[0.07] text-zinc-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.045),inset_0_1px_0_rgba(255,255,255,0.05)]'
             : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'

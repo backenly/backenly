@@ -49,6 +49,11 @@ import { checkExposure, type Operation } from '@/lib/postgrest/exposure'
 import { projectPostgrest } from '@/lib/data-plane/regional'
 import { stripUpstreamError } from '@/lib/postgrest/translate'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
+import {
+  isSchemaCacheRefusal,
+  retrySchemaCacheRefusals,
+  SCHEMA_CACHE_RETRY_AFTER_SECONDS,
+} from '@/lib/postgrest/schema-cache-retry'
 import { authRefusalStatus, getProjectIdFromAuth, refuseIfKeyLacksMethodPermission } from './dynamic'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
@@ -215,16 +220,22 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
     branchSchema: auth.branchSchema,
   })
 
-  const sendUpstream = () =>
-    fetch(url, {
-      method: req.method,
-      headers,
-      body: ['POST', 'PATCH', 'PUT'].includes(req.method) ? JSON.stringify(req.body ?? {}) : undefined,
-    })
+  // Serialised once, so every send of this request carries the same bytes.
+  const body = ['POST', 'PATCH', 'PUT'].includes(req.method) ? JSON.stringify(req.body ?? {}) : undefined
+  const sendUpstream = async () => {
+    const upstream = await fetch(url, { method: req.method, headers, body })
+    return { upstream, text: await upstream.text() }
+  }
 
   try {
-    let upstream = await sendUpstream()
-    let text = await upstream.text()
+    // PGRST002 (PostgREST's schema cache is empty while a failed reload is
+    // retried) is answered before PostgREST runs anything, so the request is
+    // sent again for about 2 s, as on v1 (lib/postgrest/schema-cache-retry.ts).
+    let { upstream, text } = await retrySchemaCacheRefusals(
+      await sendUpstream(),
+      sendUpstream,
+      `v2 ${req.method} ${projectId}/${table}`,
+    )
 
     // Same PGRST106 self-heal v1 performs. Both surfaces run on one engine, so
     // a repair wired into only one of them means the same project is alive at
@@ -233,8 +244,7 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
     if (!upstream.ok && text.includes('PGRST106')) {
       const repair = await ensureSchemaRegistered(projectId)
       if (repair.registered) {
-        upstream = await sendUpstream()
-        text = await upstream.text()
+        ;({ upstream, text } = await sendUpstream())
       }
     }
 
@@ -255,6 +265,10 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
       let parsed: unknown = null
       try { parsed = JSON.parse(text) } catch { parsed = null }
       const safe = stripUpstreamError(upstream.status, parsed)
+      // Still refused after the retries above: tell the caller when to try again.
+      if (isSchemaCacheRefusal({ upstream, text })) {
+        res.setHeader('Retry-After', String(SCHEMA_CACHE_RETRY_AFTER_SECONDS))
+      }
       return res.status(safe.status).json(safe.body)
     }
 

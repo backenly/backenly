@@ -261,6 +261,12 @@ export interface ProjectListEntry {
    * written once by lib/import/jobs.ts. Null when created from scratch.
    */
   importedFrom: Prisma.JsonValue | null
+  /**
+   * Set when the project was asked to be deleted (lib/projects/deletion.ts),
+   * with when it is removed for good. The list leaves such a project out.
+   */
+  deletedAt: Date | null
+  purgeAfter: Date | null
   _count: { tables: number; workspaces: number }
 }
 

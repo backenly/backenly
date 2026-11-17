@@ -89,7 +89,8 @@ export default async function McpAuthorizePage(
       .accessibleProjectsWhere(uid!)
       .then(where =>
         prisma.project.findMany({
-          where,
+          // A project asked to be deleted is not offered (lib/projects/deletion.ts).
+          where: { AND: [where, { deletedAt: null }] },
           select: { id: true, name: true },
           orderBy: { createdAt: 'desc' },
         }),

@@ -33,6 +33,10 @@ packages/*/*.tsbuildinfo
 !docker/certs/rds-ca-us-west-2.pem
 !docker/certs/rds-ca-eu-central-1.pem
 !docker/certs/rds-ca-ap-southeast-1.pem
+# Those five joined, as the images join them, published for direct Postgres
+# clients to verify the server with (sslrootcert); the same spec holds it to
+# them byte for byte.
+!public/certs/rds-ca-cloud-regions.pem
 
 # debug
 npm-debug.log*

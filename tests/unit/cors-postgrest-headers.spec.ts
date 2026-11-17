@@ -20,8 +20,13 @@ const EXPRESS = readFileSync(join(ROOT, 'server/app.ts'), 'utf8')
 const NEXT_MW = readFileSync(join(ROOT, 'middleware.ts'), 'utf8')
 
 const REQUIRED_REQUEST_HEADERS = ['Prefer', 'Range', 'Range-Unit']
-/** Headers a browser cannot READ unless they are explicitly exposed. */
-const REQUIRED_EXPOSED = ['Content-Range']
+/**
+ * Headers a browser cannot READ unless they are explicitly exposed. Retry-After
+ * says when to send again after the data plane's 503 or a rate limit's 429;
+ * Deprecation and Link, that a /db route is deprecated and where its successor
+ * on /api/v2 is (lib/api/v1/deprecation.ts).
+ */
+const REQUIRED_EXPOSED = ['Content-Range', 'Retry-After', 'Deprecation', 'Link']
 
 describe('CORS allows the PostgREST control headers (P0)', () => {
   it.each(REQUIRED_REQUEST_HEADERS)('the Express runtime allows %s', (h) => {
@@ -40,9 +45,11 @@ describe('CORS allows the PostgREST control headers (P0)', () => {
     for (const h of REQUIRED_REQUEST_HEADERS) expect(line).toContain(h)
   })
 
-  it('the Next middleware exposes Content-Range on SDK routes', () => {
+  it('the Next middleware exposes the same headers on SDK routes', () => {
     expect(NEXT_MW).toContain('Access-Control-Expose-Headers')
-    expect(NEXT_MW).toContain('Content-Range')
+    const line = NEXT_MW.split('\n').find((l) => l.includes('const exposedHeaders'))
+    expect(line).toBeTruthy()
+    for (const h of REQUIRED_EXPOSED) expect(line).toContain(h)
   })
 
   it('both runtimes still allow the two auth headers', () => {

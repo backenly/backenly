@@ -1593,8 +1593,7 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
         stmt,
       )
     }
-    // `WHERE true` is an index over every row: what an upsert needs on a
-    // soft-delete table, where a UNIQUE index is otherwise scoped to live rows.
+    // `WHERE true` is an index over every row, as the statement without it is.
     // It names no column, so it is passed on as itself rather than checked as a
     // predicate, which would refuse it.
     const everyRow = isEveryRowPredicate(where[1])
@@ -1606,6 +1605,7 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
         ...(method ? { method } : {}),
         ...(indexName ? { indexName } : {}),
         where: everyRow ? 'true' : where[1].trim(),
+        asWritten: true,
       },
       source: stmt,
     }]
@@ -1615,6 +1615,10 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
   // saying so — while the same call also silently dropped UNIQUE and every
   // column after the first (defects #4 and #5). The note drew attention to the
   // one harmless difference and said nothing about the two that mattered.
+  //
+  // `asWritten`: the index is created as the statement declares it. A UNIQUE
+  // one is not scoped to live rows, as create_index scopes one on a table with
+  // soft delete (lib/ai/minimal-executor.ts, executeCreateIndex).
   return [{
     tool: 'create_index',
     args: {
@@ -1623,6 +1627,7 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
       unique,
       ...(method ? { method } : {}),
       ...(indexName ? { indexName } : {}),
+      asWritten: true,
     },
     source: stmt,
   }]

@@ -75,5 +75,17 @@ supervise() {
 }
 supervise &
 
+# The app runs with node's own HOME, USER and LOGNAME. setpriv changes the uid
+# and keeps the environment it was given, which is root's: HOME=/root, a
+# directory node cannot enter. libpq looks for a client certificate under
+# $HOME/.postgresql on every TLS connection and gives up on a path it cannot
+# look at, so every pg_dump and psql the app started failed with `could not
+# open certificate file "/root/.postgresql/postgresql.crt": Permission denied`:
+# exports, daily snapshots and restores. gosu and su-exec set HOME the same
+# way; setpriv does it only with --reset-env, which would also drop the task's
+# own variables. A passwd entry with no home gets "/", as su-exec gives it.
+app_home="$(getent passwd "$APP_USER" | cut -d: -f6)"
+export HOME="${app_home:-/}" USER="$APP_USER" LOGNAME="$APP_USER"
+
 umask 077
 exec setpriv --reuid="$app_uid" --regid="$app_gid" --init-groups --no-new-privs -- "$@"

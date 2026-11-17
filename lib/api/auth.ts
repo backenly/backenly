@@ -38,7 +38,12 @@ export interface RegistrationRequirements {
 
 /** A refusal from an auth route, with the machine-readable code when it sent one. */
 export class AuthRequestError extends Error {
-  constructor(message: string, readonly code?: string) {
+  constructor(
+    message: string,
+    readonly code?: string,
+    /** With `REAUTH_REQUIRED`: how the person can sign in again (lib/auth/recent-sign-in.ts). */
+    readonly reauth?: { email: string | null; password: boolean; provider: 'google' | 'github' | null } | null,
+  ) {
     super(message)
     this.name = 'AuthRequestError'
   }
@@ -112,7 +117,7 @@ export type RegisterResult =
 
 async function readAuthError(response: Response, fallback: string): Promise<AuthRequestError> {
   const error = await response.json().catch(() => ({}))
-  return new AuthRequestError(error.error || fallback, error.code)
+  return new AuthRequestError(error.error || fallback, error.code, error.reauth ?? null)
 }
 
 /** Remember the session a successful signup or verification issued. */
@@ -205,7 +210,7 @@ export const ACCOUNT_DELETED_URL = '/auth/login'
  * /auth/login?redirect=%2Fapp, and the user saw a blank frame, an "Already
  * signed in" card and a reload before the form settled.
  */
-export async function signOut(): Promise<void> {
+export async function signOut(destination: string = SIGNED_OUT_URL): Promise<void> {
   const token = localStorage.getItem('auth-token')
 
   // Always ask the server, even without a localStorage token: the httpOnly
@@ -220,17 +225,43 @@ export async function signOut(): Promise<void> {
   })
   if (!response.ok) throw new Error(`Sign-out failed (${response.status})`)
 
-  await leaveSignedOut(SIGNED_OUT_URL)
+  await leaveSignedOut(destination)
+}
+
+/**
+ * Sign in again in place, for a deletion that needs a recent sign-in
+ * (lib/auth/recent-sign-in.ts). The password goes to the sign-in route, so its
+ * limits, lockout and second factor apply as at sign-in; refusals come back as
+ * LoginError (`TOTP_REQUIRED` asks for the authenticator code). Unlike
+ * login(), it keeps the page's own state: the person stays where they were.
+ */
+export async function reauthenticate(data: LoginRequest): Promise<void> {
+  const response = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new LoginError(error.error || 'Sign-in failed', typeof error.code === 'string' ? error.code : null)
+  }
+  const result = await response.json().catch(() => ({}))
+  if (result.token) localStorage.setItem('auth-token', result.token)
 }
 
 /**
  * Delete the signed-in platform account, then leave as a signed-out browser.
- * Rejects, changing nothing in this browser, when the server refused.
+ * `confirm` is the account's email, as the person typed it. Rejects, changing
+ * nothing in this browser, when the server refused: AuthRequestError with code
+ * `REAUTH_REQUIRED` (and `reauth`) when the sign-in is more than ten minutes old.
  */
-export async function deleteAccount(): Promise<void> {
+export async function deleteAccount(confirm?: string): Promise<void> {
   const response = await fetch(`${API_BASE}/auth/delete-account`, {
     method: 'DELETE',
     credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: confirm ?? null }),
   })
   if (!response.ok) throw await readAuthError(response, 'Failed to delete account')
 

@@ -39,45 +39,45 @@ export interface GeneratedFunction {
  * actually execute. Drift between this text and the runner is caught by
  * tests/route-module-runner.spec.ts.
  */
-const ROUTE_MODULE_CONTRACT = `RUNTIME CONTRACT (the code runs in Backenly's route-module runner, NOT a full Next.js server):
-- Export exactly one async handler: export async function METHOD(request: NextRequest, { params }: { params: { projectId: string } })
+const ROUTE_MODULE_CONTRACT = `RUNTIME CONTRACT (the code runs in Backenly's function runner, NOT a Next.js server):
+- Export exactly one async handler: export async function METHOD(request: Request, { params }: { params: { projectId: string } })
 - The second argument is ALWAYS provided; params.projectId is the project id. Query-string values are also merged into params.
-- request supports: request.url, request.method, request.nextUrl.searchParams.get(...), await request.json(), request.headers.get(name), request.cookies.get(name)?.value
-- Respond ONLY with NextResponse.json(body, { status }) from 'next/server'.
-- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma, asService), '@/lib/auth/jwt' (verifyToken, isAdminRequest), '@/lib/auth/session' (createSession), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
+- request supports: request.url, request.method, new URL(request.url).searchParams.get(...), await request.json(), request.headers.get(name), request.cookies.get(name)?.value
+- Respond ONLY with the Web Response: Response.json(body, { status }). Response is a global; do not import it.
+- Imports allowed ONLY from: '@backenly/functions' (db, asService, verifyToken, isAdminRequest, createSession), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
 - process.env holds the project's own variables and NODE_ENV only. Never read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give them to functions, and code that reads them is refused.
 - To SIGN A USER IN once the function has proved who they are its own way (a code sent by SMS, another identity provider), never sign a token yourself:
     const { token, user } = await createSession(userId)
-  createSession from '@/lib/auth/session' returns the same session password sign-in issues, signed by Backenly, for a user who exists in the project's users table and is not suspended. Call it only after the proof succeeds: whoever reaches that line is signed in as that user.
+  createSession returns the same session password sign-in issues, signed by Backenly, for a user who exists in the project's users table and is not suspended. Call it only after the proof succeeds: whoever reaches that line is signed in as that user.
 - An ADMIN-ONLY endpoint checks the project's admin key without holding it:
-    if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(request)) return Response.json({ error: 'Forbidden' }, { status: 403 })
 - Work the caller may not do themselves (a checkout that creates the order and takes stock the shopper cannot update) runs inside asService, in one transaction, as the service role. Row-level security does not apply to its SQL, so check who is calling first:
-    const order = await asService(async (db) => {
-      const [product] = await db.$queryRawUnsafe(\`SELECT id, stock FROM "workspace_\${params.projectId}"."products" WHERE id = $1 FOR UPDATE\`, productId)
+    const order = await asService(async (tx) => {
+      const [product] = await tx.$queryRawUnsafe(\`SELECT id, stock FROM "workspace_\${params.projectId}"."products" WHERE id = $1 FOR UPDATE\`, productId)
       ...
     })
 - NEVER use: eval, new Function, dynamic import(), child_process, worker_threads, fs writes, process.exit.
 - End-user data tables live in the per-project PostgreSQL schema "workspace_{projectId}" — access them with parameterised raw SQL, e.g.:
-    const rows = await prisma.$queryRawUnsafe(\`SELECT * FROM "workspace_\${params.projectId}"."posts" WHERE id = $1\`, id)
-  NEVER use prisma model accessors (prisma.user, prisma.post, ...) for end-user tables — those models do not exist.
+    const rows = await db.$queryRawUnsafe(\`SELECT * FROM "workspace_\${params.projectId}"."posts" WHERE id = $1\`, id)
+  db has no model accessors (db.user, db.post, ...): end-user tables are reached with SQL only.
 - AUTH IS OPT-IN. Add an auth gate ONLY when the description asks for one ("only the logged-in user", "requires sign-in", "the current user's ..."). Do NOT add a 401 check to an endpoint that was described as public — an invented auth gate makes the endpoint unusable and the caller cannot tell it was never asked for.
 - When you DO auth-gate, read either header spelling — clients send both:
     const raw = request.headers.get('x-user-token') || request.headers.get('authorization') || ''
     const payload = verifyToken(raw.replace(/^Bearer /i, ''))
-    if (!payload) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!payload) return Response.json({ error: 'Unauthorized' }, { status: 401 })
   (The runtime already mirrors one header onto the other, so a function that reads only one still works — but read both so the code is honest about what it accepts.)
-- The caller's identity is ALSO applied at the database level automatically: prisma runs with the request's RLS claims set, so own-rows policies scope your queries to the calling user without you doing anything. Do not try to set request.jwt.claims yourself.
-- Surface real errors. In a catch block return the actual message — NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }) — never a bare "internal_error", which leaves the caller with nothing to act on.
+- The caller's identity is ALSO applied at the database level automatically: db runs with the request's RLS claims set, so own-rows policies scope your queries to the calling user without you doing anything. Do not try to set request.jwt.claims yourself.
+- Surface real errors. In a catch block return the actual message — Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }) — never a bare "internal_error", which leaves the caller with nothing to act on.
 - A 400 MUST NAME THE FIELDS. Never return { error: 'Missing or invalid required fields' } or any other message that withholds which field was wrong: the caller has no schema endpoint for a generated function, so an unnamed 400 is unanswerable and the only way forward is to guess payloads. Validate explicitly and report the specific fields, e.g.:
     const missing = ['lineItems','successUrl','cancelUrl'].filter((k) => body[k] === undefined)
-    if (missing.length) return NextResponse.json({
+    if (missing.length) return Response.json({
       error: \`Missing required field(s): \${missing.join(', ')}\`,
       required: { lineItems: 'array of { price, quantity }', successUrl: 'string', cancelUrl: 'string' },
     }, { status: 400 })
   The \`required\` object IS the contract — include it on every 400 so one failed call teaches the caller the whole shape.
 - Answer ?describe=1 with the contract instead of doing the work, on every method you export (GET /?describe=1, POST /?describe=1, ...), and check for it first, before validating input or touching the database (and answer OPTIONS the same way, for a POST-only handler):
     if (new URL(request.url).searchParams.get('describe') === '1') {
-      return NextResponse.json({ method: 'POST', required: {...}, optional: {...}, returns: {...} })
+      return Response.json({ method: 'POST', required: {...}, optional: {...}, returns: {...} })
     }
   This is what makes a generated endpoint discoverable without reading its source. Backenly also calls it once when the function is created, to check that the handler runs, so it must never do the work.`
 
@@ -124,7 +124,7 @@ function renderSchemaRules(): string {
     `RULES DERIVED FROM THIS SCHEMA — follow them exactly:`,
     '- Always schema-qualify: "workspace_${params.projectId}"."<table>".',
     `- Cast uuid parameters explicitly: WHERE id = $1::uuid. A bare $1 against a uuid column throws 22P02.`,
-    `- COUNT(*) comes back from Prisma as BigInt and is NOT JSON-serialisable — wrap it: Number(rows[0].count).`,
+    `- COUNT(*) comes back as a BigInt, which Response.json cannot serialise — wrap it: Number(rows[0].count).`,
     `- Respect every CHECK constraint above. Writing a value outside one fails at runtime with 23514, not at compile time.`,
     `- Never INSERT a column that is NOT NULL without a value, unless it has a DEFAULT.`,
   ].join('\n')
@@ -319,7 +319,7 @@ async function generateFunctionCode(
     purpose: 'functions.generate',
     messages: [{
       role: 'system',
-      content: `You are a senior TypeScript backend engineer writing a Next.js API route handler.
+      content: `You are a senior TypeScript backend engineer writing an HTTP route handler.
 Write clean, production-ready TypeScript code.
 Include proper error handling.
 Return ONLY the code — no markdown fences, no explanation.
@@ -329,13 +329,13 @@ ${ROUTE_MODULE_CONTRACT}
 ${schemaContext}`,
     }, {
       role: 'user',
-      content: `Write a Next.js API route handler for:
+      content: `Write an HTTP route handler for:
 Function: ${functionName}
 HTTP Method: ${method}
 Description: ${description}
 Project ID context: ${projectId}
 
-The file exports an async function named ${method.toUpperCase()} that accepts (request: NextRequest, { params }: { params: { projectId: string } }).
+The file exports an async function named ${method.toUpperCase()} that accepts (request: Request, { params }: { params: { projectId: string } }).
 
 Use the real schema given above — the table and column names there are authoritative. Do not invent columns.`,
     }],
@@ -358,13 +358,18 @@ function stripCodeFences(raw: string): string {
  * Shared by the creation gate (below) and the executor's self-heal path.
  * Returns null when no validated fix could be produced — callers must treat
  * null as "leave the stored code untouched".
+ *
+ * The creation gate's repair is part of the build the customer asked for, and
+ * is paid as its purpose says. The self-heal is Backenly's own work and passes
+ * `payer: 'platform'`.
  */
 export async function generateFixedRouteModule(
   originalCode: string,
   errorMessage: string,
   description: string,
   method: string,
-  projectId: string
+  projectId: string,
+  { payer }: { payer?: 'customer' | 'platform' } = {},
 ): Promise<string | null> {
   try {
     const { validateRouteModule } = await import('@/lib/services/ai-functions/route-module-runner')
@@ -379,7 +384,7 @@ export async function generateFixedRouteModule(
       purpose: 'functions.generate',
       messages: [{
         role: 'system',
-        content: `You are a senior TypeScript backend engineer fixing a broken Next.js API route handler.
+        content: `You are a senior TypeScript backend engineer fixing a broken HTTP route handler.
 Return ONLY the complete fixed module code — no markdown fences, no explanation.
 
 ${ROUTE_MODULE_CONTRACT}
@@ -400,6 +405,7 @@ Fix the code so it satisfies the runtime contract and its purpose.
 Check the error against the real schema above — a runtime failure here is most often a wrong column name, a missing ::uuid cast, an un-serialisable BigInt from COUNT(*), or a value that violates a CHECK constraint.`,
       }],
       label: 'function-repair',
+      ...(payer ? { payer } : {}),
     })
 
     const fixed = stripCodeFences(response.text?.trim() ?? '')

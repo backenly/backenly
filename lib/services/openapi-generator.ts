@@ -368,6 +368,23 @@ export async function generateOpenApiSpec(
   // too, because the key is what puts the user on the branch.
   const authSecurity = branch ? [{ ApiKeyAuth: [] }] : []
   spec.tags.push({ name: 'Auth', description: 'End-user authentication' })
+  // ── /db is deprecated: /api/v2 is the REST API ──────────────────────────────
+  // OpenAPI's own flag on every /db operation, with the successor named. The
+  // routes keep working for existing apps; each response also carries a
+  // Deprecation header and a Link to the table on /api/v2
+  // (lib/api/v1/deprecation.ts).
+  for (const [path, item] of Object.entries(spec.paths as Record<string, Record<string, any>>)) {
+    if (!path.startsWith('/db/')) continue
+    const table = path.split('/')[2]
+    for (const operation of Object.values(item)) {
+      if (!operation || typeof operation !== 'object') continue
+      operation.deprecated = true
+      operation.description =
+        `Deprecated, kept for existing apps. New work uses /api/v2/${projectId}/${table}, PostgREST's grammar` +
+        (operation.description ? `.\n\n${operation.description}` : '.')
+    }
+  }
+
   spec.paths['/auth/signup'] = {
     post: {
       tags: ['Auth'], summary: 'Sign up', operationId: 'signUp', security: authSecurity,

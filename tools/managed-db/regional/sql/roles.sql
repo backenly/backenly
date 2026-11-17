@@ -7,7 +7,10 @@
 --   backenly_app            the application. LOGIN INHERIT, and NOSUPERUSER
 --                           NOBYPASSRLS NOCREATEDB NOCREATEROLE: RLS applies to
 --                           it. CONNECT, TEMPORARY and CREATE on the database,
---                           because it creates the workspace schemas. Workspace
+--                           because it creates the workspace schemas, and the
+--                           privileges of pg_read_all_stats, because its
+--                           measured-latency checks read the text of
+--                           statements PostgREST's roles ran. Workspace
 --                           objects belong to per-project bkn_own_* roles
 --                           (setup-direct-access.sql) and the app reaches them
 --                           by inherited membership.
@@ -164,6 +167,24 @@ BEGIN
   END IF;
   ALTER ROLE backenly_app WITH NOCREATEDB NOCREATEROLE;
   EXECUTE format('GRANT CONNECT, TEMPORARY, CREATE ON DATABASE %I TO backenly_app', current_database());
+
+  -- Statement statistics. PostgREST runs every /api/v2 and v1 /db request as
+  -- anon, authenticated or service_role, and PostgreSQL shows the text of a
+  -- statement another role ran only to a role holding the privileges of
+  -- pg_read_all_stats. Without them the app's measured-latency checks saw no
+  -- REST read at all (production QA, 2026-11-16). The app already reaches
+  -- every workspace, so this adds no access to data. Supabase grants pg_monitor
+  -- to postgres for the same reason (supabase/postgres,
+  -- migrations/db/migrations/20230306081037_grant_pg_monitor_to_postgres.sql).
+  IF NOT pg_has_role('backenly_app', 'pg_read_all_stats', 'USAGE') THEN
+    BEGIN
+      GRANT pg_read_all_stats TO backenly_app;
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE EXCEPTION 'refusing: % cannot grant pg_read_all_stats to backenly_app; it needs the ADMIN option on pg_read_all_stats. Grant it as a role that has it, then run this again',
+        current_user;
+    END;
+    RAISE NOTICE 'granted pg_read_all_stats to backenly_app';
+  END IF;
 
   -- The installer must hold the application role's PRIVILEGES, not only ADMIN
   -- over it. The definer functions the next steps install (registry, DDL sync,

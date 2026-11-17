@@ -11,13 +11,11 @@
  *   /api/projects/[id]/autonomy/events    Backenly's own fixes: the violet chart markers
  *   /api/projects/[id]/state              published or not
  *
- * The server-errors chart counts 5xx responses per bucket itself. The metrics
- * route's `errorRate` series counts every response of 400 and above, which
- * would put a client's expired-token 401s and missing-row 404s under the
- * heading "Server errors" (round-1 Monitoring defect: "Success rate counts
- * 4xx"). The 5xx rows are few by nature, so they are read from /api/logs and
- * bucketed here; when there are more than MAX_5XX_ROWS of them the chart says
- * it shows the latest ones.
+ * The server-errors chart counts 5xx responses per bucket itself. A client's
+ * expired-token 401s and missing-row 404s are not server errors (round-1
+ * Monitoring defect: "Success rate counts 4xx"). The 5xx rows are few by
+ * nature, so they are read from /api/logs and bucketed here; when there are
+ * more than MAX_5XX_ROWS of them the chart says it shows the latest ones.
  *
  * The markers do not come from /api/monitoring/events. That route returns the
  * newest audit rows of any kind, and the self-healing loop writes one every
@@ -71,10 +69,12 @@ export interface Movement {
 export interface Stats {
   requests: Movement
   responseTime: Movement
-  /** Every response of 400 and above. */
+  /** 5xx, the same as serverErrors. Older servers counted every response of 400 and above. */
   errors: Movement
   /** 5xx only. Older servers did not send it. */
   serverErrors?: Movement
+  /** 4xx only: refused keys, bad requests, rows not found. Not failures. Older servers did not send it. */
+  clientErrors?: Movement
 }
 
 export interface Endpoint {
@@ -82,8 +82,10 @@ export interface Endpoint {
   endpoint: string
   requests: number
   avgResponseTime: number
-  /** Percent of responses of 400 and above. */
+  /** Percent of responses with a 5xx status. */
   errorRate: number
+  /** Percent of responses with a 4xx status. Not failures. */
+  clientErrorRate: number
   p95: number
 }
 
@@ -193,6 +195,7 @@ export async function loadOverview(projectId: string, range: Range): Promise<Ove
         requests: Number(e.requests ?? 0),
         avgResponseTime: Number(e.avgResponseTime ?? 0),
         errorRate: Number(e.errorRate ?? 0),
+        clientErrorRate: Number(e.clientErrorRate ?? 0),
         p95: Number(e.p95 ?? 0),
       }))
       .filter((e) => e.endpoint),

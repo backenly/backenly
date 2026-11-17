@@ -2,9 +2,27 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteAccountCompletely, TooManyProjectsError } from '@/lib/projects/delete'
 import { clearSessionCookies } from '@/lib/auth/session'
+import { CONFIRMATION_REQUIRED, confirmationOf, reauthRefusal, signedInRecently } from '@/lib/auth/recent-sign-in'
 
 export const DELETE = withAuth(async (request: NextRequest, { user }) => {
   try {
+    // Nothing here can be undone, so the caller confirms with the account's
+    // email and has signed in within the last ten minutes
+    // (lib/auth/recent-sign-in.ts).
+    const confirm = (await confirmationOf(request))?.trim().toLowerCase() ?? null
+    if (!confirm || confirm !== user.email.trim().toLowerCase()) {
+      return NextResponse.json(
+        {
+          error: `Deleting your account needs its email as confirmation. Send {"confirm": ${JSON.stringify(user.email)}} in the request body.`,
+          code: CONFIRMATION_REQUIRED,
+        },
+        { status: 400 },
+      )
+    }
+    if (!signedInRecently(user.signedInAt)) {
+      return reauthRefusal('your account', user.user)
+    }
+
     // Deletes every owned project's schemas and rows, then the user, in one
     // transaction — then removes each project's backups and storage objects.
     //

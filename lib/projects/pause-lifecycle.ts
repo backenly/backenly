@@ -155,6 +155,9 @@ export async function afterPauseCommitted(
   // in another region is paused there once its region has the change
   // (lib/auth-projection/confirm.ts).
   invalidateProjectServingState(projectId)
+  // Its direct Postgres logins connect past every door, so they stop too;
+  // resuming brings them back with the same passwords. Never throws.
+  await (await import('./paused-logins')).stopDirectLogins(projectId, 'paused')
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
 
   const discardedOutboxEvents = await discardOutbox(projectId)
@@ -207,13 +210,16 @@ export async function afterResumeCommitted(projectId: string, actor: LifecycleAc
   // Without this the owner who just clicked Resume would be refused by this
   // process's MCP and mutation gates for up to FRESH_MS.
   invalidateProjectServingState(projectId)
+  // The direct Postgres logins the pause stopped, back with their passwords. Never throws.
+  await (await import('./paused-logins')).restoreDirectLogins(projectId, 'resumed')
   await ensureSchemaRegistered(projectId)
   await writeAudit(projectId, 'PROJECT_RESUMED', actor, 'Project resumed', {})
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
-async function cancelPendingDeliveries(
+/** Cancel a project's webhook deliveries still waiting to go out; a deletion stops them too. */
+export async function cancelPendingDeliveries(
   client: Pick<LifecycleTx, 'webhookLog'>,
   projectId: string,
 ): Promise<number> {

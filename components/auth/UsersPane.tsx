@@ -17,7 +17,8 @@ import Link from 'next/link'
 import { Ban, CheckCircle2 } from 'lucide-react'
 import { GridFooter, PaneToolbar } from '@/components/console/InstrumentBar'
 import { recordNav, RecordDrawer, useRecordParam } from '@/components/console/RecordDrawer'
-import { EmptyPanel, ErrorRow, RefusedLine, type AgentState } from '@/components/console/states'
+import { ErrorRow, RefusedLine, type AgentState } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { Time } from '@/components/console/Time'
 import { formatTime } from '@/components/console/format'
 import { FOCUS, FOCUS_INSET, GRID_HEAD, RULE } from '@/components/console/tokens'
@@ -148,14 +149,15 @@ export function UsersPane({
     <div className="flex min-w-0 flex-1 flex-col">
       {empty ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <EmptyPanel
+          <FirstRun
+            picture="users"
             title="No users yet"
-            sentence="People who sign up through your app appear here."
+            sentence="People who sign up through your app appear here, with how they signed in and when they were last active."
             requests={['Add email and password sign-up and sign-in to the app, with password reset.']}
+            projectId={projectId}
             agent={agent}
             canConnect={canConnect}
             docs={{ label: 'Auth docs', slug: 'auth' }}
-            headingLevel={2}
           />
         </div>
       ) : (
