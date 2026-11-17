@@ -2177,6 +2177,12 @@ tests/integration/architecture-look-now.spec.ts
 # use: a sign-up on either server and a request made with their token stamp it;
 # a verifier account never. Real database, both servers' sign-up.
 tests/integration/end-user-last-active.spec.ts
+# A person whose address is on a .internal domain is an ordinary end user:
+# counted as active, listed under Auth, announced to auth.user.created and
+# on_signup, and signed out for good. Backenly's own check-account addresses are
+# signed up only by its signed probe. Real Next sign-up, logout and Auth list
+# routes and database.
+tests/integration/end-users-on-internal-domains.spec.ts
 
 # GET /auth/me answers the signed-in end user on both servers, from one flow:
 # the token checked as every data request checks it (revoked, suspended,
@@ -2349,12 +2355,6 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
-# A person whose address is on a .internal domain is an ordinary end user:
-# counted as active, listed under Auth, announced to auth.user.created and
-# on_signup, and signed out for good. Backenly's own check-account addresses are
-# signed up only by its signed probe. Real Next sign-up, logout and Auth list
-# routes and database.
-tests/integration/end-users-on-internal-domains.spec.ts
 # Every API keys response names the key by its kind and never by keyType
 # ("public" for every project key); the list says the window that decides each
 # key's requests. Real key rows through the create, list, read, change and
