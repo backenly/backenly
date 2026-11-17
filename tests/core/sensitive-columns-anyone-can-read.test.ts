@@ -44,6 +44,16 @@ async function table(name: string, columns: string, policies: string[]) {
 }
 
 beforeAll(async () => {
+  // The REST API's roles, which the publishable key's requests run as. CI's
+  // database has none until a suite makes them. Cluster-wide, so created only
+  // when absent and never dropped; every grant made to them here is on a
+  // schema that is dropped.
+  await raw(`DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN; END IF;
+    END $$`)
   await prisma.user.create({ data: { id: userId, email: `exposed+${userId.slice(0, 8)}@backenly.test`, name: 'exposed', password: 'x' } })
   await prisma.project.create({ data: { id: projectId, name: 'exposed', userId, jwtSecret: 'a'.repeat(64) } })
   await raw(`CREATE SCHEMA "${schema}"`)
