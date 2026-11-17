@@ -166,6 +166,9 @@ function ApiUrlSection({ projectId, load, onRetry }: { projectId: string; load: 
   // {origin}/api/v1/{projectId} in the project's region, worked out by the server
   // (apiBaseUrl). An operator-supplied override still wins when one is filled.
   const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
+  // The REST API, {origin}/api/v2/{projectId}: tables in PostgREST's grammar.
+  // /db under the API URL is kept for existing apps (lib/api/v1/deprecation.ts).
+  const restBaseUrl = project?.restBaseUrl ?? null
   const download = (href: string, file: string, label: string) => (
     <a href={href} download={file} className={`${BUTTON_BASE} ${BUTTON_SIZES.sm} ${BUTTON_VARIANTS.ghost}`}>
       {label}
@@ -178,7 +181,7 @@ function ApiUrlSection({ projectId, load, onRetry }: { projectId: string; load: 
           <ErrorRow things="the API URL" onRetry={onRetry} />
         ) : (
           <div className="px-[20px] py-[14px]">
-            <dl>
+            <dl className="flex flex-col gap-[8px]">
               <dt className="sr-only">API base URL</dt>
               <dd>
                 {load.state === 'loading' ? (
@@ -192,7 +195,20 @@ function ApiUrlSection({ projectId, load, onRetry }: { projectId: string; load: 
                   <span className="text-[13px] text-faint">—</span>
                 )}
               </dd>
+              {load.state === 'ready' && restBaseUrl && (
+                <>
+                  <dt className="sr-only">REST API base URL</dt>
+                  <dd>
+                    <CopyField value={restBaseUrl} prefix="REST" label="Copy REST API URL" />
+                  </dd>
+                </>
+              )}
             </dl>
+            {load.state === 'ready' && restBaseUrl && (
+              <p className="mt-[8px] text-[12.5px] leading-[18px] text-faint">
+                Tables: the REST URL, in PostgREST&rsquo;s grammar. /db under the API URL is kept for existing apps.
+              </p>
+            )}
             <div className="-ml-[10px] mt-[10px] flex flex-wrap items-center gap-[4px]">
               {download(`/api/projects/${projectId}/types?file=types`, 'backenly.types.d.ts', 'TypeScript types')}
               {download(`/api/projects/${projectId}/openapi`, `openapi-${projectId}.json`, 'OpenAPI spec')}

@@ -28,9 +28,13 @@
 import { listExposedTables, isAuthManagedTable } from '@/lib/mcp/schema-introspection'
 
 export interface ExposedResource {
-  /** Table name, which is also the URL segment: /db/<name>. */
+  /** Table name, which is also the URL segment: /api/v2/{projectId}/<name>. */
   name: string
-  /** Path relative to the project's API base. */
+  /**
+   * The table's path on the REST API, /api/v2/{projectId}/<name>. /db/<name>
+   * under the v1 base is deprecated, kept for existing apps
+   * (lib/api/v1/deprecation.ts); the brain reads this path from its context.
+   */
   basePath: string
 }
 
@@ -62,7 +66,7 @@ export async function listExposedResources(projectId: string): Promise<ExposedRe
   const tables = await listExposedTables(projectId).catch(() => [] as Array<{ name: string }>)
   return tables
     .filter(t => !isAuthManagedTable(t.name))
-    .map(t => ({ name: t.name, basePath: `/db/${t.name}` }))
+    .map(t => ({ name: t.name, basePath: `/api/v2/${projectId}/${t.name}` }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 

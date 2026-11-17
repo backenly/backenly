@@ -43,6 +43,7 @@ import {
 } from '@/lib/postgrest/translate'
 import { checkExposure, operationFor, tableHasSoftDelete } from '@/lib/postgrest/exposure'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
+import { v1TableDeprecationHeaders } from '@/lib/api/v1/deprecation'
 import {
   isSchemaCacheRefusal,
   retrySchemaCacheRefusals,
@@ -214,6 +215,12 @@ export async function handleViaPostgrest(
     })
     res.setHeader(REQUEST_ID_HEADER, requestId)
     res.setHeader(LAYER_HEADER, outcome.layer)
+    // v1's table CRUD is deprecated on every path that reaches it, the legacy
+    // ones without /db included: /api/v2 serves the same table
+    // (lib/api/v1/deprecation.ts).
+    for (const [name, value] of Object.entries(v1TableDeprecationHeaders(ctx.projectId, table, recordId))) {
+      res.setHeader(name, value)
+    }
     const enriched =
       status >= 400 || outcome.silentFailure
         ? {
