@@ -15,6 +15,15 @@
  *   one sentence says direct connections aren't available there, no login is
  *   offered, and the logins that exist are listed by name with Revoke.
  *
+ *   Allowed addresses                                    (where the region's
+ *   [203.0.113.7 or 203.0.113.0/24        ] [Allow]       endpoint admits only
+ *   203.0.113.7/32        Added Nov 17                ⋯   allowed addresses)
+ *   Postgres takes connections only from these addresses: 1 of 2 on the Free plan.
+ *
+ *   Until one is allowed, the section comes first and says so ("Allow an
+ *   address first"), with "Allow my address", the address the request came
+ *   from as the load balancer saw it.
+ *
  *   Backups
  *   [Full backup (.sql)]  Schema only  Data only
  *   Standard pg_dump. Restores on any Postgres.
@@ -39,15 +48,17 @@ import {
   CopyButton,
   KitButton,
   KitConfirmDialog,
+  KitInput,
   KitNote,
   OverflowMenu,
 } from '@/components/inspector/kit'
-import { Panel, Row, RowList, RowSkeleton, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { ErrorRow, RefusedLine } from '@/components/console/states'
 import { EDGE, FOCUS, R_CONTROL, WELL } from '@/components/console/tokens'
 import { formatTime } from '@/components/console/format'
 import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import { findRegion, HOME_REGION } from '@/lib/regions'
+import { addressInRange } from '@/lib/security/allowed-address'
 
 type Mode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -69,6 +80,22 @@ interface Credential {
   schemaChangesUnavailable?: 'shared_database' | 'helpers_outdated'
 }
 
+/** The addresses this project lets connect (lib/services/direct-access-addresses.ts). */
+interface Allowlist {
+  /** The region's endpoint admits only allowed addresses. */
+  enforced: boolean
+  addresses: Array<{ cidr: string; createdAt: string }>
+  limit: number
+  planName: string
+}
+
+/** The address this request came from, and whether "Allow my address" can allow it. */
+interface CallerAddress {
+  address: string
+  allowable: boolean
+  reason?: string
+}
+
 interface Status {
   schema: string
   /** False where nothing outside Backenly can reach this project's database. */
@@ -77,6 +104,8 @@ interface Status {
   credentials: Credential[]
   /** Where connections cannot be made: the logins that exist, by name, for revoking. */
   logins?: Array<{ mode: Mode; roleName: string; createdAt: string; rotatedAt: string | null }>
+  allowlist?: Allowlist
+  you?: CallerAddress | null
   pendingDriftEvents: number
 }
 
@@ -151,6 +180,189 @@ function CopyCommand({ value, label }: { value: string; label: string }) {
     >
       <span aria-live="polite">{copied ? 'Copied' : label}</span>
     </KitButton>
+  )
+}
+
+/**
+ * Where the region's endpoint admits only allowed addresses: the addresses this
+ * project lets connect, a field to allow one, and "Allow my address". Each add
+ * and remove is a change in History (lib/changes/resources/addresses.ts).
+ */
+function AllowedAddresses({
+  projectId,
+  allowlist,
+  you,
+  onChanged,
+}: {
+  projectId: string
+  allowlist: Allowlist
+  you: CallerAddress | null | undefined
+  onChanged: () => Promise<void>
+}) {
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [note, setNote] = useState<{ text: string; refused: boolean } | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const url = `/api/projects/${projectId}/database-access/allowed-addresses`
+  const count = allowlist.addresses.length
+  const mineListed = !!you?.allowable && allowlist.addresses.some((a) => addressInRange(you.address, a.cidr))
+
+  async function allow(body: { address: string } | { mine: true }, key: string) {
+    setBusy(key)
+    setNote(null)
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'That did not work. Try again.')
+      const cidr: string = data.address?.cidr ?? ''
+      setValue('')
+      setNote({
+        text: !data.added
+          ? `${cidr} was already allowed.`
+          : data.applied === false
+            ? `${cidr} is allowed. The database endpoint takes it within five minutes.`
+            : `${cidr} is allowed.`,
+        refused: false,
+      })
+      await onChanged()
+    } catch (err) {
+      setNote({ text: err instanceof Error ? err.message : 'That did not work. Try again.', refused: true })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function remove(cidr: string) {
+    setBusy(`remove:${cidr}`)
+    setNote(null)
+    try {
+      const res = await fetch(`${url}?address=${encodeURIComponent(cidr)}`, { method: 'DELETE', credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'That did not work. Try again.')
+      setNote({ text: `${cidr} removed.`, refused: false })
+      await onChanged()
+    } catch (err) {
+      setNote({ text: err instanceof Error ? err.message : 'That did not work. Try again.', refused: true })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const mine =
+    you?.allowable && !mineListed ? (
+      <KitButton
+        size="sm"
+        variant={count === 0 ? 'secondary' : 'ghost'}
+        loading={busy === 'mine'}
+        disabled={busy !== null}
+        onClick={() => void allow({ mine: true }, 'mine')}
+      >
+        Allow my address ({you.address})
+      </KitButton>
+    ) : null
+
+  return (
+    <Section id="postgres-addresses" title="Allowed addresses" count={count}>
+      <Panel clip={false}>
+        {count === 0 && (
+          <div className="border-b border-white/[0.06] px-[20px] py-[14px]">
+            <p className={ROW_TITLE}>Allow an address first</p>
+            <p className={ROW_TEXT}>
+              Postgres refuses every connection until this project allows the address it comes from. Allow the address you
+              connect from.
+            </p>
+            {mine ? (
+              <div className="mt-[10px]">{mine}</div>
+            ) : you && !you.allowable && you.reason ? (
+              <p className="mt-[8px] text-[12.5px] leading-[18px] text-faint">{you.reason}</p>
+            ) : null}
+          </div>
+        )}
+        <form
+          className="flex flex-wrap gap-[8px] px-[20px] py-[14px]"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (value.trim()) void allow({ address: value.trim() }, 'add')
+          }}
+        >
+          <KitInput
+            name="postgres-address"
+            autoComplete="off"
+            spellCheck={false}
+            inputMode="decimal"
+            aria-label="Address or range to allow"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="203.0.113.7 or 203.0.113.0/24"
+            disabled={busy !== null}
+            className="min-w-0 flex-[1_1_220px]"
+          />
+          <KitButton type="submit" loading={busy === 'add'} disabled={!value.trim() || busy !== null}>
+            Allow
+          </KitButton>
+          {count > 0 && mine}
+        </form>
+        {note && (
+          <div className="border-t border-white/[0.06] px-[20px] py-[10px]">
+            {note.refused ? (
+              <RefusedLine>{note.text}</RefusedLine>
+            ) : (
+              <p role="status" className="text-[12.5px] leading-[18px] text-zinc-300">
+                {note.text}
+              </p>
+            )}
+          </div>
+        )}
+        {count > 0 && (
+          <div className="border-t border-white/[0.06]">
+            <RowList>
+              {allowlist.addresses.map((a) => (
+                <Row
+                  key={a.cidr}
+                  lead="none"
+                  title={<p className={`font-mono !text-[12.5px] ${ROW_TITLE}`}>{a.cidr}</p>}
+                  actions={
+                    <OverflowMenu
+                      label={`Actions for ${a.cidr}`}
+                      disabled={busy !== null}
+                      items={[{ label: 'Remove', danger: true, onClick: () => setRemoving(a.cidr) }]}
+                    />
+                  }
+                >
+                  <Facts className="!mt-[4px]">
+                    <Fact>Added {formatTime(a.createdAt, 'date')}</Fact>
+                    {you?.allowable && addressInRange(you.address, a.cidr) && <Fact>Your address</Fact>}
+                  </Facts>
+                </Row>
+              ))}
+            </RowList>
+          </div>
+        )}
+      </Panel>
+      <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
+        Postgres takes connections only from these addresses: {count} of {allowlist.limit} on the {allowlist.planName} plan.
+      </p>
+
+      <KitConfirmDialog
+        open={removing !== null}
+        onCancel={() => setRemoving(null)}
+        onConfirm={() => {
+          const cidr = removing
+          setRemoving(null)
+          if (cidr) void remove(cidr)
+        }}
+        danger
+        title={`Remove ${removing ?? 'this address'}?`}
+        description="New connections from it are refused."
+        undoable
+        confirmLabel="Remove address"
+      />
+    </Section>
   )
 }
 
@@ -421,8 +633,12 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
     </KitButton>
   )
 
+  const allowlist = status?.available !== false && status?.allowlist?.enforced ? status.allowlist : null
+
   return (
     <div className="space-y-[36px]">
+      {allowlist && <AllowedAddresses projectId={projectId} allowlist={allowlist} you={status?.you} onChanged={read} />}
+
       <Section id="postgres-logins" title="Logins">
         <Panel clip={false}>
           {load === 'loading' ? (

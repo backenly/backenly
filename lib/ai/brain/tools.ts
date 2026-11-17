@@ -1119,9 +1119,11 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     "The backend briefing: everything Backenly's autonomous operator detected, fixed, or queued while nobody was watching. Returns open findings with evidence, changes awaiting human approval in the Review Queue, fixes auto-applied in the last 24h, pending external schema drift, and the latest restore point. Call this FIRST when starting a session on an existing backend, or when the user asks \"what happened?\" / \"any issues?\". Side-effect free.",
     {}),
   fn('get_database_credentials',
-    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
+    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). Where the region's database endpoint admits only allowed addresses (`data.allowlistEnforced`), nothing connects until the project allows the public IPv4 address it connects from: pass allowAddress (an address, or a CIDR range no wider than /16) to allow one, removeAddress to take one off; `data.allowedAddresses` lists them. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
     {
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
+      allowAddress: { type: 'string', description: 'A public IPv4 address, or a CIDR range no wider than /16, to allow to connect.' },
+      removeAddress: { type: 'string', description: 'An allowed address to take off the list.' },
     }),
   fn('adopt_external_schema',
     "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
@@ -3702,11 +3704,57 @@ export async function dispatchTool(
           data: { available: false },
         })
       }
+
+      // ── Allowed addresses: what may connect, asked for in the same call ────
+      //
+      // Where the region's endpoint admits only allowed addresses, no string
+      // connects until the project allows one. allowAddress / removeAddress
+      // change the list as a governed change on the agent's own History entry
+      // (lib/services/direct-access-addresses.ts), validated first: a range
+      // wider than /16, a private range or an IPv6 address is refused with why.
+      const addresses = await import('@/lib/services/direct-access-addresses')
+      const did: string[] = []
+      try {
+        if (args.removeAddress !== undefined) {
+          const removed = await addresses.removeAddress(ctx.projectId, args.removeAddress)
+          did.push(`Removed ${removed.cidr} from the allowed addresses.`)
+        }
+        if (args.allowAddress !== undefined) {
+          const allowed = await addresses.allowAddress(ctx.projectId, args.allowAddress)
+          did.push(allowed.added ? `Allowed ${allowed.address.cidr} to connect.` : `${allowed.address.cidr} was already allowed.`)
+          if (allowed.sync.status === 'failed') did.push('The database endpoint has not taken it yet; Backenly tries again within five minutes.')
+        }
+      } catch (err) {
+        if (!(err instanceof addresses.AllowedAddressError)) throw err
+        const list = status.allowlist
+        return finalize({
+          ok: false,
+          code: err.code,
+          summary: err.message,
+          data: list ? { allowlistEnforced: list.enforced, allowedAddresses: list.addresses.map((a) => a.cidr), addressLimit: list.limit } : {},
+        })
+      }
+      const allowlist = did.length > 0 ? await addresses.allowlistState(ctx.projectId) : status.allowlist
+      const addressLines = [
+        ...did,
+        ...(allowlist?.enforced && allowlist.addresses.length === 0
+          ? [
+              'Allow an address first: this project allows no address yet, so the database refuses every connection, whatever the ' +
+                'login. Call this again with allowAddress set to the public IPv4 address you connect from (or a range no wider than ' +
+                '/16), or ask the person to press Allow my address in Connect → Postgres.',
+            ]
+          : []),
+      ]
+      const addressData = allowlist
+        ? { allowlistEnforced: allowlist.enforced, allowedAddresses: allowlist.addresses.map((a) => a.cidr), addressLimit: allowlist.limit }
+        : {}
+
       const existing = status.credentials.find((c) => c.mode === mode)
 
       const describe = (c: typeof status.credentials[number], provisioned: boolean) => ({
         ok: true as const,
         summary: clip([
+          ...addressLines,
           `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (TLS required, search_path pinned to ${status.schema}).`,
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
@@ -3716,7 +3764,7 @@ export async function dispatchTool(
                 ? 'Rows only: schema changes over it are refused (permission denied), and cannot be allowed on this database, which other projects share. Change the schema with apply_migration, which is governed, verified and reversible.'
                 : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
-        ].join('\n')),
+        ].join('\n'), 1600),
         data: {
           mode: c.mode,
           ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
@@ -3744,6 +3792,7 @@ export async function dispatchTool(
         readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
         readWriteArmed: status.credentials.some((c) => c.mode === 'READ_WRITE'),
         armReadWriteUrl: armUrl,
+        ...addressData,
       }
 
       if (existing) return finalize(withAccess(describe(existing, false), access))
@@ -3756,6 +3805,7 @@ export async function dispatchTool(
         needsUser: true,
         code: 'WRITE_ACCESS_NOT_ARMED',
         summary:
+          (did.length > 0 ? `${did.join(' ')}\n` : '') +
           'Read-write database access is not armed for this project, so there is no read-write connection ' +
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +

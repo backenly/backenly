@@ -43,6 +43,7 @@ is recorded by `lib/changes/resources`, one adapter each:
 | keys | API and agent keys | permissions, limits, expiry; a key the change created is revoked | a revoked or rotated key |
 | integrations | stored keys, which integrations are switched on | switches; a key the change stored is removed | a stored key; a switch turned off with its key stays off with it |
 | frontends | the allowed origins (connected frontends), the CORS allowlist | an origin the change added is taken off the list, one it took off is put back | — |
+| addresses | the addresses the project's direct Postgres logins may connect from, its part of the region's network allowlist | an address the change added is taken off the list, one it took off is put back; the region's allowlist follows | — |
 
 A credential never comes back, whoever asks (Cloudflare's rule for its own
 tokens): what is kept of one is a digest of its hash or ciphertext, or the IV

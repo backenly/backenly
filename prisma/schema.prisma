@@ -230,6 +230,7 @@ model Project {
   customDomains           CustomDomain[]
   conversationMessages    ConversationMessage[]
   connectedApps           ConnectedApp[]
+  directAccessAddresses   DirectAccessAddress[]
   envVars                 ProjectEnvVar[]
 
   integrationKeys        ProjectIntegrationKey[]
@@ -4005,6 +4006,24 @@ model DatabaseCredential {
   @@unique([projectId, mode])
   @@index([projectId])
   @@map("database_credentials")
+}
+
+// The addresses a project's direct Postgres logins may connect from
+// (lib/services/direct-access-addresses.ts). Where a region's database has a
+// public endpoint, its network allowlist admits the union of every project's
+// addresses there and nothing else (lib/services/direct-access-allowlist.ts).
+// Adding or removing one is a governed change with a History entry
+// (lib/changes/resources/addresses.ts). Gone with the project.
+model DirectAccessAddress {
+  id        String   @id @default(cuid())
+  projectId String
+  cidr      String // normalised IPv4 CIDR, at most /16 wide: "203.0.113.7/32"
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, cidr])
+  @@map("direct_access_addresses")
 }
 
 // One row per out-of-band DDL statement executed by a bkn_% role, inserted
