@@ -796,6 +796,19 @@ export async function register() {
         }
       })
 
+      // ── Direct Postgres logins and pauses — hourly, from home ──────────────
+      // A paused or deleted project's direct logins are stopped, and a resumed
+      // or restored one's brought back, as each happens
+      // (lib/projects/paused-logins.ts). This repairs any that a failure left
+      // out of line, under each project's lifecycle lock. The logins are
+      // platform records, read here once for every region.
+      cron.platform('25 * * * *', async () => {
+        const { reconcileDirectLoginsWithPause } = await import('./lib/projects/paused-logins')
+        await reconcileDirectLoginsWithPause().catch((err: any) =>
+          console.error('[DirectAccess] paused-logins pass error:', err?.message)
+        )
+      })
+
       // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────
       // Closes the previous UTC month. The first run of a month does the work;
       // every later run is a no-op (insert-only close), which also covers a day

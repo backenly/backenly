@@ -67,6 +67,7 @@ describe('instrumentation.ts', () => {
     'closePreviousPeriod',
     'pruneAppliedBatches',
     'purgeDeletedProjects',
+    'reconcileDirectLoginsWithPause',
   ]
 
   // A region's own projects, seen through the fleet scheduler or skipUnreachable,

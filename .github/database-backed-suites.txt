@@ -45,6 +45,12 @@ tests/integration/mcp-direct-access-url.spec.ts
 # that exist stay listed by name to be revoked (production QA re-test,
 # 2026-11-16, N4).
 tests/integration/direct-postgres-only-where-reachable.spec.ts
+
+# Pausing a project, or asking for it to be deleted, stops its direct Postgres
+# logins (NOLOGIN, sessions ended); resuming or restoring it brings them back
+# with the same passwords; none is created while paused; an hourly pass repairs
+# what a failed hook left.
+tests/integration/paused-projects-stop-direct-logins.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts

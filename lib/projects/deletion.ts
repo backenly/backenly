@@ -12,7 +12,8 @@
  *   stopped   the project is paused with reason 'deleted', through the pause
  *             columns every runtime door already refuses on, in its own region
  *             too (they are in the authorization projection). Its webhooks
- *             stop. Nothing is dropped.
+ *             stop, and its direct Postgres logins cannot log in
+ *             (lib/projects/paused-logins.ts). Nothing is dropped.
  *   restored  until then, an admin restores it from the Projects page
  *             (restoreDeletedProject): both dates cleared, the deletion pause
  *             lifted, back in the list and serving, if the plan has room for it.
@@ -34,6 +35,7 @@ import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { cancelPendingDeliveries, withProjectLifecycleLock, type LifecycleActor } from './pause-lifecycle'
 import { DELETED_PAUSE_REASON, invalidateProjectServingState } from './serving-state'
 import { deleteProjectCompletely } from './delete'
+import { restoreDirectLogins, stopDirectLogins } from './paused-logins'
 
 /** How long a deleted project is kept before it is removed for good. */
 export const DELETION_GRACE_DAYS = 7
@@ -72,6 +74,9 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
     return { requested: true, purgeAfter }
   })
   if (!marked.requested) return { ...marked, propagation: null }
+  // Its direct Postgres logins stop, as a pause stops them; restoring it brings
+  // them back with the same passwords (lib/projects/paused-logins.ts). Never throws.
+  await stopDirectLogins(projectId, 'deletion requested')
 
   // This process's gates refuse it now; the runtime within its cache's bound,
   // and a project kept in another region once its region has the change.
@@ -131,6 +136,9 @@ export async function restoreDeletedProject(
   })
   if (outcome === 'due') return { restored: false, due: true }
   if (outcome !== 'restored') return { restored: false }
+  // The logins the deletion stopped, back with their passwords, unless the
+  // project is still paused for another reason. Never throws.
+  await restoreDirectLogins(projectId, 'restored')
 
   // As after a resume: this process's gates serve it now, the runtime within its
   // cache's bound, its region once the region has the change. Registration was
