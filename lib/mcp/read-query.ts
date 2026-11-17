@@ -91,6 +91,17 @@ export const READ_CONNECTION_FAILED =
   'Try again in a minute. If it keeps failing, contact support.'
 
 /**
+ * The read-only login already holds as many connections as the project's plan
+ * lets each login hold (scripts/setup-direct-access.sql, 3b): psql, a BI tool
+ * or an app is connected with it. run_query connects as that same login, so
+ * PostgreSQL refuses it too ("too many connections for role"). Said as that,
+ * not as the database being down.
+ */
+export const READ_CONNECTION_LIMIT_REACHED =
+  "This project's read-only Postgres login already has as many connections open as its plan allows (psql, a BI tool " +
+  'or an app connected with it). run_query connects as that login, so the query runs once one of them closes.'
+
+/**
  * Failures of the connection rather than of the statement: SQLSTATE class 08
  * (connection exception), 28 (authorization, where pg_hba refusals land),
  * 53300 (too many connections), 57P01–57P05 (the server shutting down,
@@ -673,6 +684,10 @@ async function execute(
 
 function connectionFailed(projectId: string, err: unknown): ReadQueryError {
   const e = err as { code?: unknown; message?: unknown }
+  // 53300 is also the server's own max_connections; only the login's limit says "for role".
+  if (e?.code === '53300' && /too many connections for role/i.test(String(e?.message ?? ''))) {
+    return new ReadQueryError(READ_CONNECTION_LIMIT_REACHED, 'CONNECTION_LIMIT_REACHED', undefined, 429)
+  }
   console.error(
     `[read-query] read-only connection failed for project ${projectId}: ${String(e?.code ?? '')} ${String(e?.message ?? err)}`,
   )

@@ -328,8 +328,13 @@ export function formatProof(proof: ProofBlock): string {
     const tableNames = Object.keys(byTable)
     const allRest = Object.values(byTable).every(m => m.length === 1 && m[0] === 'REST')
     if (allRest) {
-      lines.push(`**APIs** · ${proof.apis.length} REST endpoints (automatic — every table is served from the catalog)`)
-      lines.push(tableNames.map(t => `/db/${t}`).join(', '))
+      // /api/v2 is the REST API; /db is deprecated, kept for existing apps
+      // (lib/api/v1/deprecation.ts).
+      lines.push(
+        `**APIs** · ${proof.apis.length} REST endpoints at /api/v2/{projectId}/<table>, in PostgREST's grammar ` +
+        `(automatic — every table is served from the catalog)`,
+      )
+      lines.push(tableNames.join(', '))
     } else {
       lines.push(`**APIs** · ${proof.apis.length}`)
       lines.push(Object.entries(byTable).map(([t, methods]) => `${t}: ${methods.join(', ')}`).join(' · '))
@@ -341,9 +346,9 @@ export function formatProof(proof: ProofBlock): string {
     // fine, auth owns that table" and "generate_api never ran".
     lines.push('**APIs** · none yet')
     lines.push(
-      'REST endpoints are automatic — `/db/<table>` needs no separate ' +
+      'REST endpoints are automatic — `/api/v2/{projectId}/<table>` needs no separate ' +
       'generate_api step. The only table here is `users`, which is managed through `/auth/*` ' +
-      '(signup/signin) and deliberately never exposed as `/db/users` because it holds password hashes.',
+      '(signup/signin) and deliberately never served as a REST table because it holds password hashes.',
     )
     lines.push('')
   }

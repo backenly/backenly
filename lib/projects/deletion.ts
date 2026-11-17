@@ -12,12 +12,17 @@
  *   stopped   the project is paused with reason 'deleted', through the pause
  *             columns every runtime door already refuses on, in its own region
  *             too (they are in the authorization projection). Its webhooks
- *             stop. Nothing is dropped.
+ *             stop, and its allowed addresses leave its region's network
+ *             allowlist. Nothing is dropped.
  *   restored  until then, an admin restores it from the Projects page
  *             (restoreDeletedProject): both dates cleared, the deletion pause
  *             lifted, back in the list and serving, if the plan has room for it.
  *   purged    the daily purge (instrumentation.ts) runs the full deletion,
  *             deleteProjectCompletely, for every project past `purgeAfter`.
+ *
+ * Its direct Postgres logins stop when the deletion is asked for and come back
+ * with their passwords when the project is restored, as for a pause
+ * (lib/projects/paused-logins.ts).
  *
  * Neon keeps a deleted project restorable for 7 days the same way. A project an
  * import made and never finished is purged at once, as before: nothing in it was
@@ -28,11 +33,13 @@
  * calls); it shares the columns and the lock so the two can never interleave.
  */
 import { prisma } from '@/lib/db/prisma'
+import { restoreDirectLogins, stopDirectLogins } from './paused-logins'
 import { discardOutbox } from '@/lib/webhooks/capture'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { cancelPendingDeliveries, withProjectLifecycleLock, type LifecycleActor } from './pause-lifecycle'
 import { DELETED_PAUSE_REASON, invalidateProjectServingState } from './serving-state'
+import { syncAllowlistForProject } from '@/lib/services/direct-access-allowlist'
 import { deleteProjectCompletely } from './delete'
 
 /** How long a deleted project is kept before it is removed for good. */
@@ -72,12 +79,19 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
     return { requested: true, purgeAfter }
   })
   if (!marked.requested) return { ...marked, propagation: null }
+  // Its direct Postgres logins stop, as a pause stops them; restoring it brings
+  // them back with the same passwords (lib/projects/paused-logins.ts). Never throws.
+  await stopDirectLogins(projectId, 'deletion requested')
 
   // This process's gates refuse it now; the runtime within its cache's bound,
   // and a project kept in another region once its region has the change.
   invalidateProjectServingState(projectId)
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
   await discardOutbox(projectId)
+  // Its allowed addresses stop counting toward its region's network allowlist
+  // (lib/services/direct-access-allowlist.ts), unless another project allows
+  // the same one; restoring it brings them back. Never throws.
+  await syncAllowlistForProject(projectId)
 
   await prisma.auditLog.create({
     data: {
@@ -101,11 +115,22 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
  *
  * The caller checks the plan's project limit first (the restore route asks
  * projectCreationVerdict, which no longer counts this project while deleted).
+ *
+ * Once `purgeAfter` has passed the project is the daily purge's, and is not
+ * restored (`due`): the purge lists every project past its date and then removes
+ * them one by one, so a restore in between would be reported done and then
+ * undone by the purge, part of it already dropped. Decided under the same lock
+ * the purge re-checks under (purgeDeletedProjects).
  */
-export async function restoreDeletedProject(projectId: string, actor: LifecycleActor, now: Date = new Date()): Promise<{ restored: boolean }> {
-  const restored = await withProjectLifecycleLock(projectId, async (tx) => {
-    const row = await tx.project.findUnique({ where: { id: projectId }, select: { deletedAt: true, pauseReason: true } })
-    if (!row?.deletedAt) return false
+export async function restoreDeletedProject(
+  projectId: string,
+  actor: LifecycleActor,
+  now: Date = new Date(),
+): Promise<{ restored: boolean; due?: boolean }> {
+  const outcome = await withProjectLifecycleLock(projectId, async (tx) => {
+    const row = await tx.project.findUnique({ where: { id: projectId }, select: { deletedAt: true, purgeAfter: true, pauseReason: true } })
+    if (!row?.deletedAt) return 'not-deleted' as const
+    if (row.purgeAfter && row.purgeAfter.getTime() <= now.getTime()) return 'due' as const
     await tx.project.update({
       where: { id: projectId },
       data: {
@@ -116,9 +141,13 @@ export async function restoreDeletedProject(projectId: string, actor: LifecycleA
           : {}),
       },
     })
-    return true
+    return 'restored' as const
   })
-  if (!restored) return { restored: false }
+  if (outcome === 'due') return { restored: false, due: true }
+  if (outcome !== 'restored') return { restored: false }
+  // The logins the deletion stopped, back with their passwords, unless the
+  // project is still paused for another reason. Never throws.
+  await restoreDirectLogins(projectId, 'restored')
 
   // As after a resume: this process's gates serve it now, the runtime within its
   // cache's bound, its region once the region has the change. Registration was
@@ -126,6 +155,8 @@ export async function restoreDeletedProject(projectId: string, actor: LifecycleA
   invalidateProjectServingState(projectId)
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
   await ensureSchemaRegistered(projectId)
+  // Its allowed addresses count toward its region's network allowlist again.
+  await syncAllowlistForProject(projectId)
   await prisma.auditLog.create({
     data: {
       action: 'PROJECT_RESTORED',
@@ -160,6 +191,12 @@ export async function isUnfinishedImport(projectId: string): Promise<boolean> {
  * passed. Run daily, from the home region (the deletion reaches every region,
  * as deleting did from a request). One project failing never stops the rest;
  * it is tried again the next day.
+ *
+ * Each project is checked again, under its lifecycle lock, just before it is
+ * removed: still deleted and still past its date. The list is read once and
+ * removing a project takes a while, so without the re-check a project restored
+ * meanwhile would be removed anyway (restoreDeletedProject also refuses once a
+ * project is past its date).
  */
 export async function purgeDeletedProjects(now: Date = new Date(), limit = 50): Promise<{ purged: string[]; failed: string[] }> {
   const due = await prisma.project.findMany({
@@ -172,6 +209,11 @@ export async function purgeDeletedProjects(now: Date = new Date(), limit = 50): 
   const failed: string[] = []
   for (const { id } of due) {
     try {
+      const stillDue = await withProjectLifecycleLock(id, async (tx) => {
+        const row = await tx.project.findUnique({ where: { id }, select: { deletedAt: true, purgeAfter: true } })
+        return !!row?.deletedAt && !!row.purgeAfter && row.purgeAfter.getTime() <= now.getTime()
+      })
+      if (!stillDue) continue
       await deleteProjectCompletely(id)
       purged.push(id)
     } catch (err: any) {

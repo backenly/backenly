@@ -66,7 +66,7 @@ export function isAuthManagedTable(name: string): boolean {
   return String(name || '').toLowerCase() === 'users'
 }
 
-/** A table an agent-built app may CRUD over /db/<table>: exposed AND not auth-managed. */
+/** A table an agent-built app may CRUD over REST (/api/v2, and the deprecated /db): exposed AND not auth-managed. */
 export function isCrudExposable(name: string): boolean {
   return isExposedTable(name) && !isAuthManagedTable(name)
 }

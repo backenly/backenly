@@ -275,14 +275,14 @@ describe('a function whose code reads a variable functions no longer get', () =>
       'phone-verify answers HTTP requests, and its code reads process.env.JWT_SECRET, which Backenly no longer gives ' +
         'function code, so every call to it fails.' +
         "\n\nTo sign a user in once the function has proved who they are, it calls createSession(userId) from " +
-        "'@/lib/auth/session', which returns the session Backenly signs. To check a caller's session, it calls " +
-        "verifyToken(token) from '@/lib/auth/jwt'." +
+        "'@backenly/functions', which returns the session Backenly signs. To check a caller's session, it calls " +
+        'verifyToken(token) from the same module.' +
         '\n\nAsk your coding agent to change phone-verify that way and deploy it again. This clears once its code ' +
         'no longer reads JWT_SECRET.',
     )
     const admin = { ...phone, functionName: 'admin-report', variable: 'ADMIN_API_KEY' }
     expect(getManualRemediationHint('function_failing', admin)).toContain(
-      "To admit only the project's admin key, it calls isAdminRequest(request) from '@/lib/auth/jwt'",
+      "To admit only the project's admin key, it calls isAdminRequest(request) from '@backenly/functions'",
     )
   })
 })

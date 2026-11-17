@@ -5400,7 +5400,9 @@ async function executeGenerateAPI(
       // storage key and other things read it. Only the human/agent-facing
       // message is made absolute — the thing being reported is "where do I call
       // this", and a relative fragment does not answer that.
-      message: `✅ API for "${tableName}" is live at /api/v1/${projectId}/db/${tableName.toLowerCase()} (GET, POST, and /{id} for PUT/DELETE)${domainNote}`,
+      // /api/v2 is the REST API; /db is deprecated, kept for existing apps
+      // (lib/api/v1/deprecation.ts).
+      message: `✅ API for "${tableName}" is live at /api/v2/${projectId}/${tableName.toLowerCase()}, in PostgREST's grammar (GET, POST, PATCH, DELETE; ?id=eq.<id> for one row)${domainNote}`,
       // The table row IS the API's identity now — there is no separate
       // definition record to hand back.
       data: { tableName, basePath: apiBasePath, tableId: table.id },
@@ -5444,32 +5446,31 @@ function inferDomainEndpoints(
       name: `${tbl}-cancel`,
       method: 'POST',
       description: `Cancel a running ${tbl} job by ID`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const url = new URL(req.url)
     const id = url.searchParams.get('id') || (await req.json().catch(() => ({}))).id
-    if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'id is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status FROM "\${schema}"."${tbl}" WHERE id = $1 LIMIT 1\`, id
     )
-    if (!rows.length) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Job not found' }, { status: 404 })
 
     const job = rows[0]
     if (['completed', 'cancelled', 'failed'].includes(job.status)) {
-      return NextResponse.json({ error: \`Cannot cancel job with status "\${job.status}"\` }, { status: 409 })
+      return Response.json({ error: \`Cannot cancel job with status "\${job.status}"\` }, { status: 409 })
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${schema}"."${tbl}" SET status = 'cancelled', "updatedAt" = NOW() WHERE id = $1\`, id
     )
-    return NextResponse.json({ success: true, id, status: 'cancelled' })
+    return Response.json({ success: true, id, status: 'cancelled' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5478,32 +5479,31 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: `${tbl}-retry`,
       method: 'POST',
       description: `Retry a failed ${tbl} job by ID (resets status to pending)`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const url = new URL(req.url)
     const id = url.searchParams.get('id') || (await req.json().catch(() => ({}))).id
-    if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'id is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status FROM "\${schema}"."${tbl}" WHERE id = $1 LIMIT 1\`, id
     )
-    if (!rows.length) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Job not found' }, { status: 404 })
 
     const job = rows[0]
     if (job.status === 'processing') {
-      return NextResponse.json({ error: 'Job is still processing — cancel it first' }, { status: 409 })
+      return Response.json({ error: 'Job is still processing — cancel it first' }, { status: 409 })
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${schema}"."${tbl}" SET status = 'pending', attempts = COALESCE(attempts, 0) + 1, "updatedAt" = NOW() WHERE id = $1\`, id
     )
-    return NextResponse.json({ success: true, id, status: 'pending' })
+    return Response.json({ success: true, id, status: 'pending' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5512,27 +5512,26 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: `${tbl}-status`,
       method: 'GET',
       description: `Get current status and progress of a ${tbl} job`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function GET(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const id = new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: 'id query param is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'id query param is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status, progress, error_message, "createdAt", "updatedAt" FROM "\${schema}"."${tbl}" WHERE id = $1 LIMIT 1\`, id
     ).catch(() =>
-      prisma.$queryRawUnsafe<any[]>(
+      db.$queryRawUnsafe<any[]>(
         \`SELECT id, status, "createdAt", "updatedAt" FROM "\${schema}"."${tbl}" WHERE id = $1 LIMIT 1\`, id
       )
     )
-    if (!rows.length) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Job not found' }, { status: 404 })
 
-    return NextResponse.json({ success: true, job: rows[0] })
+    return Response.json({ success: true, job: rows[0] })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5550,19 +5549,17 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
       name: `${tbl}-balance`,
       method: 'GET',
       description: `Get the credit balance for the authenticated user`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function GET(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     // Try wallet model first (single row with balance + reserved columns)
-    const walletRows = await prisma.$queryRawUnsafe<any[]>(
+    const walletRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT balance, COALESCE(reserved, 0) AS reserved FROM "\${schema}"."${tbl}" WHERE user_id = $1 LIMIT 1\`,
       payload.userId
     ).catch(() => [])
@@ -5570,7 +5567,7 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
     if (walletRows.length > 0 && walletRows[0].balance !== undefined) {
       const balance = Number(walletRows[0].balance ?? 0)
       const reserved = Number(walletRows[0].reserved ?? 0)
-      return NextResponse.json({
+      return Response.json({
         success: true,
         balance,
         reserved,
@@ -5580,7 +5577,7 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
     }
 
     // Ledger model: balance = SUM(positive amounts), spent = SUM(negative amounts)
-    const ledgerRows = await prisma.$queryRawUnsafe<any[]>(
+    const ledgerRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT
          COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS lifetime_purchased,
          COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END), 0) AS lifetime_used,
@@ -5589,7 +5586,7 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
       payload.userId
     )
     const balance = Number(ledgerRows[0]?.balance ?? 0)
-    return NextResponse.json({
+    return Response.json({
       success: true,
       balance,
       reserved: 0,
@@ -5599,7 +5596,7 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
       userId: payload.userId,
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5608,21 +5605,19 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
       name: `${tbl}-deduct`,
       method: 'POST',
       description: `Atomically deduct credits using SELECT FOR UPDATE — prevents double-spend race conditions`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { amount, reason } = await req.json()
     const deduction = Number(amount)
     if (!deduction || deduction <= 0) {
-      return NextResponse.json({ error: 'amount must be a positive number' }, { status: 400 })
+      return Response.json({ error: 'amount must be a positive number' }, { status: 400 })
     }
 
     // ── Atomic deduction using a serializable transaction ──────────────────────
@@ -5636,7 +5631,7 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
     let result: { success: boolean; newBalance: number; deducted: number } | null = null
     let insufficientBalance = false
 
-    await prisma.$transaction(async (tx) => {
+    await db.$transaction(async (tx) => {
       // Strategy 1: wallet model atomic UPDATE
       const updatedRows = await tx.$executeRawUnsafe(
         \`UPDATE "\${schema}"."${tbl}"
@@ -5680,19 +5675,19 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
 
     if (insufficientBalance || !result) {
       // Read balance outside transaction to return current value
-      const balRows = await prisma.$queryRawUnsafe<any[]>(
+      const balRows = await db.$queryRawUnsafe<any[]>(
         \`SELECT COALESCE(balance, 0) AS balance FROM "\${schema}"."${tbl}" WHERE user_id = $1 LIMIT 1\`,
         payload!.userId
       ).catch(() => ([{ balance: 0 }]))
-      return NextResponse.json(
+      return Response.json(
         { error: 'Insufficient credits', balance: Number(balRows[0]?.balance ?? 0), required: deduction },
         { status: 402 }
       )
     }
 
-    return NextResponse.json({ success: true, ...result })
+    return Response.json({ success: true, ...result })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5706,22 +5701,21 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: `${tbl}-invoice`,
       method: 'GET',
       description: `Get a formatted invoice for an order`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function GET(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const id = new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: 'id query param is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'id query param is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT * FROM "\${schema}"."${tbl}" WHERE id = $1 LIMIT 1\`, id
     )
-    if (!rows.length) return NextResponse.json({ error: 'Order not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Order not found' }, { status: 404 })
 
     const order = rows[0]
-    return NextResponse.json({
+    return Response.json({
       success: true,
       invoice: {
         invoiceNumber: \`INV-\${order.id.slice(0, 8).toUpperCase()}\`,
@@ -5730,7 +5724,7 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
       },
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5739,32 +5733,31 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
       name: `${tbl}-cancel`,
       method: 'POST',
       description: `Cancel an order if it is still in a cancellable state`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const id = new URL(req.url).searchParams.get('id') || (await req.json().catch(() => ({}))).id
-    if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'id is required' }, { status: 400 })
 
-    const rows = await prisma.$queryRawUnsafe<any[]>(
+    const rows = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, status FROM "\${schema}"."${tbl}" WHERE id = $1 LIMIT 1\`, id
     )
-    if (!rows.length) return NextResponse.json({ error: 'Order not found' }, { status: 404 })
+    if (!rows.length) return Response.json({ error: 'Order not found' }, { status: 404 })
 
     const order = rows[0]
     const cancellable = ['pending', 'processing', 'confirmed']
     if (!cancellable.includes(order.status)) {
-      return NextResponse.json({ error: \`Cannot cancel order with status "\${order.status}"\` }, { status: 409 })
+      return Response.json({ error: \`Cannot cancel order with status "\${order.status}"\` }, { status: 409 })
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${schema}"."${tbl}" SET status = 'cancelled', "updatedAt" = NOW() WHERE id = $1\`, id
     )
-    return NextResponse.json({ success: true, id, status: 'cancelled' })
+    return Response.json({ success: true, id, status: 'cancelled' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5782,28 +5775,26 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: `${tbl}-cancel`,
       method: 'POST',
       description: `Cancel a subscription (sets cancel_at_period_end = true)`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { subscriptionId } = await req.json().catch(() => ({}))
     const id = subscriptionId || new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: 'subscriptionId is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'subscriptionId is required' }, { status: 400 })
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${schema}"."${tbl}" SET cancel_at_period_end = true, "updatedAt" = NOW()
          WHERE id = $1 AND user_id = $2\`, id, payload.userId
     )
-    return NextResponse.json({ success: true, message: 'Subscription will be cancelled at the end of the current billing period.' })
+    return Response.json({ success: true, message: 'Subscription will be cancelled at the end of the current billing period.' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5812,28 +5803,26 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: `${tbl}-resume`,
       method: 'POST',
       description: `Resume a subscription that was set to cancel at period end`,
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const { subscriptionId } = await req.json().catch(() => ({}))
     const id = subscriptionId || new URL(req.url).searchParams.get('id')
-    if (!id) return NextResponse.json({ error: 'subscriptionId is required' }, { status: 400 })
+    if (!id) return Response.json({ error: 'subscriptionId is required' }, { status: 400 })
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`UPDATE "\${schema}"."${tbl}" SET cancel_at_period_end = false, "updatedAt" = NOW()
          WHERE id = $1 AND user_id = $2\`, id, payload.userId
     )
-    return NextResponse.json({ success: true, message: 'Subscription cancellation reversed — will renew at end of period.' })
+    return Response.json({ success: true, message: 'Subscription cancellation reversed — will renew at end of period.' })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5845,24 +5834,22 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: 'checkout-session',
       method: 'POST',
       description: 'Create a checkout session (returns payment URL or session ID)',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
+      code: `import { db, verifyToken } from '@backenly/functions'
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const token = (req.headers.get('x-user-token') || '').replace('Bearer ', '')
     const payload = verifyToken(token)
-    if (!payload?.userId) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    if (!payload?.userId) return Response.json({ error: 'Authentication required' }, { status: 401 })
 
     const body = await req.json()
     const { amount, currency = 'usd', description, metadata } = body
-    if (!amount || Number(amount) <= 0) return NextResponse.json({ error: 'amount is required' }, { status: 400 })
+    if (!amount || Number(amount) <= 0) return Response.json({ error: 'amount is required' }, { status: 400 })
 
     // Store pending checkout record
     const sessionId = crypto.randomUUID()
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       \`INSERT INTO "\${schema}"."${tableName}" (id, user_id, amount, currency, status, description, metadata, "createdAt", "updatedAt")
          VALUES ($1, $2, $3, $4, 'pending', $5, $6::jsonb, NOW(), NOW())\`,
       sessionId, payload.userId, Number(amount), currency,
@@ -5870,21 +5857,21 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       JSON.stringify(metadata || {})
     ).catch(() =>
       // Fallback for tables without all columns
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         \`INSERT INTO "\${schema}"."${tableName}" (id, user_id, amount, status, "createdAt", "updatedAt") VALUES ($1, $2, $3, 'pending', NOW(), NOW())\`,
         sessionId, payload.userId, Number(amount)
       )
     )
 
     // TODO: integrate with Stripe/payment provider when key is stored
-    return NextResponse.json({
+    return Response.json({
       success: true,
       sessionId,
       status: 'pending',
       message: 'Checkout session created. Integrate a payment provider (Stripe) to activate live payments.',
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -5897,10 +5884,9 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
       name: 'admin-users-list',
       method: 'GET',
       description: 'Admin: list all users with pagination (requires service-role API key)',
-      code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+      code: `import { db } from '@backenly/functions'
 
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function GET(req: Request, { params }: { params: { projectId: string } }) {
   const schema = 'workspace_${projectId}'
   try {
     const url = new URL(req.url)
@@ -5914,17 +5900,17 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
     const queryArgs: any[] = [limit, offset]
     if (search) queryArgs.push(\`%\${search}%\`)
 
-    const users = await prisma.$queryRawUnsafe<any[]>(
+    const users = await db.$queryRawUnsafe<any[]>(
       \`SELECT id, email, name, "createdAt", "updatedAt" FROM "\${schema}"."users" \${whereClause} ORDER BY "createdAt" DESC LIMIT $1 OFFSET $2\`,
       ...queryArgs
     )
-    const countRows = await prisma.$queryRawUnsafe<any[]>(
+    const countRows = await db.$queryRawUnsafe<any[]>(
       \`SELECT COUNT(*) AS total FROM "\${schema}"."users" \${whereClause}\`,
       ...(search ? [\`%\${search}%\`] : [])
     )
-    return NextResponse.json({ success: true, users, total: Number(countRows[0]?.total ?? 0), limit, offset })
+    return Response.json({ success: true, users, total: Number(countRows[0]?.total ?? 0), limit, offset })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return Response.json({ error: err.message }, { status: 500 })
   }
 }`,
     })
@@ -6759,7 +6745,7 @@ async function executeListAPIs(projectId: string): Promise<ExecutionResult> {
     const apiList = apis
       .map((api) => {
         const rls = api.rlsEnabled ? 'RLS on' : '⚠ no RLS'
-        return `✅ **/db/${api.name}** — LIST, GET, CREATE, UPDATE, DELETE · ${api.recordCount} rows · ${rls}`
+        return `✅ **/api/v2/${projectId}/${api.name}** — LIST, GET, CREATE, UPDATE, DELETE · ${api.recordCount} rows · ${rls}`
       })
       .join('\n')
 
@@ -6767,8 +6753,8 @@ async function executeListAPIs(projectId: string): Promise<ExecutionResult> {
       success: true,
       message:
         `🚀 **Your APIs (${apis.length}):**\n\n${apiList}\n\n` +
-        `Typed contract: \`/api/v1/${projectId}/db/{table}\`\n` +
-        `PostgREST grammar: \`/api/v2/${projectId}/{table}\` (filters, ordering, \`?select=*,related(*)\`)`,
+        `REST API: \`/api/v2/${projectId}/{table}\`, in PostgREST's grammar (filters, ordering, \`?select=*,related(*)\`).\n` +
+        `\`/api/v1/${projectId}/db/{table}\` is deprecated, kept for existing apps.`,
       data: { apis },
     }
   } catch (error: any) {
@@ -6827,8 +6813,8 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
     if (apiDefs.length > 0) {
       lines.push(`### REST APIs (${apiDefs.length} resource${apiDefs.length !== 1 ? 's' : ''})`)
       for (const def of apiDefs) {
-        // Every exposed table serves the CRUD set the /db/* route registers.
-        lines.push(`- **${def.name}** - GET · POST · PUT · PATCH · DELETE - base: \`/api/v1/${projectId}/db/${def.name}\``)
+        // Every exposed table is served on /api/v2, the REST API.
+        lines.push(`- **${def.name}** - GET · POST · PATCH · DELETE - base: \`/api/v2/${projectId}/${def.name}\``)
       }
       lines.push('')
     }
@@ -10509,6 +10495,22 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     ct === 'foreign_key' ||
     !!referencedTable ||
     (!constraintDefinition && !ct && /(_id|Id)$/.test(columnName))
+  // Every name reaches a statement, the key's through fk-repair as the platform's
+  // own role: checked before any branch, the referenced table's included
+  // (fk-repair checks them again where it builds the statement).
+  {
+    const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+    for (const ident of [tableName, columnName, referencedTable].filter(Boolean)) {
+      if (!SAFE_IDENT.test(String(ident))) {
+        return {
+          success: false,
+          message: `"${String(ident).slice(0, 80)}" is not a valid PostgreSQL identifier.`,
+          error: 'Invalid identifier',
+          code: 'VALIDATION',
+        }
+      }
+    }
+  }
   if (looksLikeFk && tableName && columnName) {
     // `expression` carries "target(column)" from the migration parser; prefer an
     // explicit referencedTable, then the expression, then inference.
@@ -12685,7 +12687,7 @@ function extractFunctionContract(code: string): {
   }
 
   // Locals that are obviously not request input.
-  const NOISE = new Set(['request', 'params', 'projectId', 'prisma', 'NextResponse', 'error', 'err'])
+  const NOISE = new Set(['request', 'params', 'projectId', 'db', 'prisma', 'Response', 'NextResponse', 'error', 'err'])
   const out = [...fields].filter((f) => !NOISE.has(f))
   return { method, fields: out, required: [...required].filter((f) => !NOISE.has(f)) }
 }
@@ -14899,7 +14901,7 @@ async function executeRegisterSchema(projectId: string): Promise<ExecutionResult
 
     return {
       success: true,
-      message: `✅ **Registered \`${result.schema}\` with the data plane.** Every \`/db/*\` endpoint for this project is served again.`,
+      message: `✅ **Registered \`${result.schema}\` with the data plane.** This project's REST API (\`/api/v2\`, and the deprecated \`/db\`) is served again.`,
       data: result,
     }
   } catch (error: any) {
@@ -15028,7 +15030,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
       message: `✅ Full-text search added to **${tableName}**.\n\n`
         + `- **Indexed columns**: ${validSearchCols.join(', ')}\n`
         + `- **GIN index**: \`${idxName}\`\n`
-        + `- **Search endpoint**: \`GET /api/v1/${projectId}/db/${tableName}/search?q=keyword\`\n\n`
+        + `- **Search**: \`GET /api/v2/${projectId}/${tableName}?search_vector=wfts(english).<words>\` (PostgREST's full-text filter on the indexed column)\n\n`
         + `Searches use PostgreSQL full-text search with English stemming.`,
       data: { tableName, searchColumns: validSearchCols, indexName: idxName },
     }

@@ -1,8 +1,8 @@
 /**
  * ROUTE-MODULE RUNNER
  * ===================
- * Executes platform-generated Next.js *route-handler modules* that are stored
- * as AiFunction records.
+ * Executes *route-handler modules* (http functions) that are stored as
+ * AiFunction records.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -11,11 +11,15 @@
  *
  *   1. Sandbox bodies  — bare `ctx.db / ctx.http / ctx.log` code authored by
  *                         the NL function generator (executor.ts runs them).
- *   2. Route modules   — full Next.js handlers authored by
- *                         lib/ai/build-runtime/domain-business-logic.ts:
- *                           import { NextRequest, NextResponse } from 'next/server'
- *                           import { prisma } from '@/lib/db'
- *                           export async function GET(req: NextRequest) { ... }
+ *   2. Route modules   — HTTP handlers that import Backenly's helpers from
+ *                         `@backenly/functions` and answer with the Web
+ *                         Response (lib/ai/build-runtime/domain-business-logic.ts
+ *                         writes them, and agents deploy their own):
+ *                           import { db, verifyToken } from '@backenly/functions'
+ *                           export async function GET(request: Request) { ... return Response.json(rows) }
+ *                         Functions written before that module existed import
+ *                         the same helpers from next/server, @/lib/db,
+ *                         @/lib/auth/jwt and @/lib/auth/session, which still load.
  *
  * WHERE THE CODE RUNS
  * -------------------
@@ -45,7 +49,8 @@
  *  - 10s for the handler; the supervisor kills the process at the deadline,
  *    so a synchronous or microtask loop in a handler costs that one process,
  *    not this one's event loop.
- *  - Handler return value (a NextResponse) is normalised to { status, body }.
+ *  - Handler return value (a Response, or NextResponse.json's shape) is
+ *    normalised to { status, body }.
  *    A non-2xx status is still a SUCCESSFUL execution (the handler ran and
  *    answered) — only thrown errors / timeouts are failures.
  */
@@ -99,15 +104,16 @@ function compileModule(code: string): string {
 // ─── Format detection ─────────────────────────────────────────────────────────
 
 const ROUTE_EXPORT_RE = /export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\s*\(/
-const NEXT_SERVER_IMPORT_RE = /from\s+['"]next\/server['"]/
+/** A module that imports @backenly/functions, or next/server as functions did before it, is a route module. */
+const ROUTE_IMPORT_RE = /from\s+['"](?:@backenly\/functions|next\/server)['"]/
 
 /**
- * True when `code` is a Next.js route-handler module (the shape emitted by
+ * True when `code` is a route-handler module (the shape emitted by
  * domain-business-logic.ts) rather than a bare sandbox function body.
  */
 export function isRouteModuleFunction(code: string | null | undefined): boolean {
   if (!code) return false
-  return ROUTE_EXPORT_RE.test(code) || NEXT_SERVER_IMPORT_RE.test(code)
+  return ROUTE_EXPORT_RE.test(code) || ROUTE_IMPORT_RE.test(code)
 }
 
 // ─── Denylist (defence in depth: the process boundary is the security boundary) ─
@@ -161,8 +167,8 @@ function assertNotBlocked(code: string): void {
 //     the secret.
 //
 // Admin endpoints check `isAdminRequest(request)` and token checks call
-// `verifyToken(token)`, both from '@/lib/auth/jwt'; trusted SQL runs in
-// `asService(fn)` from '@/lib/db'. Backenly's own variables are set after the
+// `verifyToken(token)`; trusted SQL runs in `asService(fn)`, all from
+// '@backenly/functions'. Backenly's own variables are set after the
 // project's, so a project variable cannot take one of these names.
 export const WITHHELD_ENV_NAMES = ['JWT_SECRET', 'ADMIN_API_KEY', 'AI_EXECUTION_TOKEN'] as const
 
@@ -326,8 +332,8 @@ function presentedAdminKey(headers: Record<string, string>, auth: ProjectFnAuth)
 // test token the placeholder replaces passes it too.
 export const SIGN_REFUSED =
   "Functions cannot sign the project's end-user sessions: Backenly no longer gives function code the project's signing secret. " +
-  "Sign a user in with createSession(userId) from '@/lib/auth/session', which returns the session Backenly signs, " +
-  "and check a caller's token with verifyToken(token) from '@/lib/auth/jwt'."
+  'Sign a user in with createSession(userId), which returns the session Backenly signs, ' +
+  "and check a caller's token with verifyToken(token), both from '@backenly/functions'."
 
 // ─── The database a function receives ───────────────────────────────────────
 
@@ -338,7 +344,7 @@ export type AsService = <T>(fn: (db: RlsAwarePrisma) => Promise<T>) => Promise<T
 export const AS_SERVICE_NOTE =
   'Backenly: a block ran with asService, as the service role; row-level security did not apply to its SQL.'
 
-// Trusted work: `asService(async (db) => { … })` from '@/lib/db'.
+// Trusted work: `asService(async (tx) => { … })` from '@backenly/functions'.
 //
 // A function's SQL runs as its caller, so row-level security keeps a shopper to
 // their own rows. Some work a function does on the caller's behalf must reach
@@ -356,6 +362,20 @@ export function usesAsService(code: string): boolean {
 }
 
 /**
+ * The paths inside Backenly's source tree the code imports helpers from
+ * (next/server, @/lib/db, @/lib/auth/jwt, @/lib/auth/session), in the order it
+ * names them. They still load, so the code runs; the deploy answer says that
+ * '@backenly/functions' is the module to use.
+ */
+export function importsFromBackenlySource(code: string): string[] {
+  const found = new Set<string>()
+  for (const m of withoutComments(code).matchAll(/\bfrom\s+['"](next\/server|@\/lib\/db|@\/lib\/auth\/jwt|@\/lib\/auth\/session)['"]/g)) {
+    found.add(m[1])
+  }
+  return [...found]
+}
+
+/**
  * Code that reads one of the variables Backenly no longer gives functions.
  * Dotted, bracketed with a literal name, or destructured from process.env.
  */
@@ -367,9 +387,9 @@ const WITHHELD_READ = [
 
 export const WITHHELD_READ_REFUSED =
   "function code cannot read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give functions the project's signing secret or admin key. " +
-  "Check an admin request with isAdminRequest(request) and a caller's token with verifyToken(token), both from '@/lib/auth/jwt', " +
-  "sign a user in with createSession(userId) from '@/lib/auth/session', " +
-  "and run SQL the caller may not run themselves inside asService(async (db) => { ... }) from '@/lib/db'"
+  "Import the helpers from '@backenly/functions': check an admin request with isAdminRequest(request) and a caller's token with verifyToken(token), " +
+  'sign a user in with createSession(userId), ' +
+  'and run SQL the caller may not run themselves inside asService(async (tx) => { ... })'
 
 /** The withheld variable the code reads, if any. */
 export function readsWithheldEnv(code: string): string | null {
@@ -486,8 +506,10 @@ export class RouteModuleHandlerError extends RouteModuleRunError {
 export interface RouteModuleRunResult {
   logs: string[]
   returnValue: { status: number; body: any }
-  /** The headers the handler set on its response (NextResponse.json's init.headers, content type included). */
+  /** The headers the handler set on its response (Response's or NextResponse.json's, content type included). */
   headers: Record<string, string>
+  /** The body is a Response's text, not JSON (`new Response('pong')`): /fn sends it as written. */
+  text?: true
 }
 
 export interface RouteModuleRunOptions {
@@ -707,5 +729,6 @@ export async function executeRouteModuleFunction(
       if (typeof v === 'string') answerHeaders[k] = v
     }
   }
-  return { logs: result.logs, returnValue: { status, body: answer.body as any }, headers: answerHeaders }
+  const text = answer.text === true && typeof answer.body === 'string'
+  return { logs: result.logs, returnValue: { status, body: answer.body as any }, headers: answerHeaders, ...(text ? { text } : {}) }
 }

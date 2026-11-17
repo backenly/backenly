@@ -5,6 +5,7 @@
  */
 
 import { canonicalJson } from '../integrity'
+import { addressesAdapter } from './addresses'
 import { authAdapter } from './auth'
 import { changedSecrets, RESOURCE_ORDER, sameFields, sameItem, type ResourceAdapter, type ResourceId, type ResourceOp, type ResourceSnapshot, type Tx } from './core'
 import { envAdapter } from './env'
@@ -21,7 +22,7 @@ export * from './core'
 
 /** Read at call time, so the adapters' modules have finished loading. */
 function adapters(): ResourceAdapter[] {
-  return [authAdapter, storageAdapter, functionsAdapter, webhooksAdapter, envAdapter, keysAdapter, integrationsAdapter, frontendsAdapter]
+  return [authAdapter, storageAdapter, functionsAdapter, webhooksAdapter, envAdapter, keysAdapter, integrationsAdapter, frontendsAdapter, addressesAdapter]
 }
 
 export function adapterFor(id: ResourceId): ResourceAdapter {
@@ -97,7 +98,7 @@ export function opsOf(checkpoint: ResourceSnapshot | undefined, result: Resource
 // ── Saying what a change did ─────────────────────────────────────────────────
 
 /** An item that is added to a list rather than created: "Added allowed origin …". */
-const ADDED: ReadonlySet<ResourceId> = new Set<ResourceId>(['frontends'])
+const ADDED: ReadonlySet<ResourceId> = new Set<ResourceId>(['frontends', 'addresses'])
 
 export function describeOp(op: ResourceOp): string {
   const label = (op.after ?? op.before)!.label
@@ -247,6 +248,13 @@ export async function afterCommitResources(projectId: string, ops: ResourceOp[])
   if (ops.some((o) => o.resource === 'webhooks' || o.resource === 'functions')) {
     const { syncWebhookCapture } = await import('@/lib/webhooks/capture')
     await syncWebhookCapture(projectId).catch((err) => console.warn(`[ChangeResources] capture sync after restore failed for ${projectId}:`, err?.message ?? err))
+  }
+  // The region's network allowlist is the union of every project's allowed
+  // addresses (lib/services/direct-access-allowlist.ts): a restore that put one
+  // back or took one off changes it, once for all of them. It never throws.
+  if (ops.some((o) => o.resource === 'addresses')) {
+    const { syncAllowlistForProject } = await import('@/lib/services/direct-access-allowlist')
+    await syncAllowlistForProject(projectId)
   }
 }
 

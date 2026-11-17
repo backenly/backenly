@@ -579,7 +579,8 @@ async function checkApiExposure(projectId: string): Promise<ReadinessCheck> {
     ...base,
     status: 'pass',
     message: `${tables.length} table${tables.length > 1 ? 's are' : ' is'} exposed over REST with full CRUD`,
-    details: tables.map((t) => `✓ /db/${t.name} — list, get, create, update, delete`),
+    // Named on /api/v2, the REST API; /db is deprecated (lib/api/v1/deprecation.ts).
+    details: tables.map((t) => `✓ /api/v2/{projectId}/${t.name} — list, get, create, update, delete`),
     fixApplied: false,
   }
 }

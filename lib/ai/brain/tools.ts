@@ -984,7 +984,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     []),
   fn('deploy_function_code',
     'Deploy function source you wrote, exactly as written: no model reads or rewrites it. trigger "http" takes a route module ' +
-    '(`import { NextResponse } from \'next/server\'`, `export async function POST(req) { … }`) served at /api/v1/{projectId}/fn/{name}. ' +
+    '(`import { db, verifyToken } from \'@backenly/functions\'`, `export async function POST(request) { … return Response.json(body) }`) served at /api/v1/{projectId}/fn/{name}. ' +
     'Every other trigger takes a sandbox body: statements using ctx.db, ctx.http, ctx.log, ctx.integrations.<provider>, ctx.env.KEY and ctx.auth.createSession(userId), ' +
     'receiving `event`, optionally returning a value. The code is checked by the runtime that will run it and refused with the reason if it cannot run; ' +
     'keys written into it are refused. Deploying a name that exists replaces its code (no version history is kept). ' +
@@ -1019,7 +1019,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {
       method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
       minStatus: { type: 'integer', minimum: 100, maximum: 599, description: 'e.g. 400 for failures, 500 for server errors.' },
-      pathPrefix: { type: 'string', description: 'e.g. "/db/orders" or "/fn/".' },
+      pathPrefix: { type: 'string', description: 'e.g. "/orders" (a table over /api/v2), "/db/orders" (the deprecated /db) or "/fn/".' },
       sinceMinutes: { type: 'integer', minimum: 1, maximum: 43200 },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
       branchId: { type: 'string', description: 'A preview branch id from branch(action:"list"): read the requests made with that branch\'s keys.' },
@@ -1131,9 +1131,11 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     "The backend briefing: everything Backenly's autonomous operator detected, fixed, or queued while nobody was watching. Returns open findings with evidence, changes awaiting human approval in the Review Queue, fixes auto-applied in the last 24h, pending external schema drift, and the latest restore point. Call this FIRST when starting a session on an existing backend, or when the user asks \"what happened?\" / \"any issues?\". Side-effect free.",
     {}),
   fn('get_database_credentials',
-    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
+    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). Where the region's database endpoint admits only allowed addresses (`data.allowlistEnforced`), that endpoint is shared by the projects in the region and admits an address any of them allows; the login's password is what reaches this project. Allow the public IPv4 address you connect from with allowAddress (one address, or a CIDR range no wider than /16), take one off with removeAddress; `data.allowedAddresses` lists this project's, and `data.notAdmittedAddresses` those past its plan's number. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
     {
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
+      allowAddress: { type: 'string', description: 'A public IPv4 address, or a CIDR range no wider than /16, to allow to connect.' },
+      removeAddress: { type: 'string', description: 'An allowed address to take off the list.' },
     }),
   fn('adopt_external_schema',
     "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
@@ -1198,8 +1200,8 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'real data.\n' +
     'Returns the branch\'s PREVIEW ENDPOINT, ready to test: the base URL (the same as production), a client key ' +
     'bound to the branch (shown once), the X-Backenly-Environment value every data response will carry, an OpenAPI ' +
-    'URL, and instructions to hand to a test. That key reads and writes the branch through the data API (/db and ' +
-    '/api/v2) and runs end-user auth on the branch (signup, signin, refresh-token, logout — branch users only). ' +
+    'URL, and instructions to hand to a test. That key reads and writes the branch through the REST API (/api/v2, ' +
+    'and /db for existing apps) and runs end-user auth on the branch (signup, signin, refresh-token, logout — branch users only). ' +
     'Functions, storage, realtime and the emailed auth flows REFUSE it rather than serve from production. ' +
     'connect_branch issues more keys.\n' +
     'Schema changes target the branch when apply_migration is called WITH its branchId; without one — and from ' +
@@ -2406,7 +2408,11 @@ export async function dispatchTool(
       const pid = ctx.projectId
       // The project's own API address: its region's, for a project outside the home region.
       const { projectApiOrigin } = await import('@/lib/data-plane/regional')
-      const base = `${await projectApiOrigin(pid, publicOrigin())}/api/v1/${pid}`
+      const apiOrigin = await projectApiOrigin(pid, publicOrigin())
+      const base = `${apiOrigin}/api/v1/${pid}`
+      // The REST API: tables in PostgREST's grammar. /db under the base is
+      // deprecated, kept for existing apps (lib/api/v1/deprecation.ts).
+      const rest = `${apiOrigin}/api/v2/${pid}`
       // ── Every tool named below MUST be one the manifest advertises ───────────
       //
       // This guide used to instruct agents to call `get_backend_metadata`,
@@ -2453,13 +2459,13 @@ export async function dispatchTool(
         '- Respect foreign keys: insert parent rows first (`get_table_schema` shows the FK targets).',
         '',
         '## 4. The runtime API (the app you build)',
-        `- Base URL: \`${base}\``,
+        `- Base URL: \`${base}\` (auth, functions, storage, realtime). Tables over REST: \`${rest}/<table>\`.`,
         '- Header `x-api-key: <project key>` on every call. Get one with `connect { action: "create_api_key", description: "web app" }`. A Backenly project key starts `proj_live_` (publishable, RLS-bound, the default) or `svc_live_` (service role, server-side only, which a person creates in Settings → API keys). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
         '- **Never use your own MCP key (`mcp_live_…`) here.** It drives these tools only. The runtime API refuses it from anywhere, browser or server, with `MCP_KEY_IN_APP`, so an app built on it does not work and ships a credential that can change the backend.',
         '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely; one sent from a browser is refused with `SERVICE_ROLE_IN_BROWSER`. An app with no end-user sign-in that must write does it in a Backenly function or its own server, never by shipping a service-role key.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
-        '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PATCH /db/<table>/<id>` (PUT is accepted as the same update), `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route. `DELETE /db/<table>/<id>` removes the row, as a DELETE on `/api/v2` does; the SDK\'s `delete()` sets `"deleted_at"` and keeps the row, and `/db` reads skip it.',
-        '- PostgREST grammar is also available at `/api/v2/<projectId>/<table>` — `?select=*,author(*)`, `?price=gte.100`, `?order=createdAt.desc`. Same auth, same RLS.',
+        '- **Tables: the REST API is `/api/v2/<projectId>/<table>`, in PostgREST\'s grammar**, or `@backenly/sdk` from JavaScript. `GET ?select=*,author(*)&price=gte.100&order=createdAt.desc&limit=20`, `POST` a row or an array of rows, `PATCH ?id=eq.<id>`, `DELETE ?id=eq.<id>`; `/api/v2/<projectId>/<table>/<id>` addresses one row. Same key, same `X-User-Token`, same RLS. A DELETE there removes the row; the SDK\'s `delete()` sets `"deleted_at"` and keeps it.',
+        '- `/db/<table>` under the base URL is deprecated: it is kept for existing apps, and every response says so (a `Deprecation` header and a `Link` to the same table on `/api/v2`). Do not build new code on it.',
         '- Functions: `GET/POST /fn/<name>`. Function names are normalised to lowercase kebab-case (`list_products` deploys as `list-products`); `read_backend_state { section: "functions" }` gives each one\'s exact `url`.',
         // Spelled out because the bucket-scoped shape (/storage/{bucket}/upload)
         // is what several other platforms use, and guessing it produced four
@@ -2480,7 +2486,7 @@ export async function dispatchTool(
         '- `read_backend_state { section: "readiness" }` first — the behavioural + security scorecard, with the exact blockers. Publishing runs this gate anyway and refuses on blockers, so reading it first saves a round trip.',
         '- To publish: `deploy { action: "deploy" }` → approval id → `check_approval`.',
         '- `read_backend_state { section: "deploy" }` for current state.',
-        '- Your backend is fully usable BEFORE publishing — `/db/*`, `/auth/*`, `/fn/*`, `/storage/*` and `/realtime/*` all work against an unpublished project with a valid API key. Publishing is about versioning and going public, not about switching the API on.',
+        '- Your backend is fully usable BEFORE publishing — `/api/v2`, `/auth/*`, `/fn/*`, `/storage/*` and `/realtime/*` all work against an unpublished project with a valid API key. Publishing is about versioning and going public, not about switching the API on.',
         '',
         '## 7. Debugging a function',
         '- `read_backend_state { section: "functions" }` returns each function\'s SOURCE, its `lastError`, its exact public `url` and its recent runs. You never need to regenerate a function to find out what it contains.',
@@ -2488,7 +2494,7 @@ export async function dispatchTool(
         '',
         'Golden rule: read before you write — `read_backend_state`, then `get_table_schema` for each table you are about to touch. A CHECK constraint you did not look at is the most common way a correct-looking insert fails.',
       ].join('\n')
-      return finalize({ ok: true, summary: guide, data: { projectId: pid, apiBase: base } })
+      return finalize({ ok: true, summary: guide, data: { projectId: pid, apiBase: base, restBase: rest } })
     }
 
     // ── Read: full structured backend metadata (complete agent context) ────
@@ -2584,7 +2590,9 @@ export async function dispatchTool(
       // a client against `/products` and got a 404 with no clue why.
       const apis = tables.map((t) => ({
         name: t.name,
-        basePath: `/api/v1/${ctx.projectId}/db/${t.name}`,
+        // /api/v2 is the REST API; /db is deprecated, kept for existing apps
+        // (lib/api/v1/deprecation.ts).
+        basePath: `/api/v2/${ctx.projectId}/${t.name}`,
         enabled: true,
         operations: { get: true, list: true, create: true, update: true, delete: true, bulk: true, search: true },
       }))
@@ -2606,7 +2614,10 @@ export async function dispatchTool(
       const lines = apis.map((a) => `✅ **${a.basePath}** — GET · LIST · CREATE · UPDATE · DELETE · SEARCH · BULK`).join('\n')
       return finalize({
         ok: true,
-        summary: clip(`🚀 **Your APIs (${apis.length}):**\n\n${lines}\n\nEvery table is auto-exposed at \`/api/v1/${ctx.projectId}/db/<table>\`.`),
+        summary: clip(
+          `🚀 **Your APIs (${apis.length}):**\n\n${lines}\n\nEvery table is served at \`/api/v2/${ctx.projectId}/<table>\`, ` +
+          `in PostgREST's grammar. \`/api/v1/${ctx.projectId}/db/<table>\` is deprecated, kept for existing apps.`,
+        ),
         data: { apis },
       })
     }
@@ -2751,7 +2762,7 @@ export async function dispatchTool(
           // instructions in data.preview say the same; this line used to
           // claim auth refuses the key while they said auth runs on the
           // branch, in the same response.
-          `  • Branch-scoped: /db, /api/v2, and end-user auth (signup, signin, refresh-token, logout). ` +
+          `  • Branch-scoped: /api/v2 (and the deprecated /db), and end-user auth (signup, signin, refresh-token, logout). ` +
           `Functions, storage, realtime and the emailed auth flows refuse this key (403 BRANCH_SURFACE_UNAVAILABLE).`,
         ]
         return {
@@ -3374,7 +3385,7 @@ export async function dispatchTool(
         ok: true,
         summary: rows.length
           ? `Requests served, newest first:\n${lines.join('\n')}` + (rows.length > 15 ? `\n…${rows.length - 15} more in data.requests.` : '')
-          : 'No requests match. Only traffic to this project\'s runtime API (/db, /auth, /fn, /storage, /realtime) is recorded.',
+          : 'No requests match. Only traffic to this project\'s runtime API (/api/v2, /db, /auth, /fn, /storage, /realtime) is recorded.',
         data: { requests: rows },
       })
     }
@@ -3728,12 +3739,78 @@ export async function dispatchTool(
           data: { available: false },
         })
       }
+
+      /** The allowlist as every answer carries it. */
+      const addressDataOf = (list: typeof status.allowlist) =>
+        list
+          ? {
+              allowlistEnforced: list.enforced,
+              allowedAddresses: list.addresses.map((a) => a.cidr),
+              ...(list.addresses.some((a) => !a.admitted) ? { notAdmittedAddresses: list.addresses.filter((a) => !a.admitted).map((a) => a.cidr) } : {}),
+              addressLimit: list.limit,
+            }
+          : {}
+
+      // ── Allowed addresses: what may connect, asked for in the same call ────
+      //
+      // Where the region's endpoint admits only allowed addresses, no string
+      // connects until the project allows one. allowAddress / removeAddress
+      // change the list as a governed change on the agent's own History entry
+      // (lib/services/direct-access-addresses.ts), validated first: a range
+      // wider than /16, a private range or an IPv6 address is refused with why.
+      const addresses = await import('@/lib/services/direct-access-addresses')
+      const did: string[] = []
+      try {
+        if (args.removeAddress !== undefined) {
+          const removed = await addresses.removeAddress(ctx.projectId, args.removeAddress)
+          did.push(
+            `Removed ${removed.cidr} from the allowed addresses. New connections from it are refused unless another project ` +
+              'in this region allows it too; connections already open stay open until a login\'s password is rotated.',
+          )
+        }
+        if (args.allowAddress !== undefined) {
+          const allowed = await addresses.allowAddress(ctx.projectId, args.allowAddress)
+          did.push(allowed.added ? `Allowed ${allowed.address.cidr} to connect.` : `${allowed.address.cidr} was already allowed.`)
+          if (allowed.sync.status === 'failed') did.push('The database endpoint has not taken it yet; Backenly tries again within five minutes.')
+        }
+      } catch (err) {
+        if (!(err instanceof addresses.AllowedAddressError)) throw err
+        return finalize({ ok: false, code: err.code, summary: err.message, data: addressDataOf(status.allowlist) })
+      }
+      const allowlist = did.length > 0 ? await addresses.allowlistState(ctx.projectId) : status.allowlist
+      const notAdmitted = allowlist?.enforced ? addresses.notAdmittedLine(allowlist) : null
+      const addressLines = [
+        ...did,
+        ...(allowlist?.enforced && allowlist.addresses.length === 0
+          ? [
+              'Allow an address first: this project allows no address yet. The database endpoint is shared by the projects in ' +
+                'this region and refuses an address none of them allows, so allow the public IPv4 address you connect from: call ' +
+                'this again with allowAddress (one address, or a range no wider than /16), or ask the person to press Allow my ' +
+                'address in Connect → Postgres.',
+            ]
+          : []),
+        ...(notAdmitted ? [notAdmitted] : []),
+      ]
+      const addressData = addressDataOf(allowlist)
+
       const existing = status.credentials.find((c) => c.mode === mode)
 
       const describe = (c: typeof status.credentials[number], provisioned: boolean) => ({
         ok: true as const,
         summary: clip([
-          `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (TLS required, search_path pinned to ${status.schema}).`,
+          ...addressLines,
+          `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (${c.caBundle ? 'TLS, the server verified with the CA bundle' : 'TLS required'}, search_path pinned to ${status.schema}).`,
+          ...(c.verifyCaConnectionString && c.nodePostgres && c.caBundle
+            ? [
+                'data.connectionString is for psql, pg_dump, psycopg and other libpq tools (verify-full through hostaddr); ' +
+                  'data.verifyCaConnectionString for Go (pgx), Python (asyncpg), Rust (sqlx) and other clients that read sslmode=verify-ca. ' +
+                  `Both name the CA bundle as sslrootcert=${c.caBundle.file}: download it from ${c.caBundle.url} into the folder the client runs in, or give its full path.`,
+                'node-postgres (and Drizzle or Prisma on it) checks the host name even under verify-ca, so give it data.nodePostgres ' +
+                  "instead of a string: its host is the endpoint's address, and pass ssl as { ca: <the CA file's contents>, servername: " +
+                  'data.nodePostgres.ssl.servername }, which verifies the server in full.',
+              ]
+            : []),
+          ...(typeof status.connectionLimit === 'number' ? [`Each login may hold ${status.connectionLimit} connections at once on this project's plan.`] : []),
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
             : c.schemaChanges === 'allowed'
@@ -3742,7 +3819,7 @@ export async function dispatchTool(
                 ? 'Rows only: schema changes over it are refused (permission denied), and cannot be allowed on this database, which other projects share. Change the schema with apply_migration, which is governed, verified and reversible.'
                 : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
-        ].join('\n')),
+        ].join('\n'), 2000),
         data: {
           mode: c.mode,
           ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
@@ -3753,6 +3830,10 @@ export async function dispatchTool(
           database: c.database,
           schema: status.schema,
           connectionString: c.connectionString,
+          ...(c.verifyCaConnectionString ? { verifyCaConnectionString: c.verifyCaConnectionString } : {}),
+          ...(c.nodePostgres ? { nodePostgres: c.nodePostgres } : {}),
+          ...(c.caBundle ? { caBundle: c.caBundle } : {}),
+          ...(typeof status.connectionLimit === 'number' ? { connectionLimit: status.connectionLimit } : {}),
           psqlCommand: c.psqlCommand,
           pgDumpCommand: c.pgDumpCommand,
         },
@@ -3770,6 +3851,7 @@ export async function dispatchTool(
         readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
         readWriteArmed: status.credentials.some((c) => c.mode === 'READ_WRITE'),
         armReadWriteUrl: armUrl,
+        ...addressData,
       }
 
       if (existing) return finalize(withAccess(describe(existing, false), access))
@@ -3782,6 +3864,7 @@ export async function dispatchTool(
         needsUser: true,
         code: 'WRITE_ACCESS_NOT_ARMED',
         summary:
+          (did.length > 0 ? `${did.join(' ')}\n` : '') +
           'Read-write database access is not armed for this project, so there is no read-write connection ' +
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +
