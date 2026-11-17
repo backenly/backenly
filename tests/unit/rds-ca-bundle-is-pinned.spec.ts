@@ -12,7 +12,7 @@
  * a regional project's database, which the console and MCP connect to, nor the
  * database a regional task serves from.
  *
- * Three things must not drift silently:
+ * Four things must not drift silently:
  *
  *   - the home bundle must be byte-identical to the pinned set the lineage
  *     tooling already verifies, so there is one reviewed copy of the trust
@@ -21,7 +21,12 @@
  *   - every region a project can be created in has its bundle in the images;
  *   - both Dockerfiles must actually point Node at all of them. Deleting the
  *     ENV line would reintroduce the blind loop with no build or test failure
- *     at all.
+ *     at all;
+ *   - the copy published at /certs/rds-ca-cloud-regions.pem, which direct
+ *     Postgres connection strings name as sslrootcert so a client can verify
+ *     the server (lib/services/direct-access.ts), must be byte for byte the
+ *     bundle the images build: a client verifying with a different set would
+ *     refuse a server the platform itself trusts, or the other way round.
  */
 
 import { createHash } from 'node:crypto'
@@ -51,6 +56,21 @@ describe('the RDS CA bundles baked into the images', () => {
 
   it('has a committed bundle for every Cloud region', () => {
     for (const id of REGION_IDS) expect(existsSync(join(root, `docker/certs/rds-ca-${id}.pem`))).toBe(true)
+  })
+
+  it('publishes the bundle the images build, byte for byte, at /certs/rds-ca-cloud-regions.pem', () => {
+    const src = readFileSync(join(root, 'docker/web.Dockerfile'), 'utf8')
+    const line = src.split('\n').find((l) => l.startsWith('RUN cat /app/certs/'))
+    expect(line).toBeDefined()
+    const [inputs, output] = line!.replace(/^RUN cat /, '').split(' > ')
+    expect(output.trim()).toBe(IN_IMAGE)
+    const built = inputs
+      .trim()
+      .split(/\s+/)
+      .map((file) => readFileSync(join(root, 'docker/certs', file.split('/').pop()!), 'utf8'))
+      .join('')
+    expect(readFileSync(join(root, 'public/certs/rds-ca-cloud-regions.pem'), 'utf8')).toBe(built)
+    expect(built.match(/-----BEGIN CERTIFICATE-----/g)).toHaveLength(3 * REGION_IDS.length)
   })
 
   it.each(['docker/web.Dockerfile', 'docker/runtime.Dockerfile'])(

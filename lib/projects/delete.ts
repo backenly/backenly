@@ -73,6 +73,7 @@ import {
 } from '@/lib/security/workspace-schema'
 import { CHANNEL_TABLE_EXISTS_SQL, DELETE_CHANNELS_SQL } from '@/lib/realtime/channel-sql'
 import { purgeProjectExternals } from '@/lib/projects/purge'
+import { syncAllowlist } from '@/lib/services/direct-access-allowlist'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
 import { purgeAccountState } from '@/lib/usage/account'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
@@ -640,6 +641,9 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
   // Its keys stop working in its region once the region has the deletion
   // (lib/auth-projection/confirm.ts); `pending` says it is still in flight.
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
+  // Its allowed addresses went with its row: the region's network allowlist
+  // drops each one no other project there allows. Never throws.
+  await syncAllowlist(region)
 
   return {
     projectIds: [projectId],
@@ -770,6 +774,9 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
   const externalPurgeCompleted = await attemptImmediatePurge(
     projectIds.map((projectId, i) => ({ projectId, jobId: jobIds[i], region: regions.get(projectId) ?? HOME_REGION })),
   )
+  // The projects' allowed addresses went with them: each region's network
+  // allowlist drops the ones no other project there allows.
+  for (const region of new Set(projectIds.map((projectId) => regions.get(projectId) ?? HOME_REGION))) await syncAllowlist(region)
 
   return {
     projectIds,

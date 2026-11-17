@@ -1,7 +1,9 @@
 /**
  * Direct database access — credential management.
  *
- *   GET    /api/projects/[id]/database-access          — status + connection strings
+ *   GET    /api/projects/[id]/database-access          — status + connection strings,
+ *                                                         the allowed addresses and the
+ *                                                         caller's own (`you`)
  *   POST   /api/projects/[id]/database-access          — provision { mode }
  *   PATCH  /api/projects/[id]/database-access          — { schemaChanges: "allowed" | "refused" }
  *   DELETE /api/projects/[id]/database-access?mode=…   — revoke
@@ -19,7 +21,10 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
+import { describeCallerAddress } from '@/lib/services/direct-access-addresses'
 import {
+  DirectAccessPausedError,
   DirectAccessUnavailableError,
   getDirectAccessStatus,
   provisionDirectAccess,
@@ -47,7 +52,10 @@ function parseMode(v: unknown): DirectAccessMode | null {
 export async function GET(request: NextRequest) {
   return withProjectValidation<any>(request, async (validated) => {
     const status = await getDirectAccessStatus(validated.projectId)
-    return NextResponse.json(status)
+    if (!status.available) return NextResponse.json(status)
+    // What "Allow my address" allows: the caller's own address as the load
+    // balancer saw it (lib/security/client-ip.ts).
+    return NextResponse.json({ ...status, you: describeCallerAddress(clientIpFromHeaders(request)) })
   }, { floor: 'administer' })
 }
 
@@ -63,6 +71,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ credential })
     } catch (err: any) {
       if (err instanceof DirectAccessUnavailableError) return unavailable(err)
+      // Paused or deleted: its logins are stopped, and the answer says to resume or restore it first.
+      if (err instanceof DirectAccessPausedError) return NextResponse.json({ error: err.message, code: err.code }, { status: 409 })
       console.error('[database-access] provision failed:', err?.message)
       // The definer functions only exist after scripts/setup-direct-access.sql
       // ran on the cluster — surface that honestly instead of a generic 500.

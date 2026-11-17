@@ -62,11 +62,14 @@ describe('instrumentation.ts', () => {
     'cleanupAllProjectGraphs',
     'runScheduledBackOfficeMaintenance',
     'pruneBaseline',
+    'reconcileDirectLoginsWithPause',
     'evaluateUsageAnomalies',
     'evaluateUsageAlerts',
     'closePreviousPeriod',
     'pruneAppliedBatches',
     'purgeDeletedProjects',
+    'syncDirectAccessAllowlists',
+    'reconcileDirectConnectionLimits',
   ]
 
   // A region's own projects, seen through the fleet scheduler or skipUnreachable,
