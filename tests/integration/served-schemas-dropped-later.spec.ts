@@ -15,7 +15,9 @@
  *
  * Now a served schema stops being served at once and is dropped at least two
  * minutes later, by the pass every region runs each minute
- * (lib/postgrest/retire-schema.ts); a schema nothing serves goes at once.
+ * (lib/postgrest/retire-schema.ts); a schema nothing serves goes at once. A
+ * deleted project's logins cannot go before its schema (lib/projects/logins.ts):
+ * they are retired with the deletion, unable to log in, and dropped by the pass.
  *
  * Which schemas PostgREST serves is the registry's answer (scripts/sql/
  * postgrest-schema-registry.sql), which the test database does not install:
@@ -44,6 +46,7 @@ jest.mock('@/lib/postgrest/registration', () => {
 })
 
 import crypto from 'crypto'
+import { Client } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { HOME_REGION } from '@/lib/regions'
 import { createProvisionedProject } from '@/lib/projects/provision'
@@ -53,10 +56,19 @@ import { closeChangeLockPool } from '@/lib/changes/lock'
 import { createBranch, discardBranch, mergeBranch } from '@/lib/branches/engine'
 import { applyBranchMigration } from '@/lib/branches/migrate'
 import { DROP_AFTER_MS, RETIRED_SCHEMAS_JOB_TYPE, dropRetiredSchemas } from '@/lib/postgrest/retire-schema'
+import { directAccessRoleNames } from '@/lib/services/direct-access'
+import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 
 const originalEdition = process.env.BACKENLY_EDITION
 const originalEngineMode = process.env.ENGINE_MODE
 const run = crypto.randomBytes(4).toString('hex')
+/** Another database on the cluster that names one of the deleted project's logins, as a restored copy would. */
+const elsewhere = `backenly_named_${run}`
+const urlOf = (database: string) => {
+  const u = new URL(process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || '')
+  u.pathname = `/${database}`
+  return u.toString()
+}
 
 let ownerId = ''
 let projectId = ''
@@ -64,6 +76,13 @@ let schema = ''
 
 const exists = async (name: string) =>
   (await prisma.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1`, name))[0].n === 1
+
+const loginStates = (logins: string[]) =>
+  prisma.$queryRawUnsafe<Array<{ rolname: string; login: boolean; no_password: boolean }>>(
+    `SELECT rolname::text AS rolname, rolcanlogin AS login, rolpassword IS NULL AS no_password
+       FROM pg_authid WHERE rolname = ANY($1::text[]) ORDER BY rolname::text COLLATE "C"`,
+    logins,
+  )
 
 async function waitingRows(name: string) {
   const rows = await prisma.backgroundJob.findMany({ where: { type: RETIRED_SCHEMAS_JOB_TYPE } })
@@ -97,7 +116,18 @@ afterAll(async () => {
     `SELECT nspname FROM pg_namespace WHERE nspname = $1 OR nspname LIKE $2`, schema, `${schema}\\_%`,
   ).catch(() => [])
   for (const s of left) await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${s.nspname}" CASCADE`).catch(() => {})
-  await prisma.backgroundJob.deleteMany({ where: { type: RETIRED_SCHEMAS_JOB_TYPE } }).catch(() => {})
+  if (projectId) {
+    const { ro, rw } = directAccessRoleNames(projectId)
+    await prisma.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${elsewhere} WITH (FORCE)`).catch(() => {})
+    for (const login of [ro, rw, functionRoleName(schema)]) {
+      await prisma.$executeRawUnsafe(`DROP OWNED BY "${login}"`).catch(() => {})
+      await prisma.$executeRawUnsafe(`DROP ROLE IF EXISTS "${login}"`).catch(() => {})
+    }
+    await prisma.auditLog.deleteMany({ where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: projectId } } }).catch(() => {})
+  }
+  await prisma.backgroundJob
+    .deleteMany({ where: { type: RETIRED_SCHEMAS_JOB_TYPE, payload: { path: ['projectId'], equals: projectId } } })
+    .catch(() => {})
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
   await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
   await closeChangeLockPool()
@@ -167,23 +197,64 @@ describe('a discarded branch', () => {
 
 describe('a deleted project', () => {
   const vault = () => `${schema}_r1`
+  let logins: string[] = []
+  let ro = ''
+  let deleted: Awaited<ReturnType<typeof deleteProjectCompletely>>
 
   beforeAll(async () => {
     // A change's vault, which PostgREST never serves.
     await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${vault()}"`)
-    await deleteProjectCompletely(projectId)
+    // Its logins, each granted on its schema: direct access, and its functions'.
+    ro = directAccessRoleNames(projectId).ro
+    logins = [ro, directAccessRoleNames(projectId).rw, functionRoleName(schema)].sort()
+    for (const login of logins) {
+      await prisma.$executeRawUnsafe(`CREATE ROLE "${login}" LOGIN PASSWORD '${crypto.randomBytes(18).toString('hex')}'`)
+      await prisma.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${login}"`)
+    }
+    // Named outside this database too, by a grant in another database.
+    await prisma.$executeRawUnsafe(`CREATE DATABASE ${elsewhere}`)
+    const other = new Client({ connectionString: urlOf(elsewhere) })
+    await other.connect()
+    try {
+      await other.query(`CREATE TABLE kept (id int)`)
+      await other.query(`GRANT SELECT ON kept TO "${ro}"`)
+    } finally {
+      await other.end()
+    }
+    deleted = await deleteProjectCompletely(projectId)
   }, 180_000)
 
   it('stops serving its schema with the deletion, keeps it for now, and drops what nothing served', async () => {
     expect(mockUnregistered).toContain(schema)
     expect(await exists(schema)).toBe(true)
     expect(await exists(vault())).toBe(false)
+    expect(deleted.schemasRetired).toEqual([schema])
+    expect(deleted.schemasDropped).toEqual([vault()])
     expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
   })
 
-  it('drops the schema in the later pass', async () => {
+  it('retires its logins with the deletion, unable to log in, for the pass to drop with the schema', async () => {
+    expect([...deleted.loginsDroppedLater].sort()).toEqual(logins)
+    expect(deleted.retiredLogins).toEqual([])
+    expect(await loginStates(logins)).toEqual(logins.map((rolname) => ({ rolname, login: false, no_password: true })))
+    const [row] = await waitingRows(schema)
+    expect([...(row.payload as any).logins].sort()).toEqual(logins)
+    expect((row.payload as any).via).toBe('project deletion')
+  })
+
+  it('drops the schema in the later pass, and the logins with it, retiring the one named outside its database', async () => {
     expect(await waitingRows(schema)).toHaveLength(1)
-    await dropRetiredSchemas(HOME_REGION, new Date(Date.now() + DROP_AFTER_MS + 1_000))
+    const out = await dropRetiredSchemas(HOME_REGION, new Date(Date.now() + DROP_AFTER_MS + 1_000))
+
     expect(await exists(schema)).toBe(false)
+    expect(out.loginsRetired).toEqual([ro])
+    expect([...out.loginsDropped].sort()).toEqual(logins.filter((login) => login !== ro))
+    expect(await loginStates(logins)).toEqual([{ rolname: ro, login: false, no_password: true }])
+    const audit = await prisma.auditLog.findFirst({
+      where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: projectId } },
+      select: { projectId: true, details: true },
+    })
+    expect(audit?.projectId).toBeNull()
+    expect(JSON.parse(String(audit?.details))).toEqual({ projectId, region: HOME_REGION, logins: [ro], via: 'project deletion' })
   })
 })

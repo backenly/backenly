@@ -23,6 +23,12 @@
  * does not serve (a change vault, a paused project's, or any schema where no
  * registry is installed) is dropped at once, as before.
  *
+ * A deleted project's logins cannot be dropped while its schema is there
+ * (lib/projects/logins.ts). The deletion retires them, unable to log in, and
+ * names them on the row; the pass drops them right after the schemas, and
+ * records any that something outside the database still names, which it
+ * retires instead, as a deletion does.
+ *
  * The row uses statuses of its own, for the reason purge jobs do
  * (lib/queue/index.ts, PURGE_STATUS): a released worker completes a 'queued'
  * job it has no handler for, and this row is the only record that a schema
@@ -35,6 +41,7 @@ import { regionRawClient } from '@/lib/data-plane/regional'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { isProjectOwnedSchema, quoteIdent } from '@/lib/security/workspace-schema'
+import { dropLogins, projectLoginNames, recordRetiredLogins } from '@/lib/projects/logins'
 import { servedAmong, unregisterSchemaOn, type RegistrySql } from './registration'
 
 export const RETIRED_SCHEMAS_JOB_TYPE = 'drop_retired_schemas' as const
@@ -57,6 +64,8 @@ export const DROP_AFTER_MS = 2 * 60_000
 
 /** How long a drop waits for a table lock before it gives up and tries later. */
 const LOCK_TIMEOUT = '5s'
+/** Bounds the transaction that drops a deleted project's logins, as a deletion's own are bounded. */
+const LOGINS_TRANSACTION = { timeout: 60_000, maxWait: 10_000 }
 /** Backoff between failed attempts, as the job queue's. */
 const RETRY_DELAYS_MS = [0, 5_000, 30_000, 300_000, 1_800_000] as const
 const RUNNING_TIMEOUT_MS = 10 * 60_000
@@ -71,10 +80,15 @@ export interface SchemaSql extends RegistrySql {
  * and stops serving the others now, returning them: record them with
  * scheduleSchemaDrop in the same platform change, and dropRetiredSchemas drops
  * them later.
+ *
+ * `retire: false` drops a served schema now too, right after it stops being
+ * served: for a deletion whose logins cannot wait for the pass
+ * (lib/projects/delete.ts).
  */
 export async function dropOrRetireSchemas(
   db: SchemaSql,
   schemas: string[],
+  opts: { retire?: boolean } = {},
 ): Promise<{ dropped: string[]; retired: string[] }> {
   const served = new Set(await servedAmong(db, schemas))
   const dropped: string[] = []
@@ -82,33 +96,44 @@ export async function dropOrRetireSchemas(
   for (const schema of schemas) {
     if (served.has(schema)) {
       await unregisterSchemaOn(db, schema)
-      retired.push(schema)
-    } else {
-      await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
-      dropped.push(schema)
+      if (opts.retire !== false) {
+        retired.push(schema)
+        continue
+      }
     }
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
+    dropped.push(schema)
   }
   return { dropped, retired }
 }
 
 /**
  * Record that these schemas of a project, retired by dropOrRetireSchemas in its
- * region, are to be dropped DROP_AFTER_MS from now. Pass the transaction that
- * retired them when it is the platform's own, so the record commits with it.
+ * region, are to be dropped DROP_AFTER_MS from now, and with them the logins a
+ * deletion retired (`logins`, and `via`, what retired them, for the record of
+ * any the pass cannot drop). Pass the transaction that retired them when it is
+ * the platform's own, so the record commits with it.
  */
 export async function scheduleSchemaDrop(
   platform: Pick<Prisma.TransactionClient, 'backgroundJob'>,
-  entry: { projectId: string; region: CloudRegionId; schemas: string[] },
+  entry: { projectId: string; region: CloudRegionId; schemas: string[]; logins?: string[]; via?: string },
   now: Date = new Date(),
 ): Promise<void> {
   const schemas = entry.schemas.filter((schema) => isProjectOwnedSchema(entry.projectId, schema))
   if (schemas.length === 0) return
+  const logins = entry.logins ?? []
   await platform.backgroundJob.create({
     data: {
       type: RETIRED_SCHEMAS_JOB_TYPE,
       status: RETIRED_SCHEMAS_STATUS.pending,
-      // The project's id, its region and the schema names: no rows, no credentials.
-      payload: { projectId: entry.projectId, region: entry.region, schemas },
+      // The project's id, its region, the schema names and its logins' names:
+      // no rows, no credentials.
+      payload: {
+        projectId: entry.projectId,
+        region: entry.region,
+        schemas,
+        ...(logins.length > 0 ? { logins, via: entry.via ?? 'project deletion' } : {}),
+      },
       attempts: 0,
       maxAttempts: RETRY_DELAYS_MS.length,
       runAt: new Date(now.getTime() + DROP_AFTER_MS),
@@ -119,17 +144,43 @@ export async function scheduleSchemaDrop(
 }
 
 /**
- * Drop this region's schemas retired at least DROP_AFTER_MS ago.
+ * The logins a row names, if each is one of its project's own
+ * (lib/projects/logins.ts, projectLoginNames); null if any is not.
+ */
+function loginsOf(payload: { logins?: unknown }, projectId: string, schemas: string[]): string[] | null {
+  const named = Array.isArray(payload.logins) ? payload.logins.filter((l): l is string => typeof l === 'string') : []
+  if (Array.isArray(payload.logins) && named.length !== payload.logins.length) return null
+  if (named.length === 0) return []
+  let own: Set<string>
+  try {
+    own = new Set(projectLoginNames(projectId, [], schemas))
+  } catch {
+    return null
+  }
+  return named.every((login) => own.has(login)) ? named : null
+}
+
+/**
+ * Drop this region's schemas retired at least DROP_AFTER_MS ago, and then the
+ * logins retired with them.
  *
- * Each named schema must belong to the project the row names, or nothing is
- * dropped. A schema served again since (re-registered) is retired again and
- * kept for another DROP_AFTER_MS, never dropped while it may be read.
+ * Each named schema and login must belong to the project the row names, or
+ * nothing is dropped. A schema served again since (re-registered) is retired
+ * again and kept for another DROP_AFTER_MS, never dropped while it may be read,
+ * and the logins wait with it. A login something outside the database still
+ * names is retired, not dropped, and recorded as a deletion records one.
  */
 export async function dropRetiredSchemas(
   region: CloudRegionId = serviceRegion(),
   now: Date = new Date(),
-): Promise<{ dropped: string[]; deferred: string[]; failed: number }> {
-  const out = { dropped: [] as string[], deferred: [] as string[], failed: 0 }
+): Promise<{ dropped: string[]; deferred: string[]; failed: number; loginsDropped: string[]; loginsRetired: string[] }> {
+  const out = {
+    dropped: [] as string[],
+    deferred: [] as string[],
+    failed: 0,
+    loginsDropped: [] as string[],
+    loginsRetired: [] as string[],
+  }
 
   // A pass that died mid-drop left its rows running; they go back to waiting.
   await prisma.backgroundJob.updateMany({
@@ -156,7 +207,7 @@ export async function dropRetiredSchemas(
   const jobs = await prisma.backgroundJob.findMany({ where: { id: { in: ids }, status: RETIRED_SCHEMAS_STATUS.running } })
 
   for (const job of jobs) {
-    const payload = (job.payload ?? {}) as { projectId?: unknown; schemas?: unknown }
+    const payload = (job.payload ?? {}) as { projectId?: unknown; schemas?: unknown; logins?: unknown; via?: unknown }
     const projectId = typeof payload.projectId === 'string' ? payload.projectId : ''
     const named = Array.isArray(payload.schemas) ? payload.schemas.filter((s): s is string => typeof s === 'string') : []
     let owned: string[] = []
@@ -165,11 +216,12 @@ export async function dropRetiredSchemas(
     } catch {
       owned = []
     }
-    if (owned.length === 0 || owned.length !== named.length) {
+    const logins = owned.length === named.length ? loginsOf(payload, projectId, owned) : null
+    if (owned.length === 0 || owned.length !== named.length || logins === null) {
       // Unrecoverable: no retry finds an owner the row never named. Kept, failed, for a person.
       await prisma.backgroundJob.update({
         where: { id: job.id },
-        data: { status: RETIRED_SCHEMAS_STATUS.failed, error: 'The row names a schema that is not this project\'s, so nothing was dropped.', completedAt: now, timeoutAt: null },
+        data: { status: RETIRED_SCHEMAS_STATUS.failed, error: 'The row names a schema or a login that is not this project\'s, so nothing was dropped.', completedAt: now, timeoutAt: null },
       })
       out.failed++
       continue
@@ -199,9 +251,33 @@ export async function dropRetiredSchemas(
           },
         })
       } else {
+        // The schemas are gone, so the logins hold no grants that would block
+        // their drop. A retry after a failure here finds the schemas gone.
+        const retiredLogins = logins.length === 0 ? [] : await db.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
+          return dropLogins(tx as Prisma.TransactionClient, logins)
+        }, LOGINS_TRANSACTION)
+        if (retiredLogins.length > 0) {
+          const via = typeof payload.via === 'string' ? payload.via : 'project deletion'
+          await recordRetiredLogins(prisma, [{ projectId, region, logins: retiredLogins }], via)
+          console.warn(
+            `[LoginRetired] project=${projectId} region=${region} logins=${retiredLogins.join(',')} via=${via}: ` +
+              'something outside the project database still names them; they cannot log in, and stay until an operator ' +
+              'removes what names them and drops them (audit DATABASE_LOGIN_RETIRED)',
+          )
+        }
+        const droppedLogins = logins.filter((login) => !retiredLogins.includes(login))
+        out.loginsDropped.push(...droppedLogins)
+        out.loginsRetired.push(...retiredLogins)
         await prisma.backgroundJob.update({
           where: { id: job.id },
-          data: { status: 'completed', result: { dropped: owned }, completedAt: now, error: null, timeoutAt: null },
+          data: {
+            status: 'completed',
+            result: { dropped: owned, ...(logins.length > 0 ? { logins: { dropped: droppedLogins, retired: retiredLogins } } : {}) },
+            completedAt: now,
+            error: null,
+            timeoutAt: null,
+          },
         })
       }
     } catch (err) {
@@ -226,7 +302,10 @@ export async function dropRetiredSchemas(
   }
 
   if (out.dropped.length > 0 || out.failed > 0) {
-    console.log(`[RetiredSchemas] region=${region} dropped=${out.dropped.length} deferred=${out.deferred.length} failed=${out.failed}`)
+    console.log(
+      `[RetiredSchemas] region=${region} dropped=${out.dropped.length} deferred=${out.deferred.length} failed=${out.failed} ` +
+        `logins dropped=${out.loginsDropped.length} retired=${out.loginsRetired.length}`,
+    )
   }
   return out
 }
