@@ -40,7 +40,8 @@ import {
   StatusGlyph,
 } from '@/components/inspector/kit'
 import { InstrumentBar, PaneToolbar, SearchField, count, type MenuItems } from '@/components/console/InstrumentBar'
-import { AskYourAgent, EmptyPanel, ErrorRow, RefusedLine, agentSentence } from '@/components/console/states'
+import { AskYourAgent, ErrorRow, RefusedLine, agentSentence } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { Time } from '@/components/console/Time'
 import { FOCUS_INSET, RAIL, RULE } from '@/components/console/tokens'
 import { RowSkeleton } from '@/components/autonomy/rows'
@@ -112,7 +113,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
   const tabParam = search?.get('tab') === 'code' ? 'code' : 'runs'
   const showSecrets = viewParam === 'secrets'
 
-  const { canWrite, canAdminister, organizationId } = useProjectRole(projectId)
+  const { canWrite, canAdminister, organizationId, loading: roleLoading } = useProjectRole(projectId)
   const agent = useAgentConnection(projectId)
   const secrets = useSecrets(projectId)
   const billingHref = organizationId ? `/app/org/${organizationId}/billing` : '/app/billing'
@@ -350,14 +351,15 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
   } else if (empty && !showSecrets) {
     body = (
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <EmptyPanel
+        <FirstRun
+          picture="functions"
           title="No functions yet"
-          sentence="Endpoints, schedules and code that runs when data changes."
-          requests={EXAMPLE_PROMPTS}
-          agent={agent}
+          sentence="Endpoints, scheduled jobs and code that runs when data changes. Your agent writes them, and they go live without a deploy."
+          requests={EXAMPLE_PROMPTS.slice(0, 1)}
+          projectId={projectId}
+          agent={roleLoading ? null : agent}
           canConnect={canAdminister}
           docs={{ label: 'Functions docs', slug: 'functions' }}
-          headingLevel={2}
         />
       </div>
     )

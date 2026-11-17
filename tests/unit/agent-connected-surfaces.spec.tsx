@@ -15,6 +15,12 @@
  * someone who cannot create keys. The agent's state lives on the sidebar's
  * Connect item: live (●, mid grey) only while it is at work, hollow and dim
  * when quiet, the words "Not connected" when there is none.
+ *
+ * The first page of the five sections the agent builds into (Database,
+ * Auth & Users, Storage, Functions, Realtime) offers Connect agent again,
+ * beside the docs, until the agent connects (the founder's call, 2026-11-17:
+ * the centred first-run state from before the rebuild). Once it is connected
+ * the requests are addressed to it by name.
  */
 
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
@@ -94,26 +100,28 @@ describe('Functions (the reported surface)', () => {
     return screen.getByRole('dialog', { name: 'New function' })
   }
 
-  it('asks a user without a connected agent to connect it, in the panel, with no button of its own', async () => {
+  it('offers Connect agent on the first page until the agent connects, and the docs beside it', async () => {
     render(<FunctionsWorkbench projectId="p1" />)
     await settle()
-    // Decision 1: the top bar carries Connect agent; the empty panel says it in its sentence.
-    expect(screen.getByText(/Connect your agent, then send it one of these\./)).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: /Connect agent/ })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'No functions yet' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Connect agent/ }).getAttribute('href')).toBe('/app/projects/p1/connect')
+    expect(screen.getByText('Ask your agent')).toBeInTheDocument()
     // Relative on Backenly Cloud, absolute (backenly.com) on a self-hosted build: the page is the same.
     expect(screen.getByRole('link', { name: /Functions docs/ }).getAttribute('href')).toMatch(/^(https:\/\/backenly\.com)?\/docs\/functions$/)
 
+    // The New function dialog keeps its sentence and carries no Connect button of its own.
     const dialog = await openNewFunction()
     expect(within(dialog).getByText(/Connect your agent, then send it one of these\./)).toBeInTheDocument()
     expect(within(dialog).queryByRole('link', { name: /Connect agent/ })).toBeNull()
   })
 
-  it('does not ask a user whose agent is connected, and still hands over the asks', async () => {
+  it('does not ask a user whose agent is connected, and addresses the asks to it', async () => {
     agentAnswer = CONNECTED
     render(<FunctionsWorkbench projectId="p1" />)
     await settle()
     expect(screen.queryByText(/Connect your agent/)).toBeNull()
-    expect(screen.getByText(/one of these to start\./)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Connect agent/ })).toBeNull()
+    expect(screen.getByText('Ask Visual Studio Code')).toBeInTheDocument()
     expect(screen.getByText('When a user signs up, send them a welcome email.')).toBeInTheDocument()
 
     const dialog = await openNewFunction()
@@ -179,21 +187,28 @@ describe('Overview of an empty project', () => {
 })
 
 describe('Auth & Users with no users yet', () => {
-  // Decision 1: the empty panel carries no Connect button of its own (the top
-  // bar offers the one); its sentence asks for the agent until it is connected.
-  it('asks for the agent only until it is connected, then names it', async () => {
+  it('offers Connect agent only until the agent is connected, then names it', async () => {
     const { unmount } = render(<AuthWorkbench projectId="p1" />)
     await settle()
-    expect(screen.getByText(/Connect your agent, then send it this\./)).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Connect agent' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'No users yet' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Connect agent/ }).getAttribute('href')).toBe('/app/projects/p1/connect')
     unmount()
 
     clearAgentConnectionCache()
     agentAnswer = CONNECTED
     render(<AuthWorkbench projectId="p1" />)
     await settle()
-    expect(screen.queryByText(/Connect your agent/)).toBeNull()
-    expect(screen.getByText(/Send Visual Studio Code this to start\./)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Connect agent/ })).toBeNull()
+    expect(screen.getByText('Ask Visual Studio Code')).toBeInTheDocument()
+    expect(screen.getByText(/Add email and password sign-up/)).toBeInTheDocument()
+  })
+
+  it('tells someone who cannot create keys who can, with no Connect agent to press', async () => {
+    roleAnswer = DEVELOPER
+    render(<AuthWorkbench projectId="p1" />)
+    await settle()
+    expect(screen.getByText('Only an owner or admin can connect an agent to this project.')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Connect agent/ })).toBeNull()
     expect(screen.getByText(/Add email and password sign-up/)).toBeInTheDocument()
   })
 })

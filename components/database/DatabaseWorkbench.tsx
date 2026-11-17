@@ -24,7 +24,8 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { InstrumentBar, type BarFact } from '@/components/console/InstrumentBar'
 import { useRecordParam } from '@/components/console/RecordDrawer'
-import { EmptyPanel, ErrorRow, RefusedLine } from '@/components/console/states'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { FirstRun } from '@/components/console/FirstRun'
 import { KIT, KitButton, KitConfirmDialog, KitField, KitInput, KitModal } from '@/components/inspector/kit'
 import { getTables, type TableInfo } from '@/lib/api/database'
 import { getProject } from '@/lib/api/projects'
@@ -202,14 +203,15 @@ export function DatabaseWorkbench({ projectId }: { projectId: string }) {
     </div>
   ) : tables && tables.length === 0 ? (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <EmptyPanel
+      <FirstRun
+        picture="tables"
         title="No tables yet"
-        sentence="Your coding agent creates tables as it builds."
+        sentence="Your agent creates the tables your app needs, each with REST endpoints and row-level security."
         requests={['Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write.']}
+        projectId={projectId}
         agent={role.loading ? null : { status: agent.status, client: agent.client }}
         canConnect={role.canAdminister}
         docs={{ label: 'Database docs', slug: 'database' }}
-        headingLevel={2}
       />
     </div>
   ) : (
