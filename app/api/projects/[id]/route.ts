@@ -5,6 +5,9 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
+import { CONFIRMATION_REQUIRED, confirmationOf, reauthRefusal, signedInRecently } from '@/lib/auth/recent-sign-in'
+import { isUnfinishedImport, requestProjectDeletion } from '@/lib/projects/deletion'
+import { LifecycleBusyError } from '@/lib/projects/pause-lifecycle'
 import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { getProjectResolver, ProjectResolutionError, projectRoleFields, type ProjectRoleFields } from '@/lib/edition'
 import { getProjectQuota } from '@/lib/services/storageQuota'
@@ -142,16 +145,30 @@ export const GET = withAuth(async (
       )
     }
 
-    const project = await prisma.project.findUnique({
+    const found = await prisma.project.findUnique({
       where: { id: projectId },
-      select: PROJECT_RESPONSE_SELECT,
+      select: { ...PROJECT_RESPONSE_SELECT, deletedAt: true, purgeAfter: true },
     })
 
-    if (!project) {
+    if (!found) {
       return NextResponse.json(
         {
           success: false,
           error: 'Project not found or access denied',
+        },
+        { status: 404 }
+      )
+    }
+
+    // Asked to be deleted (lib/projects/deletion.ts): gone from the console
+    // until it is restored, said to those who may see it.
+    const { deletedAt, purgeAfter, ...project } = found
+    if (deletedAt) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `This project was deleted. Restore it from the Projects page until ${(purgeAfter ?? deletedAt).toISOString().slice(0, 10)}, when it is removed for good.`,
+          code: 'PROJECT_DELETED',
         },
         { status: 404 }
       )
@@ -287,17 +304,48 @@ export const DELETE = withAuth(async (
       )
     }
 
-    // Drops every schema this project owns and deletes its rows in one
-    // transaction, then removes its backups and storage objects. Previously
-    // this was a bare `prisma.project.delete`, which left workspace_<id> and
-    // every branch schema resident with nothing pointing at them.
-    await deleteProjectCompletely(projectId)
+    // Nothing here can be undone, so the caller says which project it means,
+    // by name, and has signed in within the last ten minutes
+    // (lib/auth/recent-sign-in.ts). Both are checked after access, so neither
+    // answer tells a stranger the project exists.
+    if ((await confirmationOf(request)) !== project.name) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Deleting a project needs its name as confirmation. Send {"confirm": ${JSON.stringify(project.name)}} in the request body.`,
+          code: CONFIRMATION_REQUIRED,
+        },
+        { status: 400 }
+      )
+    }
+    if (!signedInRecently(user.signedInAt)) {
+      return reauthRefusal('this project', user.user)
+    }
 
+    // A project an import made and never finished goes at once, as it always
+    // did: deleteProjectCompletely drops every schema it owns and its rows in
+    // one transaction, then its backups and storage objects.
+    if (await isUnfinishedImport(projectId)) {
+      await deleteProjectCompletely(projectId)
+      return NextResponse.json({ success: true, message: 'Project deleted' })
+    }
+
+    // Any other is kept for seven days (lib/projects/deletion.ts): hidden,
+    // refused at every door, its webhooks stopped, and removed for good by the
+    // daily purge at `purgeAfter`.
+    const deletion = await requestProjectDeletion(projectId, { kind: 'user', userId: user.userId, email: user.email })
     return NextResponse.json({
       success: true,
-      message: 'Project deleted successfully',
+      message: `Project deleted. Restore it from the Projects page until ${deletion.purgeAfter.toISOString().slice(0, 10)}, when it is removed for good.`,
+      purgeAfter: deletion.purgeAfter.toISOString(),
     })
   } catch (error: any) {
+    if (error instanceof LifecycleBusyError) {
+      return NextResponse.json(
+        { success: false, error: 'The project is being paused or resumed right now. Try again in a moment.', code: error.code },
+        { status: 409 }
+      )
+    }
     console.error('Error deleting project:', error)
     return NextResponse.json(
       {

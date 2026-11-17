@@ -310,6 +310,10 @@ describe('toApiError — an upsert with no conflict target', () => {
     expect(out.body.error).toMatch(/on_conflict columns/)
     expect(out.body.hint).toMatch(/WHERE deleted_at IS NULL/)
     expect(out.body.hint).toMatch(/where: "true"/)
+    // A UNIQUE INDEX declared in SQL is made as written, over every row, so the
+    // statement itself is the answer; no `WHERE true` is needed.
+    expect(out.body.hint).toMatch(/CREATE UNIQUE INDEX … ON <table> \(<columns>\) in SQL, which is created as written/)
+    expect(out.body.hint).not.toMatch(/WHERE true/)
   })
 })
 
@@ -398,13 +402,13 @@ describe('stripUpstreamError — v2 passthrough', () => {
     expect(out.body.details).toMatch(/already exists/)
   })
 
-  it('reduces a privilege error to FORBIDDEN without naming the table', () => {
+  it("answers a privilege error with PostgREST's code, without naming the table", () => {
     const out = stripUpstreamError(403, {
       code: '42501',
       message: 'permission denied for table users',
     })
     expect(out.status).toBe(403)
-    expect(out.body.code).toBe('FORBIDDEN')
+    expect(out.body.code).toBe('42501')
     expect(JSON.stringify(out.body)).not.toMatch(/users/)
   })
 
@@ -419,7 +423,7 @@ describe('stripUpstreamError — v2 passthrough', () => {
     expect(out.body.code).toBe('42P10')
     expect(out.body.message).toBe('there is no unique or exclusion constraint matching the ON CONFLICT specification')
     expect(out.body.hint).toMatch(/where: "true"/)
-    expect(out.body.hint).toMatch(/WHERE true/)
+    expect(out.body.hint).toMatch(/in SQL, which is created as written/)
   })
 
   it('reduces anything unrecognised rather than forwarding it', () => {

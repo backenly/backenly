@@ -133,6 +133,16 @@ describe('the role the application runs as', () => {
     )
     expect(r.rows[0].tableowner).toBe(APP_ROLE)
   })
+
+  test('holds the privileges of pg_read_all_stats, so it reads the statements PostgREST runs', async () => {
+    // PostgREST runs each request as anon, authenticated or service_role, and
+    // PostgreSQL shows another role's statement text only to a role with these
+    // privileges. Without them the slow-query checks never saw a REST read.
+    const r = await withClient(appUrl, c =>
+      c.query(`SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') AS stats`)
+    )
+    expect(r.rows[0].stats).toBe(true)
+  })
 })
 
 describe('FORCE ROW LEVEL SECURITY actually applies to it', () => {

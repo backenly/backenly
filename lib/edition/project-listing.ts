@@ -46,6 +46,10 @@ export const PROJECT_LIST_SELECT = {
   organizationId: true,
   // Where it was moved in from, when an import made it (lib/import/jobs.ts).
   importedFrom: true,
+  // Asked to be deleted, and when it is removed for good (lib/projects/deletion.ts).
+  // Read so GET /api/projects can leave it out in every edition.
+  deletedAt: true,
+  purgeAfter: true,
   // Counted, never fetched: a listing needs the number of tables, not the tables.
   _count: { select: { tables: true, workspaces: true } },
 } as const

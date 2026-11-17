@@ -63,7 +63,8 @@ for fn in \
   backenly_pgrst_reload \
   backenly_fn_role_name \
   backenly_fn_role_sync \
-  backenly_fn_role_drop
+  backenly_fn_role_drop \
+  backenly_fn_role_retire
 do
   if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_proc WHERE proname = '$fn'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING function: $fn"

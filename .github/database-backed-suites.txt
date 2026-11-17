@@ -39,6 +39,12 @@ tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
 tests/integration/mcp-oauth-consent.spec.ts
 tests/integration/mcp-direct-access-url.spec.ts
+
+# A region with no developer-facing Postgres host issues no login and shows no
+# connection string, in the console's routes and over MCP, and says so; logins
+# that exist stay listed by name to be revoked (production QA re-test,
+# 2026-11-16, N4).
+tests/integration/direct-postgres-only-where-reachable.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
@@ -57,6 +63,12 @@ tests/integration/signin-enumeration.spec.ts
 tests/integration/account-emails-answer-at-once.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
+
+# A stored file anyone may read, or one a signed link grants, loads in an <img>
+# on any site; one read on the caller's own identity, and every refusal, stays
+# same-site (production QA re-test, 2026-11-16, N3). The real route, through
+# the signed CDN and through the app's own bytes.
+tests/integration/stored-files-load-on-other-sites.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
 tests/integration/storage-writes-need-a-user.spec.ts
 tests/integration/function-off-switch.spec.ts
@@ -77,6 +89,12 @@ tests/integration/function-row-events-data-plane.spec.ts
 # function's answer (#604). The real runtime, Next routes and function rows.
 tests/integration/function-routes-answer-real-status.spec.ts
 
+# Row-event runs past the month's allowance are not queued; a burst larger than
+# what is left leaves one notice, and the first refusal drops the function's
+# queue with one record (production QA re-test, 2026-11-16, #40). Real capture,
+# queue, sandbox executor and run log; only the plan's size is stood in for.
+tests/integration/function-runs-within-the-allowance.spec.ts
+
 # An on_update function deployed with columns runs only when an update changed
 # one of them (an unknown old row runs it), columns is refused off on_update
 # and for a column the table lacks, and a redeploy without columns is restored
@@ -90,6 +108,11 @@ tests/integration/row-functions-watch-columns.spec.ts
 # run log says what is queued, and pausing discards the queue. Real capture
 # trigger, outbox, queue, sandbox executor and run log.
 tests/integration/function-runs-queued.spec.ts
+
+# A function switched off stays off while its last runs finish, drops the runs
+# queued for it, and says how many (production QA re-test, 2026-11-16, N7).
+# Real capture, queue, sandbox executor and run log.
+tests/integration/switched-off-functions-stay-off.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
@@ -781,6 +804,11 @@ tests/integration/credential-rotation-provider-secrets.spec.ts
 # run failed.
 tests/integration/scheduled-snapshots.spec.ts
 
+# A failed export names its cause in plain words and keeps the database's host
+# and address to the log (production QA re-test, 2026-11-16, N5). The real
+# route with a stand-in pg_dump; the project row it reads is real.
+tests/integration/export-says-why-it-failed.spec.ts
+
 # HIGH, found by the final qualification on a real deployment: a PostgreSQL
 # restart made the next /api/v1/* request reject with P1017 and the RUNTIME
 # PROCESS EXITED. Express 4 does not await its handlers, so an async rejection
@@ -1242,6 +1270,11 @@ tests/integration/db-doors-agree.spec.ts
 # on load and fixes only on an explicit action. Real project, users table and
 # function rows are the property.
 tests/integration/readiness-reads-never-write.spec.ts
+
+# Deploy readiness and a build's own check call functions functions: the
+# trigger check keeps its id and says "Function trigger configuration … All 2
+# functions" (production QA re-test, 2026-11-16, #47).
+tests/integration/deploy-readiness-says-functions.spec.ts
 # The pages that show readiness (the Overview's /build-status, the Deploy
 # page's GET /readiness) reuse a recent behavioral verification of the backend
 # as it is now: three reads at once verify once, a governed change, five
@@ -1307,6 +1340,14 @@ tests/integration/storage-policy-action.spec.ts
 # project-wide disable stops. Real workspace tables and NOTIFY triggers are
 # the property.
 tests/integration/realtime-scope-truth.spec.ts
+# A new table streams only once realtime is turned on for it: one made by a
+# migration, by create_table or by a merge gets no trigger while other tables
+# stream, and the result names them and the call that adds it; enabling it is
+# one History change, enabling it again re-creates nothing; FIX_TABLE puts a
+# trigger back only on a table that streamed when last recorded, and
+# REGISTER_TABLE adds none. Real provisioned project, branch, triggers, change
+# records and schema snapshots.
+tests/integration/new-tables-stream-only-when-asked.spec.ts
 # A large realtime change still says which row changed: an update that fits
 # without its old row keeps the new row and reduces the old one to its key, one
 # too large either way carries the primary key and reaches only streams that
@@ -1795,6 +1836,19 @@ tests/integration/change-restore-to.spec.ts
 # written since a change is measured in rows only the service role can see.
 tests/integration/change-restore-forced-rls.spec.ts
 
+# Backenly's own whole-table work as production runs it, under the same
+# NOSUPERUSER NOBYPASSRLS owner: a merge's checks against production's rows, a
+# merge card's row counts, an approved or declared foreign key and a validation
+# see every row (users read as empty, so a valid key failed with 23503 and a
+# merge was refused), and a key a row really breaks is refused in plain words.
+tests/integration/platform-checks-see-every-row.spec.ts
+# History keeps every value of a dropped or retyped column, and what a new
+# column's non-constant default filled in, under the same NOSUPERUSER
+# NOBYPASSRLS owner: the vault copies read every row of a table only the
+# service role may read (they kept none of them), and restoring puts each
+# value back.
+tests/integration/column-copies-see-every-row.spec.ts
+
 # Restore to a point proves every step, each against the schema the newer steps
 # leave, in one rolled-back transaction before running any: a step that would
 # stop it is named and nothing runs (it used to undo the newer ones and stop
@@ -1890,6 +1944,19 @@ tests/integration/project-deletion-change-ledger.spec.ts
 # triggers and notifications are the property, so it needs a real Postgres.
 tests/integration/postgrest-reload-on-drop.spec.ts
 
+# A schema PostgREST serves stops being served at once and is dropped at least
+# two minutes later by the regional pass (a merge's, a discard's and a project
+# deletion's), never while it is served again: dropped at once, a cache rebuild
+# still reading it answered 503 for every request. A deleted project's logins
+# cannot log in from the deletion on, and the pass drops them with the schema,
+# retiring one another database names. The registration seam stands in for the
+# registry in the first suite; the second holds the step to the real one in a
+# database of its own; the third holds the retire helpers, owned by a definer
+# that holds only ADMIN on the logins, as on Amazon RDS, in a database of their own.
+tests/integration/served-schemas-dropped-later.spec.ts
+tests/integration/retired-schemas-registry.spec.ts
+tests/integration/retire-login-helpers.spec.ts
+
 # The SDK's filters mean the same on both servers that answer the data routes:
 # isNull, isNotNull, eq, neq, gt and in on uuid, timestamp, integer and boolean
 # columns, get, update and delete by a uuid id, an update or delete through
@@ -1973,6 +2040,13 @@ tests/integration/v1-errors-carry-code-and-message.spec.ts
 # UNIQUE the SQL declares is a real constraint ON CONFLICT can target. A table
 # the brain designs from a description keeps its inference.
 tests/integration/sql-as-written.spec.ts
+
+# A table or column declared in SQL gets the indexes its SQL declares and no
+# guessed ones (a 7-column table got 7, one beside its own unique index); a key
+# it declares is left to relationships_are_indexed, which counts a composite
+# index the migration made and no longer guesses keys from names on such a
+# table. A table the brain designs keeps its guesses, never twice on a column.
+tests/integration/sql-tables-only-declared-indexes.spec.ts
 # A function run is recorded as it happened: a call through /fn as http, the
 # status the function answered at the end of its log, a 5xx answer as a failed
 # run. A route function reads the project's variables as process.env.KEY, and
@@ -2131,6 +2205,12 @@ tests/integration/publish-counts-the-live-tables.spec.ts
 # capture trigger, outbox, drain and loopback receiver, the table list's
 # checks, History, and the agent's actions.
 tests/integration/webhooks-pick-tables.spec.ts
+
+# The capture trigger goes only on the tables something listens to, for the
+# events it listens for: a row function's table, the tables a webhook names,
+# every table for one that names none. It comes off with its last listener, and
+# rows it captured still drain.
+tests/integration/row-capture-only-where-something-listens.spec.ts
 # webhooks { action: "logs" } answers an agent with the fields the console's
 # delivery list has: a real delivery row, the MCP tool route with a read-only
 # key, and the console route.
@@ -2269,3 +2349,80 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# Every API keys response names the key by its kind and never by keyType
+# ("public" for every project key); the list says the window that decides each
+# key's requests. Real key rows through the create, list, read, change and
+# rotate routes.
+tests/integration/key-responses-say-what-the-key-is.spec.ts
+# A 4xx is not the backend failing: a burst of wrong-key 401s or 429s after a
+# reader switch is not a regression (404s and 5xx still are), the agent's
+# metrics give the error rate on 5xx with the 4xx as their own number, and the
+# per-endpoint breakdown says 5xx and 4xx apart. Real request log rows.
+tests/integration/client-errors-are-not-failures.spec.ts
+# Deleting a project needs its name in `confirm`, an account its email, and both
+# a session signed in within the last ten minutes (a refreshed one is not); each
+# refusal leaves the project or account in place, and a stranger still gets the
+# same 404. Real sessions, projects and accounts.
+tests/integration/deletion-asks-for-name-and-sign-in.spec.ts
+# Deleting a project keeps it for seven days: deletedAt and purgeAfter set,
+# refused at every door as deleted, left out of the list, the console, the plan's
+# project limit and background passes; the daily purge removes it once its date
+# has passed and never before; an unfinished import's project goes at once.
+# Real sessions, projects, jobs and serving state.
+tests/integration/deleted-projects-are-kept-seven-days.spec.ts
+# A deleted project can be restored until it is removed for good: listed with
+# its date under ?deleted=1, brought back listed and serving (an inactivity pause
+# kept), refused in the plan's words when the plan is full, 404 to anyone who
+# cannot administer it. Real sessions, projects and serving state.
+tests/integration/deleted-projects-can-be-restored.spec.ts
+# The check of row-event functions proves a row change reaches each function
+# that runs on it, inside a transaction that is always rolled back: QA's orders
+# table (an owner column whose default reads the signed-in user) passes, nothing
+# is left in the table or the capture outbox, a row Backenly cannot build is
+# "couldn't check" rather than a blocking failure, and a change that is not
+# captured fails. Real provisioned project, capture triggers and verifier.
+tests/integration/row-event-check-writes-nothing.spec.ts
+# The CRUD, auth-flow and RLS checks write their test rows in a transaction
+# that is always rolled back: after a verification there is no test row or
+# user, no captured change, and nothing the customer's own triggers wrote for
+# them (an audit row, a profile). Real provisioned project, users table,
+# capture triggers, customer triggers and verifier.
+tests/integration/verifier-database-checks-write-nothing.spec.ts
+# Every error an app can get carries a top-level code and message, and /api/v2
+# answers in PostgREST's shape: the errors Next writes itself (the body-size
+# limit in middleware.ts, the v2 route's own refusals, a stored file's public
+# address) as well as the runtime's. Real middleware, Next routes and runtime.
+tests/integration/error-envelope-every-door.spec.ts
+# Backenly's own check accounts do not stay in a project's users table: the
+# contract sweep removes stale ones (exact addresses only, never a person's),
+# run_test purges a sign-up it gave up on again later, the build verifier
+# removes its users, and the report lists and removes leftovers. Real project,
+# users table and runtime.
+tests/integration/check-accounts-are-removed.spec.ts
+# An end-user auth path that does not exist (/auth/user, /auth/session, a
+# mistyped provider) answers 404 ROUTE_NOT_FOUND with the auth routes there
+# are, GET /auth/me included, from the runtime and from Next. Real runtime.
+tests/integration/unknown-auth-paths.spec.ts
+# The AI credits Usage and MCP show are the ones the credit gate counts: the
+# plan's plus bonus and bought credits, with what is left, and the gate agrees
+# with the number shown. Real account_ai_usage rows, description, gate and MCP
+# usage summary; the Cloud provider's plan and balances are stood in.
+tests/integration/ai-credits-allowance.spec.ts
+# A function self-heal is the platform's own work: run under a metered tool
+# call, it holds none of the customer's credits, adds nothing to the call's
+# charge, still heals when their credits are used up, and is booked against the
+# platform's budget; a repair the customer asks for is still theirs. Real
+# gateway spend rules, fixers, function runner and database.
+tests/integration/function-self-heal-is-platform-paid.spec.ts
+# The dashboard assistant answers with no AI credits left, as the Pricing page
+# says it answers questions free: its model call is the platform's, held
+# against none of the account's credits; a call the account pays for is still
+# refused. Real route, gateway spend rules, credit hold and usage row.
+tests/integration/dashboard-assistant-answers-free.spec.ts
+# Receipts and the runtime API guide say which delete keeps a row: the SDK's
+# delete() sets deleted_at; a DELETE on /db or /api/v2 removes the row (#22).
+# Real provisioned project, real executor, migrations and guide.
+tests/integration/receipts-say-what-delete-does.spec.ts
+# An approval card says a deleted function, schedule or trigger can be undone
+# when History restores it, and that what nothing keeps cannot. Real rows.
+tests/integration/approval-cards-know-what-history-restores.spec.ts

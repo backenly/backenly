@@ -24,7 +24,7 @@
  * and one created before logging merges the older additive way.
  */
 
-import { projectPool } from '@/lib/data-plane/regional'
+import { projectPool, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
@@ -364,19 +364,23 @@ export async function diffBranch(projectId: string, branchId: string): Promise<
 }
 
 /**
- * Drop a branch's schema, unregistering it from PostgREST first. A registered
- * schema that no longer exists fails PostgREST's whole schema-cache rebuild,
- * which 503s every tenant on the box, so the order is not optional.
+ * Remove a branch's schema. While PostgREST serves it, it is unregistered now
+ * and dropped at least two minutes later (lib/postgrest/retire-schema.ts): a
+ * cache rebuild that read the list before the unregister, and queried after
+ * the drop, failed and answered 503 for every request until it was retried.
+ * A schema nothing serves is dropped at once.
  */
 async function dropBranchSchema(projectId: string, schemaName: string): Promise<void> {
   if (!schemaName.startsWith(`workspace_${projectId}_br_`)) {
     throw new Error('Refusing to drop a non-branch schema')
   }
-  try {
-    const { unregisterSchema } = await import('@/lib/postgrest/registration')
-    await unregisterSchema(schemaName)
-  } catch (e: any) {
-    console.warn(`[Branch] PostgREST unregister failed for ${schemaName}:`, e?.message)
+  const { servedAmong, unregisterSchemaOn } = await import('@/lib/postgrest/registration')
+  const db = await workspaceRawClient(projectId)
+  if ((await servedAmong(db, [schemaName])).length > 0) {
+    const { scheduleSchemaDrop } = await import('@/lib/postgrest/retire-schema')
+    await unregisterSchemaOn(db, schemaName)
+    await scheduleSchemaDrop(prisma, { projectId, region: await projectRegion(projectId), schemas: [schemaName] })
+    return
   }
   const pool = await branchPool(projectId)
   await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
@@ -529,14 +533,28 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
   if (branch) await dropBranchSchema(projectId, branch.schemaName).catch((e: any) =>
     console.warn(`[Branch] could not drop merged branch schema ${branch.schemaName}:`, e?.message))
   await audit(projectId, userId, 'BRANCH_MERGED', { branch: d.branch, applied: replay.applied.length, replayed: true })
+  const { tablesCreated } = await import('./migrate')
+  const realtime = await newTablesRealtime(projectId, tablesCreated(d.migrations))
   return {
     ok: true as const,
     branch: d.branch,
     applied: replay.applied.map((s) => `Applied to production: ${s}`),
     review: [] as string[],
     fullyMerged: true,
+    ...(realtime ? { realtime } : {}),
     ...recorded,
   }
+}
+
+/**
+ * What a merge's new tables mean for realtime: none streams until realtime is
+ * turned on for it by name, and the merge says so when other tables stream
+ * (lib/services/realtimeTriggers.ts, realtimeForNewTables).
+ */
+async function newTablesRealtime(projectId: string, created: string[]) {
+  if (created.length === 0) return null
+  const { realtimeForNewTables } = await import('@/lib/services/realtimeTriggers')
+  return realtimeForNewTables(projectId, created).catch(() => null)
 }
 
 /**
@@ -546,6 +564,7 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
 async function legacyAdditiveMerge(projectId: string, userId: string, branchId: string, d: BranchDiff) {
   const applied: string[] = []
   const review: string[] = []
+  const created: string[] = []
 
   // Additive: new tables go to main through the governed kernel.
   for (const t of d.diff.addedTables) {
@@ -573,6 +592,7 @@ async function legacyAdditiveMerge(projectId: string, userId: string, branchId: 
       review.push(`Table "${t.tableName}" could not be created: ${result.error ?? 'unknown'} — bring it over via chat`)
     } else {
       applied.push(`Created table "${t.tableName}" (${columns.length} columns) with generated APIs`)
+      created.push(t.tableName)
     }
   }
 
@@ -596,7 +616,8 @@ async function legacyAdditiveMerge(projectId: string, userId: string, branchId: 
   await audit(projectId, userId, 'BRANCH_MERGED', {
     branch: d.branch, applied: applied.length, review: review.length,
   })
-  return { ok: true as const, branch: d.branch, applied, review, fullyMerged: review.length === 0 }
+  const realtime = await newTablesRealtime(projectId, created)
+  return { ok: true as const, branch: d.branch, applied, review, fullyMerged: review.length === 0, ...(realtime ? { realtime } : {}) }
 }
 
 export async function discardBranch(projectId: string, userId: string, branchId: string) {

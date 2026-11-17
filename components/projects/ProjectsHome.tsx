@@ -28,7 +28,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AlertTriangle, Building2, Database, FolderPlus, Plus, Search, X } from 'lucide-react'
-import { deleteProject, type Project } from '@/lib/api/projects'
+import { DeleteRefusedError, deleteProject, type Project, type Reauthentication } from '@/lib/api/projects'
+import { SignInAgain } from '@/components/console/SignInAgain'
+import { RecentlyDeleted } from './RecentlyDeleted'
 import { OrgShell } from '@/components/shell/OrgShell'
 import {
   INPUT_BASE,
@@ -143,6 +145,10 @@ export function ProjectsHome({
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // Set when the server asks for a sign-in from the last ten minutes first.
+  const [deleteReauth, setDeleteReauth] = useState<Reauthentication | null>(null)
+  // Moves when a project is deleted here, so Recently deleted reads its list again.
+  const [deletedVersion, setDeletedVersion] = useState(0)
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null)
   const [renameError, setRenameError] = useState<{ id: string; message: string } | null>(null)
   const renameBusy = useRef(false)
@@ -411,18 +417,22 @@ export function ProjectsHome({
     if (!deleteTarget) return
     setDeleteBusy(true)
     setDeleteError(null)
+    setDeleteReauth(null)
     try {
-      await deleteProject(deleteTarget.id)
+      // The name the person typed; the dialog does not confirm until it matches.
+      await deleteProject(deleteTarget.id, deleteTarget.name)
       setProjects((prev) => {
         const next = (prev ?? []).filter((project) => project.id !== deleteTarget.id)
         cachedProjects.set(cacheKey, next)
         return next
       })
       setDeleteTarget(null)
+      setDeletedVersion((n) => n + 1)
       // A delete can free a place on the plan.
       setCreationAsked((n) => n + 1)
-    } catch {
-      setDeleteError('The project could not be deleted. Try again.')
+    } catch (err) {
+      if (err instanceof DeleteRefusedError && err.code === 'REAUTH_REQUIRED' && err.reauth) setDeleteReauth(err.reauth)
+      else setDeleteError('The project could not be deleted. Try again.')
     } finally {
       setDeleteBusy(false)
     }
@@ -619,6 +629,7 @@ export function ProjectsHome({
                     },
                     onDelete: () => {
                       setDeleteError(null)
+                      setDeleteReauth(null)
                       setDeleteTarget({ id: project.id, name: project.name })
                     },
                   }}
@@ -647,6 +658,16 @@ export function ProjectsHome({
       <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
         {header}
         {body}
+        <RecentlyDeleted
+          orgId={orgId ?? null}
+          canRestore={may.remove}
+          refreshKey={deletedVersion}
+          onRestored={() => {
+            readListAgain()
+            // A restore takes a place on the plan back.
+            setCreationAsked((n) => n + 1)
+          }}
+        />
       </div>
 
       {may.create && (
@@ -686,20 +707,23 @@ export function ProjectsHome({
           if (!deleteBusy) {
             setDeleteTarget(null)
             setDeleteError(null)
+            setDeleteReauth(null)
           }
         }}
         onConfirm={confirmDelete}
         title={`Delete ${deleteTarget?.name ?? 'this project'}?`}
-        description="Its database, tables, end users, files and change history are removed. This cannot be undone."
+        description="Its API stops answering at once. You can restore it from Recently deleted for 7 days; then its database, tables, end users, files and change history are removed for good."
         confirmLabel="Delete project"
         danger
         busy={deleteBusy}
+        requireText={deleteTarget?.name}
       >
         {deleteError && (
           <KitNote icon={AlertTriangle} tone="danger">
             {deleteError}
           </KitNote>
         )}
+        {deleteReauth && <SignInAgain reauth={deleteReauth} onSignedIn={() => void confirmDelete()} />}
       </KitConfirmDialog>
 
       {/* A full plan, said before the form */}

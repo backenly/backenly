@@ -355,7 +355,7 @@ function renderMarkdown(response: BuildResponse, job: BuildJob): string {
     if (flowCount > 0) parts.push(`${flowCount} API group${flowCount > 1 ? 's' : ''}`)
     if (hasAuth) parts.push('authentication')
     if (storageCount > 0) parts.push(`${storageCount} storage bucket${storageCount > 1 ? 's' : ''}`)
-    if (functionCount > 0) parts.push(`${functionCount} AI function${functionCount > 1 ? 's' : ''}`)
+    if (functionCount > 0) parts.push(`${functionCount} function${functionCount > 1 ? 's' : ''}`)
 
     if (parts.length > 0) {
       lines.push(`I built your ${domainHeader}: ${parts.join(', ')}.`)
@@ -548,7 +548,7 @@ function buildReasoning(
   if (builtTypes.includes('auth')) parts.push('authentication')
   if (builtTypes.includes('flow')) parts.push('REST APIs')
   if (builtTypes.includes('storage')) parts.push('file storage')
-  if (builtTypes.includes('function')) parts.push('AI functions')
+  if (builtTypes.includes('function')) parts.push('functions')
   if (builtTypes.includes('permissions')) parts.push('row-level security')
   if (builtTypes.includes('integration')) parts.push('integrations')
   if (builtTypes.includes('realtime')) parts.push('realtime subscriptions')

@@ -17,7 +17,7 @@ import { createErrorResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import {
   getProjectServingState,
   PAUSED_CODE,
-  PAUSED_MESSAGE,
+  pausedMessage,
   pausedDetails,
   type ProjectServingState,
 } from '@/lib/projects/serving-state'
@@ -40,7 +40,7 @@ export function refusalForState(projectId: string, state: ProjectServingState): 
     case 'locked':
       return createErrorResponse(ErrorCodes.FORBIDDEN, LOCKED_MESSAGE, 503)
     case 'paused':
-      return createErrorResponse(PAUSED_CODE, PAUSED_MESSAGE, 503, pausedDetails(projectId, state))
+      return createErrorResponse(PAUSED_CODE, pausedMessage(state.reason), 503, pausedDetails(projectId, state))
     case 'unavailable': {
       const response = createErrorResponse(
         STATE_UNAVAILABLE_CODE,

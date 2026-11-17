@@ -373,14 +373,14 @@ async function verifyFunctions(nodeId: string, projectId: string): Promise<Verif
     const { prisma } = await import('@/lib/db/prisma')
     const fnCount = await prisma.aiFunction.count({ where: { projectId } })
     checks.push({
-      label: 'AI functions created',
+      label: 'Functions created',
       status: fnCount > 0 ? 'pass' : 'warn',
       detail: fnCount > 0
         ? `${fnCount} function${fnCount !== 1 ? 's' : ''} deployed`
         : 'No functions found — may not be required',
     })
   } catch {
-    checks.push({ label: 'AI functions', status: 'warn', detail: 'Could not verify functions' })
+    checks.push({ label: 'Functions', status: 'warn', detail: 'Could not verify functions' })
   }
 
   const passed = checks.every(c => c.status !== 'fail')

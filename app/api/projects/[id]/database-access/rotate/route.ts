@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
-import { rotateDirectAccess, type DirectAccessMode } from '@/lib/services/direct-access'
+import { DirectAccessUnavailableError, rotateDirectAccess, type DirectAccessMode } from '@/lib/services/direct-access'
 
 // ADMIN: rotation mints a new password and returns it, and kills every live
 // session on the old one — credential issuance and revocation in one call.
@@ -21,6 +21,10 @@ export async function POST(request: NextRequest) {
       const credential = await rotateDirectAccess(validated.projectId, mode as DirectAccessMode)
       return NextResponse.json({ credential })
     } catch (err: any) {
+      // Nothing outside can connect with the login, so there is nothing to rotate it for.
+      if (err instanceof DirectAccessUnavailableError) {
+        return NextResponse.json({ error: err.message, code: err.code }, { status: 503 })
+      }
       console.error('[database-access] rotate failed:', err?.message)
       const status = /No .* credential to rotate/.test(err?.message ?? '') ? 404 : 500
       return NextResponse.json({ error: err?.message ?? 'Rotation failed.' }, { status })

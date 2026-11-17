@@ -113,8 +113,34 @@ export function describeOp(op: ResourceOp): string {
   if (fields.length === 1 && switched(fields[0]) && secrets.length === 0) {
     return `${power.charAt(0).toUpperCase()}${power.slice(1)} ${label}`
   }
-  const what = [...fields.map((f) => (switched(f) ? power : humanField(f))), ...secrets.map((s) => `${humanField(s)} (replaced)`)]
+  // Who wrote a function's code goes with a change to the code, and is said
+  // only on its own.
+  const said = op.resource === 'functions' && fields.includes('generatedCode') ? fields.filter((f) => f !== 'codeOrigin') : fields
+  const named = said.map((f) => (switched(f) ? power : fieldName(op, f)))
+  const what = [...new Set([...named, ...secrets.map((s) => `${humanField(s)} (replaced)`)])]
   return `Changed ${label}${what.length ? `: ${what.slice(0, 3).join(', ')}${what.length > 3 ? ` and ${what.length - 3} more` : ''}` : ''}`
+}
+
+/**
+ * A function's fields in History's words. Its code is its code, whoever wrote
+ * it: "generated code" called the code an agent deployed exactly as written
+ * Backenly's (production QA re-test, 2026-11-16, #47). Its trigger is the
+ * event and the table or endpoint together; a schedule's is its schedule.
+ */
+function fieldName(op: ResourceOp, f: string): string {
+  if (op.resource !== 'functions') return humanField(f)
+  const schedule = (op.after ?? op.before)!.fields.triggerType === 'cron'
+  switch (f) {
+    case 'generatedCode':
+      return 'code'
+    case 'codeOrigin':
+      return 'who wrote the code'
+    case 'triggerType':
+    case 'triggerTable':
+      return schedule ? 'schedule' : 'trigger'
+    default:
+      return humanField(f)
+  }
 }
 
 /** One sentence for a change that touched resources. */

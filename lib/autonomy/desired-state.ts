@@ -123,9 +123,10 @@ export interface Invariant {
    * UNCHECKED (see DesiredStateReport.disabled) rather than satisfied. Without
    * this, a probe that answers `[]` because its data source does not exist is
    * indistinguishable from one that looked and found nothing — the exact shape
-   * that let detectMissingRls read green while it was dead.
+   * that let detectMissingRls read green while it was dead. Several, when the
+   * probe needs every one of them.
    */
-  requires?: PlatformCapability
+  requires?: PlatformCapability | readonly PlatformCapability[]
   /**
    * How this guarantee is held.
    *
@@ -223,8 +224,12 @@ export const INVARIANTS: readonly Invariant[] = [
     probe: detectSlowQueryMissingIndexes,
     // The one probe in this catalogue whose data source can be absent from the
     // SERVER. Declared so its silence on a database without the extension is
-    // reported as "not checked", never as "this guarantee holds".
-    requires: 'pg_stat_statements',
+    // reported as "not checked", never as "this guarantee holds". The extension
+    // alone is not enough: the statements that matter are the ones PostgREST,
+    // functions and direct connections run, and their text is readable only to
+    // a role with the privileges of pg_read_all_stats (production QA,
+    // 2026-11-16: 60 slow REST reads, and the invariant read satisfied).
+    requires: ['pg_stat_statements', 'statement_text'],
   },
   {
     id: 'no_index_is_pure_write_cost',
@@ -464,6 +469,17 @@ export interface DesiredStateReport {
   disabled: DisabledInvariant[]
 }
 
+/** The server capabilities an invariant declares it cannot see without. */
+function requirementsOf(inv: Invariant): PlatformCapability[] {
+  if (!inv.requires) return []
+  return typeof inv.requires === 'string' ? [inv.requires] : [...inv.requires]
+}
+
+/** The first capability an invariant needs that this server lacks, or null. */
+function missingCapability(inv: Invariant, states: Map<PlatformCapability, { available: boolean }>): PlatformCapability | null {
+  return requirementsOf(inv).find(c => states.get(c)?.available === false) ?? null
+}
+
 /**
  * Compute the gap between a project's real state and its desired state.
  *
@@ -484,7 +500,7 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
   // Resolve every declared capability ONCE per report, on the server holding
   // the project's data. hasCapability caches for ten minutes per region, so
   // this is a map lookup on all but the first call in a window.
-  const requiredCaps = [...new Set(INVARIANTS.map(i => i.requires).filter(Boolean))] as PlatformCapability[]
+  const requiredCaps = [...new Set(INVARIANTS.flatMap(i => requirementsOf(i)))]
   const capStates = new Map(
     await Promise.all(
       requiredCaps.map(async (c) => [c, await hasCapability(c, region)] as const),
@@ -496,8 +512,7 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
       // Skipped, not failed. Running a measurement probe with no measurement
       // source available produces an empty result that reads exactly like a
       // healthy backend, which is the failure this branch exists to prevent.
-      const cap = inv.requires ? capStates.get(inv.requires) : undefined
-      if (cap && !cap.available) return { inv, findings: null }
+      if (missingCapability(inv, capStates)) return { inv, findings: null }
       // Gated off in this deployment. Reported unchecked, never satisfied.
       if (inv.enabled && !inv.enabled()) return { inv, findings: null }
       // Held by the engine. There is nothing to probe and nothing to report
@@ -515,12 +530,12 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
     const inv = INVARIANTS[i]
 
     if (outcome.status === 'fulfilled' && outcome.value.findings === null) {
-      const cap = capStates.get(inv.requires as PlatformCapability)
+      const missing = missingCapability(inv, capStates)
       disabled.push({
         id: inv.id,
         title: inv.title,
-        capability: inv.requires as PlatformCapability,
-        remediation: cap?.remediation ?? '',
+        capability: missing ?? (requirementsOf(inv)[0] as PlatformCapability),
+        remediation: missing ? capStates.get(missing)?.remediation ?? '' : '',
       })
       // Unchecked ≠ satisfied, for the same reason a thrown probe is not.
       invariants.push({ id: inv.id, title: inv.title, satisfied: false, gaps: [] })
@@ -624,6 +639,10 @@ export function gapIdentity(
     // table too, so by table two functions on `orders` were one gap: while
     // one kept failing, the other's finding outlived its recovery.
     (d.functionId as string | undefined) ??
+    // A broken webhook is located by its TRIGGER and carries no table: two
+    // triggers failing were one gap, so the observer's writer, which keys its
+    // rows by this identity, kept one row for both.
+    (d.triggerId as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`

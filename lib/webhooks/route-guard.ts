@@ -30,6 +30,7 @@
 import { NextResponse } from 'next/server'
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
 import { webhookPlan, type WebhookPlanRefused, type WebhookUse } from '@/lib/webhooks/plan'
+import { planNamesOf } from '@/lib/entitlements/plan-names'
 
 /**
  * VIEWER reads. DEVELOPER creates and edits. ADMIN deletes.
@@ -88,6 +89,7 @@ export async function guardWebhookRoute(
         upgradeRequired: true,
         currentPlan: refused.currentPlan,
         requiredPlan: refused.requiredPlan,
+        ...planNamesOf(refused),
       },
       { status: 403 },
     )

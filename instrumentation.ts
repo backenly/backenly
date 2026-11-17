@@ -286,6 +286,18 @@ export async function register() {
         await runScheduledBackOfficeMaintenance()
       })
 
+      // ── Deleted projects, removed for good, 03:30 UTC ──────────────────────
+      //
+      // Deleting a project keeps it for seven days (lib/projects/deletion.ts).
+      // This removes those past their date with the full deletion a request
+      // used to run, reaching their regions from home as that request did.
+      cron.platform('30 3 * * *', async () => {
+        const { purgeDeletedProjects } = await import('./lib/projects/deletion')
+        await purgeDeletedProjects().catch((err: any) =>
+          console.error('[ProjectPurge] Error:', err?.message)
+        )
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')

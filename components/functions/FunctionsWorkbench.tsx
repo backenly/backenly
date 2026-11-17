@@ -224,6 +224,14 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
         setRefused({ id: fn.id, message: data?.error ?? `Could not turn ${fn.name} ${next === 'active' ? 'on' : 'off'} (${res.status}).` })
         return
       }
+      // Switching off drops the runs queued for it from row changes; say so.
+      const dropped = typeof data?.droppedQueuedRuns === 'number' ? data.droppedQueuedRuns : 0
+      if (dropped > 0) {
+        setPageNote({
+          tone: 'neutral',
+          text: `${fn.name} is off. ${dropped.toLocaleString('en-US')} queued ${dropped === 1 ? 'run' : 'runs'} from row changes ${dropped === 1 ? 'was' : 'were'} dropped and will not run.`,
+        })
+      }
       // The server's answer moves the screen, never the click.
       await fetchFunctions()
     } catch {

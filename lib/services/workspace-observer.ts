@@ -44,6 +44,8 @@ import {
   detectMissingFkIndexes,
   checkAuthIntegrity,
   detectApiCoverageGaps,
+  detectOverPermissiveRls,
+  detectSensitiveColumnsAnyoneCanRead,
 } from '@/lib/core/drift-detector'
 import { checkIntegrationHealth } from '@/lib/core/integration-health'
 import { verifyWorkflows } from '@/lib/core/workflow-verifier'
@@ -487,6 +489,14 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     // Approval-gated, so the loop never mints a finding for it: this is where
     // it reaches the Review Queue, as a removal a person approves or declines.
     detectGuessedConstraints(projectId),
+    // Columns named like credentials or personal data in a table anyone with
+    // the publishable key can read in full. Notify-only, so recorded here.
+    detectSensitiveColumnsAnyoneCanRead(projectId),
+    // An always-true write policy on a table with no owner column: the loop
+    // probes it (rls_policies_are_not_wide_open) but, being the owner's
+    // question, never mints a finding for it. The ones the loop repairs are
+    // left to the loop.
+    detectOverPermissiveRls(projectId).then((found) => found.filter((f) => !f.autoFixable)),
   ]
 
   const settled = await Promise.allSettled(detectors)
@@ -947,6 +957,10 @@ async function writeFinding(
     // One row per rule: keeping one and removing another are two decisions.
     guessed_constraint: ['tableName', 'constraintName'],
     rls_denies_everything: 'tableName',
+    // One row per table: a policy open to everyone on two tables is two
+    // decisions, and so is a table of sensitive columns anyone can read.
+    rls_expression_invalid: 'tableName',
+    sensitive_columns_exposed: 'tableName',
   }
 
   const discriminator = ([] as string[])
@@ -954,15 +968,30 @@ async function writeFinding(
     .map((key) => ({ key, value: (finding.details as Record<string, unknown>)[key] as string | undefined }))
   const keyed = discriminator.length > 0 && discriminator.every((d) => d.value !== undefined)
 
-  const existing = await prisma.healthFinding.findFirst({
-    where: {
-      projectId,
-      type: finding.type,
-      status: { in: ['open', 'pending_approval'] },
-      ...(keyed ? { AND: discriminator.map((d) => ({ details: { path: [d.key], equals: d.value as string } })) } : {}),
-    },
-    select: { id: true, status: true, details: true },
-  })
+  const live = { projectId, type: finding.type, status: { in: ['open', 'pending_approval'] } }
+  const select = { id: true, status: true, details: true } as const
+  // Every other type: the row for this gap, as the repair loop and the reaper
+  // identify it (gapIdentity, lib/autonomy/desired-state.ts). Keyed by type
+  // alone, each `missing_fk` gap (and each orphan table, each broken webhook…)
+  // was written over the one open row of its type: on a row waiting for a
+  // person the new details were merged over the old, so a card titled "orders
+  // has a relation with no foreign key constraint" kept the explanation written
+  // about reviews.user_id (production QA, 2026-11-16). Imported lazily:
+  // desired-state imports this module.
+  const existing = keyed || DISCRIMINATOR[finding.type]
+    ? await prisma.healthFinding.findFirst({
+        where: {
+          ...live,
+          ...(keyed ? { AND: discriminator.map((d) => ({ details: { path: [d.key], equals: d.value as string } })) } : {}),
+        },
+        select,
+      })
+    : await (async () => {
+        const { gapIdentity } = await import('@/lib/autonomy/desired-state')
+        const gap = gapIdentity(finding.type, finding.details as Record<string, unknown>)
+        const rows = await prisma.healthFinding.findMany({ where: live, select, orderBy: { detectedAt: 'desc' } })
+        return rows.find((r) => gapIdentity(finding.type, (r.details ?? {}) as Record<string, unknown>) === gap) ?? null
+      })()
 
   // `detectedAt` moves on every write, so it cannot say how long a problem
   // has persisted. `firstDetectedAt` is carried across updates for that: it is
@@ -1469,33 +1498,80 @@ async function detectBrokenWebhooks(projectId: string): Promise<RawFinding[]> {
   }))
 }
 
+/** Password sign-in, under both of its paths (the second is an alias AI builders generate). */
+const SIGN_IN_PATHS = ['/auth/signin', '/auth/login']
+/** Refused for a wrong email or password (401), or by the sign-in limits after too many failures (429). */
+const FAILED_SIGN_IN = [401, 429]
+const SIGN_IN_WINDOW_MINUTES = 10
+/** Fewest failed sign-ins in the window worth a finding. */
+const SIGN_IN_FAILURE_FLOOR = 20
+/** The window a run must keep up over, at the same rate, to be critical. */
+const SUSTAINED_MINUTES = 60
+
 /**
- * Detect auth error spikes: >5 failed end-user auth requests in 10 minutes.
- * Uses ApiRequestLog targeting /v1/<projectId>/auth paths.
+ * Detect a wave of failed sign-ins: most password sign-ins failing, more of
+ * them than a person mistyping.
+ *
+ * Counts only what a guessing or credential-stuffing run produces: password
+ * sign-ins refused for a wrong email or password, or by the sign-in limits
+ * once the failures from an address or against an account ran out
+ * (lib/security/end-user-signin-limit.ts). It counted every 4xx on any /auth/
+ * path, so an agent's ordinary negative tests (wrong passwords, a duplicate
+ * sign-up, a weak password, signed-out checkouts reading /auth/me) raised
+ * "Critical · possible brute-force" after six of them (production QA,
+ * 2026-11-16). Those are an app working as designed.
+ *
+ * A floor and a share. At least SIGN_IN_FAILURE_FLOOR failed sign-ins in ten
+ * minutes, and no more successful ones: a stuffing run is almost all
+ * failures, and a busy app's typos are a small share of its sign-ins.
+ * Counting per address and per account (Auth0's brute-force protection: ten
+ * failures against one account from one address) is what the sign-in limits
+ * already do at the door; the request log keeps no client address, so this is
+ * the project-wide view of the same thing.
+ *
+ * A warning, and critical only when the run has kept up for an hour at the
+ * same rate. There is nothing in the backend to repair, so it is notify-only
+ * (lib/core/fix-classifier.ts).
  */
-async function detectAuthSpike(projectId: string): Promise<RawFinding[]> {
-  const windowStart = new Date(Date.now() - 10 * 60 * 1000)
+export async function detectAuthSpike(projectId: string): Promise<RawFinding[]> {
+  const count = (minutes: number, statusCode: number[] | { gte: number; lte: number }) =>
+    prisma.apiRequestLog.count({
+      where: {
+        projectId,
+        path: { in: SIGN_IN_PATHS },
+        statusCode: Array.isArray(statusCode) ? { in: statusCode } : statusCode,
+        timestamp: { gte: new Date(Date.now() - minutes * 60_000) },
+        // Production only: refused branch keys and preview auth tests are not an attack.
+        branchId: null,
+      },
+    }).catch(() => 0)
 
-  const count = await prisma.apiRequestLog.count({
-    where: {
-      projectId,
-      path: { contains: '/auth/' },
-      statusCode: { gte: 400, lte: 499 },
-      timestamp: { gte: windowStart },
-      // Production only: refused branch keys and preview auth tests are not an attack.
-      branchId: null,
-    },
-  }).catch(() => 0)
+  const [failed, succeeded] = await Promise.all([
+    count(SIGN_IN_WINDOW_MINUTES, FAILED_SIGN_IN),
+    count(SIGN_IN_WINDOW_MINUTES, { gte: 200, lte: 299 }),
+  ])
+  if (failed < SIGN_IN_FAILURE_FLOOR || failed <= succeeded) return []
 
-  if (count <= 5) return []
+  const [failedHour, succeededHour] = await Promise.all([
+    count(SUSTAINED_MINUTES, FAILED_SIGN_IN),
+    count(SUSTAINED_MINUTES, { gte: 200, lte: 299 }),
+  ])
+  const sustained =
+    failedHour >= SIGN_IN_FAILURE_FLOOR * (SUSTAINED_MINUTES / SIGN_IN_WINDOW_MINUTES) && failedHour > succeededHour
 
   return [{
     type: 'auth_spike',
-    severity: 'critical',
+    severity: sustained ? 'critical' : 'warning',
     details: {
-      errorCount: count,
-      windowMinutes: 10,
-      reason: `${count} auth errors in the last 10 minutes — possible brute-force or misconfiguration`,
+      failedSignIns: failed,
+      successfulSignIns: succeeded,
+      // Read by the finding's summary and the fix history.
+      errorCount: failed,
+      windowMinutes: SIGN_IN_WINDOW_MINUTES,
+      ...(sustained ? { failedSignInsLastHour: failedHour } : {}),
+      reason:
+        `${failed} of ${failed + succeeded} password sign-ins failed in the last ${SIGN_IN_WINDOW_MINUTES} minutes` +
+        (sustained ? `, and ${failedHour} in the last hour` : ''),
     },
     autoFixable: false,
   }]

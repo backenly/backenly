@@ -405,10 +405,9 @@ async function handleDynamicRequest(req: Request, res: Response) {
   const hasAuthSegment = rawPath.includes('auth')
   const lastSegment = rawPath[rawPath.length - 1] ?? ''
   if (hasAuthSegment || AUTH_PATH_SEGMENTS.has(lastSegment)) {
-    res.status(404).json({
-      error: 'Auth endpoint not found. Use /auth/signin (or /auth/login), /auth/signup (or /auth/register).',
-      code: 'NOT_FOUND',
-    })
+    // The routes there are, the same answer the auth router gives.
+    const [projectId, ...rest] = rawPath
+    res.status(404).json(v1NotFoundBody(projectId ?? '', rest))
     return
   }
 

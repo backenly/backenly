@@ -87,6 +87,10 @@ beforeAll(async () => {
   await prisma.$executeRawUnsafe(
     `ALTER TABLE "${schema}".orders ADD CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES "${schema}".customers(id) ON DELETE SET NULL`,
   )
+  // And Backenly's index on it, as a table declared in SQL got one before it
+  // kept only the indexes its statement declares: many live tables carry one
+  // too, and its name has to follow its column as well.
+  await prisma.$executeRawUnsafe(`CREATE INDEX idx_orders_customer_id ON "${schema}".orders (customer_id)`)
   await migrated('CREATE INDEX ON orders (stage)')
 }, 240_000)
 

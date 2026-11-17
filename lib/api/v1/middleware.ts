@@ -13,7 +13,7 @@ import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milesto
 import { recordUsageMetrics } from '@/lib/platform-signals'
 import { noteEndUserActivity } from '@/lib/quota/kernel'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
-import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
+import { PAUSED_CODE, pausedDetails, pausedMessage } from '@/lib/projects/serving-state'
 import { touchProjectActivity } from '@/lib/projects/activity'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
@@ -285,7 +285,7 @@ export async function v1ApiMiddleware(
       context: {} as V1ApiContext,
       response: createErrorResponse(
         PAUSED_CODE,
-        PAUSED_MESSAGE,
+        pausedMessage(project.pauseReason),
         503,
         pausedDetails(projectId, { pausedAt: project.pausedAt, reason: project.pauseReason }),
       ),

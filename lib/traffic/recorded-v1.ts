@@ -37,6 +37,7 @@ import { misdirectedResponse } from '@/lib/data-plane/serving'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 import { servingRefusal } from '@/lib/projects/serving-response'
 import { v1ErrorBody } from '@/lib/api/v1/error-shape'
+import { postgrestErrorBody } from '@/lib/api/v2/error-shape'
 
 /** A project id, as the runtime gate requires before it looks one up. */
 const PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -55,13 +56,26 @@ export function markAsWritten<T extends Response>(response: T): T {
   return response
 }
 
+type ErrorShape = (status: number, body: unknown) => unknown
+
 /**
- * A JSON error with the top-level `code` and `message` every v1 error carries
- * (lib/api/v1/error-shape.ts). A success, a body that is not JSON (the realtime
- * stream), an error that already has both and a function's own reply
+ * The error shape of the door a request came through. /api/v2 answers in
+ * PostgREST's shape (lib/api/v2/error-shape.ts), as the runtime's own v2
+ * errors do; every other door in v1's, with a top-level `code` and `message`.
+ * The v2 route is wrapped here too, so its refusals and forwarding errors used
+ * to leave in v1's shape (production QA re-test, 2026-11-16, #16).
+ */
+function errorShapeFor(pathname: string): ErrorShape {
+  return pathname.startsWith('/api/v2/') ? postgrestErrorBody : v1ErrorBody
+}
+
+/**
+ * A JSON error in its door's shape: v1's top-level `code` and `message`
+ * (lib/api/v1/error-shape.ts) by default. A success, a body that is not JSON
+ * (the realtime stream), an error already in shape and a function's own reply
  * (markAsWritten) are returned as they are.
  */
-async function shapedError<T extends Response>(response: T): Promise<T> {
+async function shapedError<T extends Response>(response: T, shape: ErrorShape = v1ErrorBody): Promise<T> {
   if (response.status < 400 || writtenByFunctions.has(response)) return response
   if (!(response.headers.get('content-type') ?? '').includes('application/json')) return response
   let body: unknown
@@ -73,7 +87,7 @@ async function shapedError<T extends Response>(response: T): Promise<T> {
   } catch {
     return response
   }
-  const shaped = v1ErrorBody(response.status, body)
+  const shaped = shape(response.status, body)
   if (shaped === body) return response
   const headers = new Headers(response.headers)
   headers.delete('content-length')
@@ -91,6 +105,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
     // Next always hands an absolute URL; the base only keeps a relative one (as
     // some callers construct) from throwing before the route runs.
     const url = new URL(request.url, 'http://localhost')
+    const shape = errorShapeFor(url.pathname)
     try {
       // First: a project of another region is not served here at all, so no
       // key of it is looked up, checked or rate-limited in the wrong region.
@@ -99,7 +114,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
         const misdirected = await misdirectedResponse(requestedProject, resolvePublicBaseUrl(request))
         if (misdirected) {
           statusCode = misdirected.status
-          return await shapedError(misdirected as unknown as T)
+          return await shapedError(misdirected as unknown as T, shape)
         }
         // Then a project that is locked, paused or unreadable is not served
         // either, by any route here: the same gate, codes and words as the
@@ -110,7 +125,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
           const refused = await servingRefusal(requestedProject)
           if (refused) {
             statusCode = refused.status
-            return await shapedError(refused as unknown as T)
+            return await shapedError(refused as unknown as T, shape)
           }
         }
       }
@@ -119,9 +134,9 @@ export function recordedV1<R extends Request, C, T extends Response>(
         (await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url))
       if (refusal) {
         statusCode = refusal.status
-        return NextResponse.json(v1ErrorBody(refusal.status, refusal.body), { status: refusal.status }) as unknown as T
+        return NextResponse.json(shape(refusal.status, refusal.body), { status: refusal.status }) as unknown as T
       }
-      const response = await shapedError(await handler(request, context))
+      const response = await shapedError(await handler(request, context), shape)
       statusCode = response.status
       // Backenly's own synthetic requests are neither recorded nor metered.
       if (isInternalTraffic(internalHeader)) return response
@@ -155,4 +170,16 @@ export function recordedV1<R extends Request, C, T extends Response>(
         .catch(() => {})
     }
   }
+}
+
+/**
+ * Give a route outside /api/v1 v1's error shape: every JSON error it answers
+ * carries a top-level `code` and `message`, beside what it already says. For
+ * the app-facing routes that are not under /api/v1, such as a stored file's
+ * public address (app/api/storage/files/[fileId]/download).
+ */
+export function withV1ErrorShape<R extends Request, C, T extends Response>(
+  handler: (request: R, context: C) => T | Promise<T>,
+): (request: R, context: C) => Promise<T> {
+  return async (request, context) => shapedError(await handler(request, context))
 }

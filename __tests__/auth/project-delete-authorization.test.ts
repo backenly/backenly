@@ -37,6 +37,9 @@ jest.mock('@/lib/auth/server', () => ({
     userId: currentUserId,
     email: `${currentUserId}@test.invalid`,
     role: 'user',
+    // Signed in just now: a deletion needs a recent sign-in
+    // (tests/integration/deletion-asks-for-name-and-sign-in.spec.ts).
+    signedInAt: new Date(),
   })),
 }))
 
@@ -77,14 +80,14 @@ async function fixture(role: string) {
 
   const p = await prisma.project.create({
     data: { name: `del-${randomUUID().slice(0, 8)}`, userId: ownerId, organizationId: org.id },
-    select: { id: true },
+    select: { id: true, name: true },
   })
   createdProjectIds.push(p.id)
-  return { ownerId, memberId, projectId: p.id }
+  return { ownerId, memberId, projectId: p.id, name: p.name }
 }
 
-/** The DELETE handler reads the project id from the END of the path. */
-function req(projectId: string): any {
+/** The DELETE handler reads the project id from the END of the path; `confirm` is the project's name. */
+function req(projectId: string, confirm?: string): any {
   const url = `http://localhost:3000/api/projects/${projectId}`
   return {
     method: 'DELETE',
@@ -92,12 +95,13 @@ function req(projectId: string): any {
     nextUrl: { pathname: `/api/projects/${projectId}` },
     headers: { get: () => null },
     cookies: { get: () => undefined, getAll: () => [] },
-    json: async () => ({}),
+    json: async () => (confirm === undefined ? {} : { confirm }),
   }
 }
 
+/** Still there and not asked to be deleted (deleting keeps it seven days: lib/projects/deletion.ts). */
 const stillExists = async (id: string) =>
-  (await prisma.project.findUnique({ where: { id }, select: { id: true } })) !== null
+  (await prisma.project.count({ where: { id, deletedAt: null } })) === 1
 
 beforeAll(() => {
   assertSafeTestDatabase()
@@ -126,7 +130,7 @@ describe('DELETE /api/projects/[id]', () => {
     // demote them out of their own project.
     currentUserId = f.ownerId
 
-    const res: any = await DELETE(req(f.projectId), {} as any)
+    const res: any = await DELETE(req(f.projectId, f.name), {} as any)
 
     expect(res.status).toBe(200)
     expect(await stillExists(f.projectId)).toBe(false)
@@ -138,7 +142,8 @@ describe('DELETE /api/projects/[id]', () => {
     const strangerId = await makeUser()
     currentUserId = strangerId
 
-    const real: any = await DELETE(req(f.projectId), {} as any)
+    // Even with the right name: access is decided before the confirmation is read.
+    const real: any = await DELETE(req(f.projectId, f.name), {} as any)
     const ghost: any = await DELETE(req(randomUUID()), {} as any)
 
     // Identical answers for a project that exists but is not theirs and one

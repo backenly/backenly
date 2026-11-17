@@ -247,6 +247,25 @@ export async function getSchemaSnapshot(
 }
 
 /**
+ * Whether `table` carried realtime's trigger in the newest snapshot that has
+ * the table, or null when none has it or the one that does predates trigger
+ * capture. A snapshot is taken after every governed change
+ * (lib/changes/freshness.ts), so this is how the table was last recorded,
+ * also once it has gone missing.
+ */
+export async function streamedWhenLastRecorded(projectId: string, table: string): Promise<boolean | null> {
+  const { prisma } = await import('@/lib/db/prisma')
+  const record = await prisma.workspaceSchemaSnapshot.findFirst({
+    where: { projectId, tables: { array_contains: [{ name: table }] } },
+    orderBy: { versionNum: 'desc' },
+    select: { tables: true },
+  })
+  const seen = (record?.tables as unknown as TableSnapshot[] | undefined)?.find((t) => t.name === table)
+  if (!seen?.triggers) return null
+  return seen.triggers.some((t) => t.name === 'backenly_realtime')
+}
+
+/**
  * Diff between any two schema versions.
  * Returns a structured diff showing exactly what changed at the column level.
  */

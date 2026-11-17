@@ -216,6 +216,12 @@ export interface AuthorityDecision {
 
   /** Every input that reduced the answer, in the order it applied. */
   narrowedBy: string[]
+  /**
+   * The same inputs, each with the sentence that says what it was. `reasons`
+   * also carries lines that narrowed nothing (a delegation that permitted the
+   * action, the closing summary), so it cannot be read beside `narrowedBy`.
+   */
+  narrowings: Array<{ code: string; reason: string }>
   /** Ordered, machine-readable, human-legible. */
   reasons: string[]
   /**
@@ -331,6 +337,7 @@ function judgeSensor(req: SensorRequirement, probes: ProbeOutcome[]): SensorEvid
 export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
   const narrowedBy: string[] = []
   const reasons: string[] = []
+  const narrowings: Array<{ code: string; reason: string }> = []
   let blocker: string | null = null
 
   const cls = actionClass(input.actionClassId)
@@ -366,6 +373,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       intent: null,
       delegation: null,
       narrowedBy,
+      narrowings,
       reasons,
       blocker,
     }
@@ -373,6 +381,8 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
 
   const frozenEarly = (why: string, blockerText: string): AuthorityDecision => {
     narrowedBy.push(why)
+    // Each path that freezes says why just before it calls this.
+    narrowings.push({ code: why, reason: reasons[reasons.length - 1] ?? '' })
     return {
       ...base,
       decision: 'FREEZE',
@@ -381,6 +391,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       intent: null,
       delegation: null,
       narrowedBy,
+      narrowings,
       reasons,
       blocker: blockerText,
     }
@@ -422,6 +433,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
 
   const frozen = (why: string, blockerText: string): AuthorityDecision => {
     narrowedBy.push(why)
+    narrowings.push({ code: why, reason: reasons[reasons.length - 1] ?? '' })
     blocker = blockerText
     return {
       ...base,
@@ -431,6 +443,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       intent: intentReceipt,
       delegation: null,
       narrowedBy,
+      narrowings,
       reasons,
       blocker,
     }
@@ -486,6 +499,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
   if (!mode.repairsAreApplied) {
     narrowedBy.push(`deployment_${mode.reason}`)
     reasons.push(mode.explanation)
+    narrowings.push({ code: `deployment_${mode.reason}`, reason: mode.explanation })
   }
 
   // ── Everything below can only narrow ──────────────────────────────────────
@@ -494,6 +508,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
     if (to === 'PROPOSE_ONLY' && decision === 'AUTO_EXECUTE') decision = 'PROPOSE_ONLY'
     narrowedBy.push(why)
     reasons.push(reason)
+    narrowings.push({ code: why, reason })
   }
 
   if (!mode.repairsAreApplied) {
@@ -679,6 +694,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
     intent: intentReceipt,
     delegation: delegationReceipt,
     narrowedBy,
+    narrowings,
     reasons,
     blocker,
   }

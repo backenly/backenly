@@ -213,7 +213,7 @@ const MCP_TEXT: Record<string, { description: string; args: Record<string, strin
       'values, triggers, and RLS policies with their roles. Read it before writing to a table. To edit a policy with ' +
       'set_rls, send back its editableUsing / editableCheck (raw using / withCheck are refused). A USING (true) policy ' +
       `for an internal role only is not open access. Side-effect free. ${docsPointer('database')}`,
-    args: { tableName: 'The table.' },
+    args: { tableName: 'The table.', branchId: 'A preview branch id: read that branch, not production.' },
   },
   set_rls: {
     description:

@@ -337,8 +337,28 @@ export async function detectSchemaDrift(projectId: string): Promise<Reconciliati
     }
 
     // 6. missing_index — FK columns without indexes
+    //
+    // On a table declared in SQL only a column with a foreign key it declared:
+    // such a table has the indexes its SQL declares and no guesses from column
+    // names (lib/ai/minimal-executor.ts, executeCreateTable), as the
+    // relationships_are_indexed guarantee asks (lib/core/drift-detector.ts).
+    const { tablesDeclaredInSql } = await import('@/lib/db/declared-tables')
+    const declared = await tablesDeclaredInSql(projectId).catch(() => new Set<string>())
+    const declaredKeys = declared.size === 0 ? new Set<string>() : new Set(
+      (await pgQuery<{ table_name: string; column_name: string }>(
+        projectId,
+        `SELECT c.relname AS table_name, a.attname AS column_name
+           FROM pg_constraint con
+           JOIN pg_class c ON c.oid = con.conrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = con.conkey[1]
+          WHERE con.contype = 'f' AND n.nspname = $1 AND array_length(con.conkey, 1) = 1`,
+        [schema],
+      )).map((r) => `${r.table_name}.${r.column_name}`),
+    )
     const fkColsInActual = actualCols.filter(
-      (r) => r.column_name.endsWith('_id') && r.column_name !== 'id',
+      (r) => r.column_name.endsWith('_id') && r.column_name !== 'id' &&
+        (!declared.has(r.table_name) || declaredKeys.has(`${r.table_name}.${r.column_name}`)),
     )
 
     if (fkColsInActual.length > 0) {
@@ -541,10 +561,18 @@ export async function applyReconciliationMigrations(
   }
 
   // Live apply — run each migration in its own transaction so one failure
-  // does not prevent subsequent migrations from being attempted.
+  // does not prevent subsequent migrations from being attempted. An index built
+  // CONCURRENTLY cannot run inside a transaction block, so it runs on its own:
+  // in one, every missing_index migration failed.
   for (const sql of migrations) {
     const client: PoolClient = await (await pgPool(projectId)).connect()
+    const online = /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/i.test(sql)
     try {
+      if (online) {
+        await client.query(sql)
+        applied++
+        continue
+      }
       await client.query('BEGIN')
       await client.query(sql)
       await client.query('COMMIT')

@@ -1,5 +1,6 @@
 -- ============================================================================
--- Layer 1 (managed_provisioning): the app role may create workspace schemas.
+-- Layer 1 (managed_provisioning): the app role may create workspace schemas,
+-- and may read the statement statistics of every role.
 -- ============================================================================
 --
 -- Under the current architecture a project's data lives in
@@ -15,9 +16,11 @@
 -- invisible too. This script exists to make the privilege explicit, idempotent
 -- and SELF-VERIFYING.
 --
--- It grants exactly one privilege. It does not grant SUPERUSER, CREATEDB,
--- CREATEROLE or BYPASSRLS, it does not transfer ownership, and it refuses if it
--- finds the role has been broadened by something else.
+-- It grants exactly two privileges: CREATE on the database, and the
+-- privileges of pg_read_all_stats (statement statistics, section below). It
+-- does not grant SUPERUSER, CREATEDB, CREATEROLE or BYPASSRLS, it does not
+-- transfer ownership, and it refuses if it finds the role has been broadened
+-- by something else.
 
 \set ON_ERROR_STOP on
 
@@ -41,6 +44,19 @@ GRANT CREATE ON DATABASE :"dbname" TO backenly_user;
 SELECT has_database_privilege('backenly_user', current_database(), 'CREATE')::text AS after_create \gset
 \echo 'after:  has_database_privilege(backenly_user, CREATE) =' :after_create
 
+-- Statement statistics. PostgREST runs every REST request as anon,
+-- authenticated or service_role, and PostgreSQL shows the text of a statement
+-- another role ran only to a role holding the privileges of pg_read_all_stats.
+-- Measured 2026-11-16: without them the slow-query checks saw no REST read.
+-- The role already reaches every workspace, so this adds no access to data.
+SELECT pg_has_role('backenly_user', 'pg_read_all_stats', 'USAGE')::text AS before_stats \gset
+\echo 'before: pg_has_role(backenly_user, pg_read_all_stats, USAGE) =' :before_stats
+
+GRANT pg_read_all_stats TO backenly_user;
+
+SELECT pg_has_role('backenly_user', 'pg_read_all_stats', 'USAGE')::text AS after_stats \gset
+\echo 'after:  pg_has_role(backenly_user, pg_read_all_stats, USAGE) =' :after_stats
+
 -- Carried through a runtime setting, not a psql variable: psql does NOT
 -- interpolate `:vars` inside a dollar-quoted block, so the obvious form is a
 -- syntax error at run time and nowhere else.
@@ -63,6 +79,13 @@ BEGIN
       RAISE EXCEPTION 'the GRANT reported success but the privilege is still absent';
     END IF;
     RAISE NOTICE 'backenly_user does NOT hold CREATE on % (measurement only)', current_database();
+  END IF;
+
+  IF NOT pg_has_role('backenly_user', 'pg_read_all_stats', 'USAGE') THEN
+    IF enforce THEN
+      RAISE EXCEPTION 'the GRANT of pg_read_all_stats reported success but backenly_user does not hold its privileges';
+    END IF;
+    RAISE NOTICE 'backenly_user does NOT hold the privileges of pg_read_all_stats (measurement only)';
   END IF;
 
   -- The narrow fix must stay narrow. If any of these is true, something else

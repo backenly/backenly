@@ -231,6 +231,22 @@ export const PAUSED_MESSAGE =
   'This project is paused because it has not been used recently. ' +
   'Its owner can resume it from the dashboard.'
 
+/**
+ * The pause a deletion sets (lib/projects/deletion.ts): the project is kept for
+ * seven days and then removed for good. Every door answers it with the same
+ * PROJECT_PAUSED code, so a client that stops on a pause stops here too; only
+ * the words, and where its owner goes, differ.
+ */
+export const DELETED_PAUSE_REASON = 'deleted'
+
+export const DELETED_MESSAGE =
+  'This project was deleted. Its owner can restore it from the dashboard until it is removed for good, 7 days after it was deleted.'
+
+/** The message for a paused project, by why it is paused. */
+export function pausedMessage(reason: string | null | undefined): string {
+  return reason === DELETED_PAUSE_REASON ? DELETED_MESSAGE : PAUSED_MESSAGE
+}
+
 /** Where an owner resumes it, relative to the dashboard origin. */
 export function resumePath(projectId: string): string {
   return `/app/projects/${projectId}`
@@ -241,20 +257,25 @@ export function pausedDetails(
   state: { pausedAt: Date; reason: string | null },
 ): Record<string, string | null> {
   const origin = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, '')
+  const deleted = state.reason === DELETED_PAUSE_REASON
+  // A deleted project is restored from the Projects page; its own page is gone.
+  const path = deleted ? '/app' : resumePath(projectId)
   // Absolute only when this process knows the dashboard's origin. A guessed
   // host would send a self-hoster's users to somebody else's site.
-  const resumeUrl = origin ? `${origin}${resumePath(projectId)}` : null
+  const resumeUrl = origin ? `${origin}${path}` : null
   return {
     pausedAt: state.pausedAt.toISOString(),
     reason: state.reason,
-    resumePath: resumePath(projectId),
+    resumePath: path,
     resumeUrl,
     // `hint` and `fixUrl` are the fields the SDK's BackenlyError already turns
     // into a console banner, so a developer sees why every call is failing and
     // where to fix it without opening the network tab.
-    hint:
-      'This project is paused, so every API call is refused until it is resumed. ' +
-      'Its owner can resume it from the Backenly dashboard.',
+    hint: deleted
+      ? 'This project was deleted, so every API call is refused. Its owner can restore it from the Projects page of the ' +
+        'Backenly dashboard until it is removed for good, 7 days after it was deleted.'
+      : 'This project is paused, so every API call is refused until it is resumed. ' +
+        'Its owner can resume it from the Backenly dashboard.',
     fixUrl: resumeUrl,
   }
 }

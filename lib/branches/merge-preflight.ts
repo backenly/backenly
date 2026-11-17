@@ -21,14 +21,22 @@
 
 import { parseMigration, type PlannedAction } from '@/lib/mcp/migration-parser'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { asWorkspaceOwner } from '@/lib/data-plane/as-owner'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { quoteIdent as q } from '@/lib/changes/names'
 import { validateBooleanExpression } from '@/lib/db/sql-expression'
 
 type Db = Awaited<ReturnType<typeof workspaceRawClient>>
 
+/**
+ * Whether `sql` finds a row, looking at every row of production's tables
+ * (lib/data-plane/as-owner.ts). Asked as nobody, row-level security hid rows
+ * from the check: `users` read as empty, so a valid key was refused, and
+ * duplicates or empty values went unseen. One transaction per probe, so a probe
+ * that cannot run does not stop the next.
+ */
 async function any(db: Db, sql: string, ...params: unknown[]): Promise<boolean> {
-  const rows = await db.$queryRawUnsafe<unknown[]>(`SELECT 1 FROM (${sql}) probe LIMIT 1`, ...params)
+  const rows = await asWorkspaceOwner(db, (tx) => tx.$queryRawUnsafe<unknown[]>(`SELECT 1 FROM (${sql}) probe LIMIT 1`, ...params))
   return rows.length > 0
 }
 

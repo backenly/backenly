@@ -6,7 +6,7 @@ import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
 import crypto from 'crypto'
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
-import { mintKey } from '@/lib/auth/key-prefix'
+import { keyKind, mintKey } from '@/lib/auth/key-prefix'
 import { governedChange } from '@/lib/changes/ledger'
 import { canAdministerProject } from '@/lib/edition/guard'
 
@@ -124,6 +124,8 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
         id: apiKey.id,
         key: fullKey, // Only returned on rotation
         keyPrefix,
+        // A rotated key keeps its settings, so it is the same kind of key.
+        kind: keyKind(apiKey),
       },
       propagation,
       message: 'API key rotated successfully. Save the new key - it will not be shown again.',

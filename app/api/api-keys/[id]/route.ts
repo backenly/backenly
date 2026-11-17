@@ -1,7 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { isSharedKey } from '@/lib/security/shared-key'
+import { clientWindowOf, isSharedKey } from '@/lib/security/shared-key-rate'
+import { keyKind } from '@/lib/auth/key-prefix'
 import { confirmPropagation } from '@/lib/auth-projection/confirm'
 import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
@@ -50,7 +51,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
         id: apiKey.id,
         name: apiKey.name,
         keyPrefix: apiKey.keyPrefix,
-        keyType: apiKey.keyType,
+        // What the key is (lib/auth/key-prefix.ts), as the list and creation say it.
+        kind: keyKind(apiKey),
         role: apiKey.role,
         permissions: apiKey.permissions,
         capabilities: apiKey.capabilities,
@@ -61,6 +63,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
         expiresAt: apiKey.expiresAt,
         rateLimit: apiKey.rateLimit,
         rateLimitWindow: apiKey.rateLimitWindow,
+        clientWindow: clientWindowOf({ ...apiKey, shared: isSharedKey(apiKey) }),
         requestCount: apiKey.requestCount,
         resetAt: apiKey.resetAt,
       },
@@ -179,7 +182,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
         id: updated!.id,
         name: updated!.name,
         keyPrefix: updated!.keyPrefix,
-        keyType: updated!.keyType,
+        kind: keyKind(updated!),
         role: updated!.role,
         permissions: updated!.permissions,
         capabilities: updated!.capabilities,
@@ -190,6 +193,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
         expiresAt: updated!.expiresAt,
         rateLimit: updated!.rateLimit,
         rateLimitWindow: updated!.rateLimitWindow,
+        clientWindow: clientWindowOf({ ...updated!, shared: isSharedKey(updated!) }),
         requestCount: updated!.requestCount,
         resetAt: updated!.resetAt,
       },

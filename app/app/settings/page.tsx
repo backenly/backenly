@@ -32,7 +32,9 @@ import { FLOAT, PAGE_GUTTER, PAGE_WIDTH, RAISE } from '@/components/console/toke
 import { Avatar, usePlanName } from '@/components/shell/ConsoleChrome'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
-import { deleteAccount, signOut } from '@/lib/api/auth'
+import { AuthRequestError, deleteAccount, signOut } from '@/lib/api/auth'
+import type { Reauthentication } from '@/lib/api/projects'
+import { SignInAgain } from '@/components/console/SignInAgain'
 
 type Section = 'profile' | 'security' | 'notifications' | 'recovery' | 'support' | 'danger'
 
@@ -101,6 +103,10 @@ export default function SettingsPage() {
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [deletingAccount, setDeletingAccount] = useState(false)
+  // Set when the server asks for a sign-in from the last ten minutes first.
+  const [deleteReauth, setDeleteReauth] = useState<Reauthentication | null>(null)
+  // The account's email, typed back: the server deletes with nothing else.
+  const deleteConfirmed = !!user?.email && deleteConfirmText.trim().toLowerCase() === user.email.toLowerCase()
 
   // Password
   const [resetLoading, setResetLoading] = useState(false)
@@ -169,15 +175,21 @@ export default function SettingsPage() {
   }
 
   const handleDeleteAccount = async () => {
-    if (deleteConfirmText !== 'DELETE') return
+    if (!deleteConfirmed) return
     setDeletingAccount(true)
+    setDeleteReauth(null)
     try {
       // On success the document is replaced; the modal stays on "Deleting…"
       // until it is, rather than closing over the deleted account's settings.
-      await deleteAccount()
-    } catch {
-      showToast('Failed to delete account', 'error')
+      await deleteAccount(deleteConfirmText.trim())
+    } catch (err) {
       setDeletingAccount(false)
+      if (err instanceof AuthRequestError && err.code === 'REAUTH_REQUIRED' && err.reauth) {
+        // The modal stays open: sign in again here, then the deletion runs.
+        setDeleteReauth(err.reauth)
+        return
+      }
+      showToast('Failed to delete account', 'error')
       setShowDeleteModal(false)
       setDeleteConfirmText('')
     }
@@ -365,7 +377,7 @@ export default function SettingsPage() {
 
             {activeSection === 'support' && <SupportSection userEmail={user?.email} />}
 
-            {activeSection === 'danger' && <DangerSection onOpenDelete={() => setShowDeleteModal(true)} />}
+            {activeSection === 'danger' && <DangerSection onOpenDelete={() => { setDeleteReauth(null); setShowDeleteModal(true) }} />}
           </>
         )}
       </div>
@@ -395,25 +407,28 @@ export default function SettingsPage() {
               </ul>
             </div>
             <div className="mt-4">
-              <KitField label={<span>Type <span className="font-mono text-zinc-50">DELETE</span> to confirm</span>}>
+              <KitField label={<span>Type your email, <span className="font-mono text-zinc-50 [overflow-wrap:anywhere]">{user?.email}</span>, to confirm</span>}>
                 <KitInput
                   value={deleteConfirmText}
                   onChange={(e) => setDeleteConfirmText(e.target.value)}
-                  placeholder="DELETE"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   autoFocus
                   className="font-mono"
                 />
               </KitField>
+              {deleteReauth && <SignInAgain reauth={deleteReauth} onSignedIn={() => void handleDeleteAccount()} />}
             </div>
             <div className="mt-5 flex items-center justify-end gap-2">
-              <KitButton variant="secondary" onClick={() => { setShowDeleteModal(false); setDeleteConfirmText('') }} disabled={deletingAccount}>
+              <KitButton variant="secondary" onClick={() => { setShowDeleteModal(false); setDeleteConfirmText(''); setDeleteReauth(null) }} disabled={deletingAccount}>
                 Cancel
               </KitButton>
               <KitButton
                 variant="danger"
                 icon={deletingAccount ? undefined : Trash2}
                 onClick={handleDeleteAccount}
-                disabled={deletingAccount || deleteConfirmText !== 'DELETE'}
+                disabled={deletingAccount || !deleteConfirmed}
               >
                 {deletingAccount ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Deleting…</> : 'Delete account'}
               </KitButton>

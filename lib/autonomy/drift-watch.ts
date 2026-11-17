@@ -15,8 +15,8 @@
  *
  *   adoptExternalSchema — the fix (ADOPT_EXTERNAL_SCHEMA executor action).
  *     Reconciles platform reality onto live reality, Kubernetes-style:
- *       • registers live tables that have no platform metadata (API + RLS +
- *         realtime via the caller-supplied registerTable, i.e. REGISTER_TABLE)
+ *       • registers live tables that have no platform metadata (API + RLS
+ *         via the caller-supplied registerTable, i.e. REGISTER_TABLE)
  *       • refreshes API metadata for altered tables
  *       • prunes metadata whose physical table is gone (ApiDefinition cascades)
  *       • re-baselines the WorkspaceSchemaSnapshot so shadow-mutation probes

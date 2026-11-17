@@ -195,13 +195,45 @@ export async function updateProject(id: string, projectData: UpdateProjectData):
   return data.data
 }
 
-export async function deleteProject(id: string): Promise<void> {
+/** How the signed-in account can sign in again (lib/auth/recent-sign-in.ts). */
+export interface Reauthentication {
+  email: string | null
+  password: boolean
+  provider: 'google' | 'github' | null
+}
+
+/**
+ * A deletion the server refused, with its code: `REAUTH_REQUIRED` carries how
+ * the person can sign in again; `CONFIRMATION_REQUIRED` means the name sent was
+ * not the project's.
+ */
+export class DeleteRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+    readonly reauth: Reauthentication | null = null,
+  ) {
+    super(message)
+    this.name = 'DeleteRefusedError'
+  }
+}
+
+/**
+ * Delete a project. `confirm` is its name, as the person typed it: the server
+ * refuses any other, and refuses a session signed in more than ten minutes ago
+ * (DeleteRefusedError with code REAUTH_REQUIRED).
+ */
+export async function deleteProject(id: string, confirm: string): Promise<void> {
   const response = await fetch(`/api/projects/${id}`, {
     method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm }),
   })
-  const data = await response.json()
-  if (!data.success) throw new Error(data.error || 'Failed to delete project')
-  
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data.success) {
+    throw new DeleteRefusedError(data.error || 'Failed to delete project', typeof data.code === 'string' ? data.code : null, data.reauth ?? null)
+  }
+
   // Invalidate cache
   listCache.clear()
   projectCache.delete(id)

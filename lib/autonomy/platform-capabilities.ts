@@ -11,6 +11,12 @@
  *   • lib/autonomy/slow-query-index.ts  (the `slow_query_missing_index` repair)
  *   • lib/ai/infra-intelligence.ts      (the slow-query section of the report)
  *
+ * `statement_text` is the other half: the extension installed, and the role the
+ * probes read with allowed to see the text of statements other roles ran
+ * (superuser, or the privileges of pg_read_all_stats). Without it the extension
+ * answers, and every statement PostgREST, a function or a direct connection
+ * ran reads `<insufficient privilege>`.
+ *
  * ── Why this module exists rather than each probe checking for itself ────────
  *
  * Both already checked, and both handled the absence the only way they could:
@@ -45,7 +51,7 @@
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { regionPool } from '@/lib/data-plane/regional'
 
-export type PlatformCapability = 'pg_stat_statements' | 'pgstattuple'
+export type PlatformCapability = 'pg_stat_statements' | 'pgstattuple' | 'statement_text'
 
 export interface CapabilityState {
   available: boolean
@@ -72,6 +78,17 @@ const REMEDIATION: Record<PlatformCapability, string> = {
     'installed. Add `shared_preload_libraries = \'pg_stat_statements\'` to postgresql.conf, ' +
     'restart PostgreSQL, then run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`. ' +
     'Until then Backenly can see missing indexes by SHAPE but not by MEASUREMENT.',
+  // The extension can be installed and still show Backenly nothing that
+  // matters: PostgreSQL shows the text of a statement another role ran only to
+  // a role holding the privileges of pg_read_all_stats, and PostgREST runs every
+  // REST request as anon, authenticated or service_role. Without them every REST
+  // read is `<insufficient privilege>` (production QA, 2026-11-16).
+  statement_text:
+    'Measured query latency cannot be attributed: Backenly\'s database role cannot read the text of ' +
+    'statements other roles ran, which is every REST request (PostgREST runs them as anon, ' +
+    'authenticated or service_role), every function and every direct connection. Grant it the ' +
+    'privileges of pg_read_all_stats: `GRANT pg_read_all_stats TO <the application role>;` ' +
+    '(the regional database procedure and the home privilege job do this). No restart needed.',
   // Unlike pg_stat_statements this needs no preload and no restart, which is
   // worth stating: the remedy is one statement.
   pgstattuple:
@@ -112,10 +129,18 @@ export async function hasCapability(
 
   let state: CapabilityState
   try {
-    const res = await pool.query(
-      `SELECT 1 FROM pg_extension WHERE extname = $1 LIMIT 1`,
-      [cap],
-    )
+    const res = cap === 'statement_text'
+      // Asked as the role the probes read with: a superuser, or a role with the
+      // privileges of pg_read_all_stats, sees every role's statement text.
+      ? await pool.query(
+          `SELECT 1 FROM pg_roles
+            WHERE rolname = current_user
+              AND (rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'USAGE'))`,
+        )
+      : await pool.query(
+          `SELECT 1 FROM pg_extension WHERE extname = $1 LIMIT 1`,
+          [cap],
+        )
     const available = res.rows.length > 0
     state = {
       available,
@@ -127,8 +152,8 @@ export async function hasCapability(
       available: false,
       indeterminate: true,
       remediation:
-        `Could not check whether ${cap} is installed (${err?.message ?? 'query failed'}). ` +
-        `Treating it as unavailable.`,
+        `Could not check whether ${cap === 'statement_text' ? 'other roles\' statement text is readable' : `${cap} is installed`} ` +
+        `(${err?.message ?? 'query failed'}). Treating it as unavailable.`,
     }
   }
 

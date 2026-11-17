@@ -50,7 +50,9 @@ export async function projectCreationVerdict(
   // The plan the project counts against: inside an organization, the
   // organization's; elsewhere, the caller's.
   const billingAccount = account.organizationId ?? account.ownerId
-  const existingCount = await prisma.project.count({ where: accountProjectsWhere(billingAccount) })
+  // A project asked to be deleted no longer counts (lib/projects/deletion.ts):
+  // deleting one frees its place on the plan, and restoring takes it back.
+  const existingCount = await prisma.project.count({ where: { AND: [accountProjectsWhere(billingAccount), { deletedAt: null }] } })
   if (opts.initialize) await initializeAccountEntitlements(userId)
 
   const limit = await enforceProjectCreation(billingAccount, existingCount)

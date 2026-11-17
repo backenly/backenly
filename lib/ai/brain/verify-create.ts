@@ -37,6 +37,7 @@ import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { rlsSessionParams, rlsSessionSql } from '@/lib/services/rls-session'
 import { inferRlsPlan, type RlsPlan } from '@/lib/services/rls-ownership'
 import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
+import { purgeAgainLater } from '@/lib/services/check-account-cleanup'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 import { loadCheckConstraintValues, loadFkColumnMappings } from '../behavioral-verifier'
 import type { EndpointTestResult } from './verifier'
@@ -50,6 +51,11 @@ export interface CreateTestTarget {
   appUrl: string
   anonKey: string
   timeoutMs: number
+  /**
+   * How long after a sign-up that did not answer its address is purged again
+   * (lib/services/check-account-cleanup.ts). The default suits production.
+   */
+  purgeAgainAfterMs?: number
 }
 
 /** The end-user table signup writes to: a reference to it is a reference to the test user. */
@@ -340,7 +346,8 @@ async function removeInserted(projectId: string, schema: string, rows: Inserted[
 type Signup =
   | { kind: 'user'; userId: string; token: string; email: string }
   | { kind: 'no_auth' }
-  | { kind: 'failed'; detail: string }
+  /** `answered`: false when the request got no answer, so the account may still be created. */
+  | { kind: 'failed'; detail: string; email: string; answered: boolean }
 
 async function signUpTestUser(target: CreateTestTarget, tag: string): Promise<Signup> {
   const email = `__http_bv_${Date.now()}_${tag}@backenly.internal`
@@ -354,19 +361,19 @@ async function signUpTestUser(target: CreateTestTarget, tag: string): Promise<Si
       signal: AbortSignal.timeout(target.timeoutMs),
     })
   } catch (err) {
-    return { kind: 'failed', detail: `POST ${path} did not answer (${err instanceof Error ? err.message : 'unknown'})` }
+    return { kind: 'failed', detail: `POST ${path} did not answer (${err instanceof Error ? err.message : 'unknown'})`, email, answered: false }
   }
   const text = await res.text().catch(() => '')
   // A reserved address never sets end-user auth up: a project without it says so.
   if (res.status === 503 && text.includes('AUTH_NOT_CONFIGURED')) return { kind: 'no_auth' }
-  if (!res.ok) return { kind: 'failed', detail: `POST ${path} → ${res.status} ${text.slice(0, 160)}` }
+  if (!res.ok) return { kind: 'failed', detail: `POST ${path} → ${res.status} ${text.slice(0, 160)}`, email, answered: true }
   let body: any = {}
   try { body = JSON.parse(text) } catch { /* judged below */ }
   const data = body?.data ?? body
   const token = data?.token ?? data?.accessToken ?? body?.token
   const userId = data?.user?.id ?? body?.user?.id
   if (typeof token !== 'string' || userId === undefined) {
-    return { kind: 'failed', detail: `POST ${path} → ${res.status} without a token and user id` }
+    return { kind: 'failed', detail: `POST ${path} → ${res.status} without a token and user id`, email, answered: true }
   }
   return { kind: 'user', userId: String(userId), token, email }
 }
@@ -457,6 +464,10 @@ export async function verifyCreate(target: CreateTestTarget): Promise<EndpointTe
 
   const signup = await signUpTestUser(target, tag)
   if (signup.kind === 'failed') {
+    // A sign-up that failed may still have created the account, and one that
+    // did not answer may create it later.
+    await purgeSyntheticAuthArtifacts(projectId, { email: signup.email }).catch(() => {})
+    if (!signup.answered) purgeAgainLater(projectId, signup.email, target.purgeAgainAfterMs)
     return result({
       ok: false,
       summary: `Could not sign a test user up, so no row was written and nothing was verified: ${signup.detail}.`,
