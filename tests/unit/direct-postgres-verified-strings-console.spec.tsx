@@ -4,10 +4,12 @@
 
 /**
  * Connect → Postgres where the region's endpoint fronts its RDS instance
- * (owner's decision, 2026-11-17): each login shows two strings, one for psql,
- * pg_dump and other libpq tools and one for every other client, with a link to
- * the CA bundle both name, and says how many connections a login may hold at
- * once on the plan. Elsewhere a login keeps its one string.
+ * (owner's decision, 2026-11-17): each login shows a string for psql, pg_dump
+ * and other libpq tools, a string for clients that implement verify-ca (pgx,
+ * asyncpg, sqlx), and settings for node-postgres, which verifies the host name
+ * even under verify-ca; a link to the CA bundle all three use; and how many
+ * connections a login may hold at once on the plan. Nothing promises one
+ * string works for "every other client". Elsewhere a login keeps one string.
  */
 
 import { act, render, screen } from '@testing-library/react'
@@ -22,6 +24,14 @@ const PASSWORD = 'not-a-real-password'
 const LIBPQ = `postgresql://bkn_ro_0123456789ab:${PASSWORD}@instance-1.rds.example.test:5432/backenly?hostaddr=192.0.2.10&sslmode=verify-full&sslrootcert=rds-ca-cloud-regions.pem`
 const OTHER = `postgresql://bkn_ro_0123456789ab:${PASSWORD}@db.example.test:5432/backenly?sslmode=verify-ca&sslrootcert=rds-ca-cloud-regions.pem`
 const CA = { file: 'rds-ca-cloud-regions.pem', url: 'https://backenly.example.test/certs/rds-ca-cloud-regions.pem' }
+const NODE = {
+  host: '192.0.2.10',
+  port: 5432,
+  database: 'backenly',
+  user: 'bkn_ro_0123456789ab',
+  password: PASSWORD,
+  ssl: { servername: 'instance-1.rds.example.test', caFile: CA.file, caUrl: CA.url },
+}
 
 function login(extra: Record<string, unknown>) {
   return {
@@ -56,29 +66,36 @@ async function renderPanel() {
 }
 const pageText = () => (document.body.textContent ?? '').replace(/\s+/g, ' ')
 
-it('shows a string for libpq tools and one for every other client, the CA bundle to download, and the limit per login', async () => {
+it('shows a string for libpq tools, one for verify-ca clients, node-postgres settings, the CA bundle and the limit per login', async () => {
   current = {
     schema: 'workspace_p1',
     available: true,
-    credentials: [login({ connectionString: LIBPQ, otherClientsConnectionString: OTHER, caBundle: CA })],
+    credentials: [login({ connectionString: LIBPQ, verifyCaConnectionString: OTHER, nodePostgres: NODE, caBundle: CA })],
     connectionLimit: 2,
     pendingDriftEvents: 0,
   }
   await renderPanel()
   const text = pageText()
   expect(text).toContain('For psql, pg_dump and other libpq tools')
-  expect(text).toContain('For every other client')
+  expect(text).toContain('For Go (pgx), Python (asyncpg), Rust (sqlx) and other verify-ca clients')
+  expect(text).toContain('For Node.js (node-postgres, and Drizzle or Prisma on it)')
+  expect(text).not.toMatch(/every other client/i)
+  // The node-postgres settings: the endpoint's address as host, the instance's name as servername.
+  expect(text).toContain("host: '192.0.2.10',")
+  expect(text).toContain("password: '••••••••',")
+  expect(text).toContain("ssl: { ca: fs.readFileSync('rds-ca-cloud-regions.pem', 'utf8'), servername: 'instance-1.rds.example.test' },")
   // Masked until shown, as before.
   expect(text).toContain('postgresql://bkn_ro_0123456789ab:••••••••@instance-1.rds.example.test:5432/backenly?hostaddr=192.0.2.10&sslmode=verify-full')
   expect(text).toContain('postgresql://bkn_ro_0123456789ab:••••••••@db.example.test:5432/backenly?sslmode=verify-ca')
   expect(text).not.toContain(PASSWORD)
   expect(screen.getByRole('button', { name: 'Copy connection string' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Copy the connection string for other clients' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Copy the connection string for verify-ca clients' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Copy the node-postgres settings' })).toBeTruthy()
 
   const link = screen.getByRole('link', { name: 'Download rds-ca-cloud-regions.pem' })
   expect(link.getAttribute('href')).toBe(CA.url)
   expect(link.getAttribute('download')).toBe('rds-ca-cloud-regions.pem')
-  expect(text).toContain("The strings check the server's certificate against Backenly's CA bundle.")
+  expect(text).toContain("The strings and the Node.js settings check the server's certificate against Backenly's CA bundle.")
   expect(text).toContain('over TLS, with up to 2 connections at once. Every change to a login is recorded')
 })
 
@@ -92,7 +109,7 @@ it('keeps one string and no CA bundle where the region’s endpoint is not descr
   }
   await renderPanel()
   const text = pageText()
-  expect(text).not.toMatch(/For every other client|Download rds-ca-cloud-regions\.pem|connections at once/)
+  expect(text).not.toMatch(/verify-ca clients|For Node\.js|Download rds-ca-cloud-regions\.pem|connections at once/)
   expect(screen.getAllByRole('button', { name: 'Copy connection string' })).toHaveLength(1)
   expect(text).toContain("Each login reaches only this project's schema, over TLS. Every change")
 })

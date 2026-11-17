@@ -119,11 +119,28 @@ export interface DirectAccessCredential {
    */
   connectionString: string
   /**
-   * Where the region's endpoint fronts its RDS instance: the string for every
-   * other client (JDBC, node-postgres, asyncpg…), on the endpoint's own name,
-   * verifying the certificate's chain against the CA bundle (verify-ca).
+   * Where the region's endpoint fronts its RDS instance: the string for clients
+   * that read sslmode=verify-ca from a URL (Go's pgx, Python's asyncpg, Rust's
+   * sqlx), on the endpoint's own name, verifying the certificate's chain
+   * against the CA bundle without its name.
    */
-  otherClientsConnectionString?: string
+  verifyCaConnectionString?: string
+  /**
+   * Where the region's endpoint fronts its RDS instance: settings for
+   * node-postgres (and Drizzle or Prisma on it), which verifies the host name
+   * even under verify-ca, and sets the name it checks to the host whenever the
+   * host is a name (pg/lib/connection.js). So the host is the endpoint's
+   * address, which it leaves alone, and ssl.servername the instance's name:
+   * pass them with ssl: { ca: <the CA file's contents>, servername }.
+   */
+  nodePostgres?: {
+    host: string
+    port: number
+    database: string
+    user: string
+    password: string
+    ssl: { servername: string; caFile: string; caUrl: string }
+  }
   /** Where the strings name a CA bundle: its file name, as the strings name it, and where to download it. */
   caBundle?: { file: string; url: string }
   psqlCommand: string
@@ -281,15 +298,25 @@ function buildCredential(
   const login = `${row.roleName}:${password}`
   // The RDS certificate names only the instance's own endpoint, so verify-full
   // needs that name as the host and the endpoint's address as hostaddr, which
-  // only libpq understands; every other client verifies the chain (verify-ca)
-  // on the endpoint's own name. Owner's decision, 2026-11-17.
+  // only libpq understands. Clients that implement verify-ca verify the chain
+  // on the endpoint's own name (owner's decision, 2026-11-17). node-postgres
+  // does neither: it gets settings that verify in full (nodePostgres).
   const connectionString = verified
     ? `postgresql://${login}@${verified.tlsHost}:${port}/${database}?hostaddr=${verified.hostaddr}&sslmode=verify-full&sslrootcert=${CA_BUNDLE_FILE}`
     : `postgresql://${login}@${host}:${port}/${database}?sslmode=${sslmode}`
+  const caUrl = `${resolvePublicBaseUrl({ headers: new Headers() })}${CA_BUNDLE_PATH}`
   const otherClients = verified
     ? {
-        otherClientsConnectionString: `postgresql://${login}@${host}:${port}/${database}?sslmode=verify-ca&sslrootcert=${CA_BUNDLE_FILE}`,
-        caBundle: { file: CA_BUNDLE_FILE, url: `${resolvePublicBaseUrl({ headers: new Headers() })}${CA_BUNDLE_PATH}` },
+        verifyCaConnectionString: `postgresql://${login}@${host}:${port}/${database}?sslmode=verify-ca&sslrootcert=${CA_BUNDLE_FILE}`,
+        nodePostgres: {
+          host: verified.hostaddr,
+          port,
+          database,
+          user: row.roleName,
+          password,
+          ssl: { servername: verified.tlsHost, caFile: CA_BUNDLE_FILE, caUrl },
+        },
+        caBundle: { file: CA_BUNDLE_FILE, url: caUrl },
       }
     : {}
   return {
@@ -651,30 +678,25 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
 }
 
 // ── Connections at once, by plan ──────────────────────────────────────────────
+//
+// Each of a project's logins may hold its plan's number of connections at once
+// (lib/entitlements/direct-postgres.ts: Free 2, Pro 5, Enterprise 20), set
+// through the definer helper (scripts/setup-direct-access.sql, 3b) where it
+// differs. When a login is created, on every read of its credentials (the
+// console's Postgres tab, MCP database_credentials, a rotation), and every hour
+// for every project with a login (reconcileDirectConnectionLimits): a plan
+// changes in Backenly Cloud's billing, which has no hook into this repository,
+// so the hourly pass is what brings a new plan's limit to logins nobody reads.
 
 const limitHelperMissingSaid = new Set<CloudRegionId>()
 
 /**
- * Set each of the project's logins to its plan's number of connections at once
- * (lib/entitlements/direct-postgres.ts: Free 2, Pro 5, Enterprise 20) where it
- * differs, through the definer helper (scripts/setup-direct-access.sql, 3b).
- * Called when a login is created and on every read of its credentials: the
- * console's Postgres tab, MCP database_credentials, a rotation. A plan changes
- * in Backenly Cloud's billing, which has no hook into this repository, so a
- * new plan's limit reaches the logins at the next read; Cloud's plan-change
- * handlers may call this to apply it at once.
- *
- * Answers the limit, or null where the region's helpers predate 3b (said once
- * per region), and never throws: on any failure the logins keep the limit they
- * have and the next read tries again.
+ * The plan's limit set on these logins of the project, and how many changed.
+ * The limit is null where the region's helpers predate 3b (said once per
+ * region). Never throws: on any failure the logins keep the limit they have,
+ * and the next read or the hourly pass tries again.
  */
-/** The same, for every login the project has: for a caller that knows only the project, such as a plan change. */
-export async function applyPlanConnectionLimits(projectId: string): Promise<number | null> {
-  const rows = await prisma.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } }).catch(() => [])
-  return applyConnectionLimit(projectId, rows.map((r) => r.roleName))
-}
-
-export async function applyConnectionLimit(projectId: string, roleNames: string[]): Promise<number | null> {
+async function setConnectionLimits(projectId: string, roleNames: string[]): Promise<{ limit: number | null; changed: number }> {
   try {
     const { connectionLimit } = await directPostgresAllowanceFor(projectId)
     const region = await projectRegion(projectId)
@@ -689,23 +711,61 @@ export async function applyConnectionLimit(projectId: string, roleNames: string[
             'logins keep the limits they were created with until scripts/setup-direct-access.sql is installed again',
         )
       }
-      return null
+      return { limit: null, changed: 0 }
     }
-    if (roleNames.length === 0) return connectionLimit
+    if (roleNames.length === 0) return { limit: connectionLimit, changed: 0 }
     const logins = await db.$queryRaw<Array<{ rolname: string; rolconnlimit: number }>>`
       SELECT rolname::text AS rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(${roleNames}::text[])`
+    let changed = 0
     for (const login of logins) {
       if (login.rolconnlimit !== connectionLimit) {
         await db.$queryRaw`SELECT public.backenly_direct_set_connection_limit(${login.rolname}, ${connectionLimit}::int)`
+        changed += 1
       }
     }
-    return connectionLimit
+    return { limit: connectionLimit, changed }
   } catch (err) {
     console.warn(
       `[DirectAccess] project=${projectId}: the plan's connection limit was not applied (${err instanceof Error ? err.name : 'Error'}); the next read tries again`,
     )
-    return null
+    return { limit: null, changed: 0 }
   }
+}
+
+/**
+ * Set these logins of the project to its plan's number of connections at once,
+ * where it differs. Answers the limit, or null where the region's helpers
+ * predate per-plan limits. Never throws.
+ */
+export async function applyConnectionLimit(projectId: string, roleNames: string[]): Promise<number | null> {
+  return (await setConnectionLimits(projectId, roleNames)).limit
+}
+
+/**
+ * The same for every login the project has: for a caller that knows only the
+ * project, such as Cloud's plan-change handlers, which may call it to apply a
+ * new plan's limit at once rather than at the next hourly pass. Never throws.
+ */
+export async function applyPlanConnectionLimits(projectId: string): Promise<number | null> {
+  const rows = await prisma.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } }).catch(() => [])
+  return applyConnectionLimit(projectId, rows.map((r) => r.roleName))
+}
+
+/**
+ * The hourly pass (instrumentation.ts, on the home region's scheduler): every
+ * project with a login, its logins set to its plan's limit where they differ,
+ * so a plan change reaches them within the hour. One project at a time; a
+ * project that fails is logged by setConnectionLimits and left for the next
+ * pass. Says how many logins changed, and only when some did.
+ */
+export async function reconcileDirectConnectionLimits(): Promise<{ projects: number; changed: number }> {
+  const rows = await prisma.databaseCredential.findMany({ select: { projectId: true, roleName: true } }).catch(() => [])
+  const byProject = new Map<string, string[]>()
+  for (const r of rows) byProject.set(r.projectId, [...(byProject.get(r.projectId) ?? []), r.roleName])
+  let changed = 0
+  for (const [projectId, roleNames] of byProject) changed += (await setConnectionLimits(projectId, roleNames)).changed
+  if (changed > 0) console.log(`[DirectAccess] set ${changed} login(s) in ${byProject.size} project(s) to their plan's connection limit`)
+  return { projects: byProject.size, changed }
 }
 
 // ── Grants sync — the hook called after DDL, for every project ───────────────

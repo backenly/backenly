@@ -7,18 +7,23 @@
  *   Read-only                                                                 ⋯
  *   For psql, pg_dump and other libpq tools
  *   [postgresql://bkn_ro_edc2…:•••@<instance>:5432/backenly?hostaddr=…  ◉ Copy]
- *   For every other client
+ *   For Go (pgx), Python (asyncpg), Rust (sqlx) and other verify-ca clients
  *   [postgresql://bkn_ro_edc2…:•••@<DIRECT_DB_HOST>:5432/backenly…     ◉ Copy]
+ *   For Node.js (node-postgres, and Drizzle or Prisma on it)
+ *   [new pg.Client({ host: '<address>', …, ssl: { ca, servername } })  ◉ Copy]
  *   bkn_ro_edc2173ce55c   Created Nov 11       Copy psql command  Copy pg_dump command
  *   Read-write                                                    [Create login]
  *   Reads and writes rows. Schema changes are refused unless you allow them.
  *   Each login reaches only this project's schema, over TLS, with up to 2
  *   connections at once. …
- *   The strings check the server's certificate against Backenly's CA bundle.
- *   Download rds-ca-cloud-regions.pem …
+ *   The strings and the Node.js settings check the server's certificate
+ *   against Backenly's CA bundle. Download rds-ca-cloud-regions.pem …
  *
- *   The two strings are where the region's endpoint fronts its RDS instance
- *   (lib/services/direct-access.ts); elsewhere there is one, as before.
+ *   The three are where the region's endpoint fronts its RDS instance
+ *   (lib/services/direct-access.ts); elsewhere there is one string, as before.
+ *   node-postgres verifies the host name even under verify-ca, so it gets
+ *   settings rather than a string: the endpoint's address as host, and the
+ *   instance's name as ssl.servername.
  *
  *   Where the region has no developer-facing host (status.available false),
  *   one sentence says direct connections aren't available there, no login is
@@ -85,8 +90,16 @@ interface Credential {
   port: number
   database: string
   connectionString: string
-  /** Where the region's endpoint fronts RDS: the string for clients that are not libpq. */
-  otherClientsConnectionString?: string
+  /** Where the region's endpoint fronts RDS: the string for clients that implement verify-ca. */
+  verifyCaConnectionString?: string
+  /** Where the region's endpoint fronts RDS: settings for node-postgres. */
+  nodePostgres?: {
+    host: string
+    port: number
+    database: string
+    user: string
+    ssl: { servername: string; caFile: string; caUrl: string }
+  }
   caBundle?: { file: string; url: string }
   psqlCommand: string
   pgDumpCommand: string
@@ -177,6 +190,43 @@ function ConnectionString({
   return (
     <div className={`mt-[10px] flex h-[34px] min-w-0 items-center gap-[4px] ${WELL} border ${EDGE} ${R_CONTROL} pl-[12px] pr-[4px]`}>
       <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-300">{shown ? value : masked(value, password)}</code>
+      <button
+        type="button"
+        onClick={() => setShown((s) => !s)}
+        aria-pressed={shown}
+        aria-label={shown ? 'Hide password' : 'Show password'}
+        title={shown ? 'Hide password' : 'Show password'}
+        className={`inline-flex h-[26px] w-[26px] flex-shrink-0 items-center justify-center ${R_CONTROL} text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 ${FOCUS}`}
+      >
+        {shown ? <EyeOff className="h-3.5 w-3.5" strokeWidth={1.75} /> : <Eye className="h-3.5 w-3.5" strokeWidth={1.75} />}
+      </button>
+      <CopyButton value={value} label={copyLabel} />
+    </div>
+  )
+}
+
+/** node-postgres settings that verify the server in full, as code to paste. */
+function nodePostgresSnippet(n: NonNullable<Credential['nodePostgres']>, password: string): string {
+  return [
+    'new pg.Client({',
+    `  host: '${n.host}',`,
+    `  port: ${n.port},`,
+    `  database: '${n.database}',`,
+    `  user: '${n.user}',`,
+    `  password: '${password}',`,
+    `  ssl: { ca: fs.readFileSync('${n.ssl.caFile}', 'utf8'), servername: '${n.ssl.servername}' },`,
+    '})',
+  ].join('\n')
+}
+
+/** Code to paste, with the password masked until shown; Copy always copies the real one. */
+function CodeWithPassword({ value, password, copyLabel }: { value: string; password: string; copyLabel: string }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <div className={`mt-[10px] flex min-w-0 items-start gap-[4px] ${WELL} border ${EDGE} ${R_CONTROL} py-[6px] pl-[12px] pr-[4px]`}>
+      <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre py-[2px] font-mono text-[12px] leading-[18px] text-zinc-300">
+        {shown ? value : value.replace(`'${password}'`, "'••••••••'")}
+      </pre>
       <button
         type="button"
         onClick={() => setShown((s) => !s)}
@@ -577,15 +627,23 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
           <p className={`!mt-[4px] ${ROW_TEXT}`}>{LOGIN_BODY[mode]}</p>
         ) : (
           <>
-            {c.otherClientsConnectionString ? (
+            {c.verifyCaConnectionString && c.nodePostgres ? (
               <>
                 <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For psql, pg_dump and other libpq tools</p>
                 <ConnectionString value={c.connectionString} password={c.password} />
-                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For every other client</p>
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">
+                  For Go (pgx), Python (asyncpg), Rust (sqlx) and other verify-ca clients
+                </p>
                 <ConnectionString
-                  value={c.otherClientsConnectionString}
+                  value={c.verifyCaConnectionString}
                   password={c.password}
-                  copyLabel="Copy the connection string for other clients"
+                  copyLabel="Copy the connection string for verify-ca clients"
+                />
+                <p className="mt-[10px] text-[12px] leading-[16px] text-faint">For Node.js (node-postgres, and Drizzle or Prisma on it)</p>
+                <CodeWithPassword
+                  value={nodePostgresSnippet(c.nodePostgres, c.password)}
+                  password={c.password}
+                  copyLabel="Copy the node-postgres settings"
                 />
               </>
             ) : (
@@ -727,7 +785,7 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
         )}
         {caBundle && (
           <p className="mt-[6px] text-[12.5px] leading-[18px] text-faint">
-            The strings check the server&apos;s certificate against Backenly&apos;s CA bundle.{' '}
+            The strings and the Node.js settings check the server&apos;s certificate against Backenly&apos;s CA bundle.{' '}
             <a
               href={caBundle.url}
               download={caBundle.file}
@@ -735,7 +793,7 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
             >
               Download {caBundle.file}
             </a>{' '}
-            and keep it in the folder you connect from, or give sslrootcert its full path.
+            and keep it in the folder you connect from, or give its full path.
           </p>
         )}
       </Section>

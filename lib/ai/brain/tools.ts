@@ -3765,10 +3765,14 @@ export async function dispatchTool(
         summary: clip([
           ...addressLines,
           `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (${c.caBundle ? 'TLS, the server verified with the CA bundle' : 'TLS required'}, search_path pinned to ${status.schema}).`,
-          ...(c.otherClientsConnectionString && c.caBundle
+          ...(c.verifyCaConnectionString && c.nodePostgres && c.caBundle
             ? [
-                `data.connectionString is for psql, pg_dump, psycopg and other libpq tools (verify-full through hostaddr); data.otherClientsConnectionString for every other client (verify-ca; node-postgres needs uselibpqcompat=true added to it, or it checks the host name). ` +
+                'data.connectionString is for psql, pg_dump, psycopg and other libpq tools (verify-full through hostaddr); ' +
+                  'data.verifyCaConnectionString for Go (pgx), Python (asyncpg), Rust (sqlx) and other clients that read sslmode=verify-ca. ' +
                   `Both name the CA bundle as sslrootcert=${c.caBundle.file}: download it from ${c.caBundle.url} into the folder the client runs in, or give its full path.`,
+                'node-postgres (and Drizzle or Prisma on it) checks the host name even under verify-ca, so give it data.nodePostgres ' +
+                  "instead of a string: its host is the endpoint's address, and pass ssl as { ca: <the CA file's contents>, servername: " +
+                  'data.nodePostgres.ssl.servername }, which verifies the server in full.',
               ]
             : []),
           ...(typeof status.connectionLimit === 'number' ? [`Each login may hold ${status.connectionLimit} connections at once on this project's plan.`] : []),
@@ -3791,7 +3795,8 @@ export async function dispatchTool(
           database: c.database,
           schema: status.schema,
           connectionString: c.connectionString,
-          ...(c.otherClientsConnectionString ? { otherClientsConnectionString: c.otherClientsConnectionString } : {}),
+          ...(c.verifyCaConnectionString ? { verifyCaConnectionString: c.verifyCaConnectionString } : {}),
+          ...(c.nodePostgres ? { nodePostgres: c.nodePostgres } : {}),
           ...(c.caBundle ? { caBundle: c.caBundle } : {}),
           ...(typeof status.connectionLimit === 'number' ? { connectionLimit: status.connectionLimit } : {}),
           psqlCommand: c.psqlCommand,

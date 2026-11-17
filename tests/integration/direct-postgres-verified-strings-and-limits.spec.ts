@@ -8,15 +8,23 @@
  *     and DIRECT_DB_HOSTADDR set, beside DIRECT_DB_HOST), a login has two
  *     strings. For libpq tools: the instance's own name as the host, which its
  *     certificate carries, the endpoint's address as hostaddr, sslmode
- *     verify-full. For every other client: the endpoint's own name, sslmode
- *     verify-ca. Both name the RDS CA bundle the images ship as sslrootcert,
- *     published at /certs/rds-ca-cloud-regions.pem. Settings are per region,
- *     like DIRECT_DB_HOST; half of them configured leaves the strings as before.
+ *     verify-full. For clients that implement verify-ca (pgx, asyncpg, sqlx):
+ *     the endpoint's own name, sslmode verify-ca. Both name the RDS CA bundle
+ *     the images ship as sslrootcert, published at /certs/rds-ca-cloud-regions.pem.
+ *     Settings are per region, like DIRECT_DB_HOST; half of them configured
+ *     leaves the strings as before.
+ *   - node-postgres (and Drizzle or Prisma on it) verifies the host name even
+ *     under verify-ca, and sets the name it checks to the host whenever the
+ *     host is a name, so the verify-ca string fails it. It gets settings
+ *     instead: the endpoint's address as host, the instance's name as
+ *     ssl.servername, which verify in full. Shown against a TLS stand-in whose
+ *     certificate names only the instance (tests/helpers/tls-postgres-stand-in.ts).
  *   - Each login may hold its plan's number of connections at once: Free 2,
  *     Pro 5, Enterprise 20. Set when the login is created and on every read of
- *     its credentials, so a plan change (made in Cloud's billing) applies at
- *     the next one. PostgreSQL enforces it, and run_query, which connects as
- *     the read-only login, says so when the login is full.
+ *     its credentials, and every hour for every login, so a plan change (made
+ *     in Cloud's billing) reaches it within the hour without anyone reading it.
+ *     PostgreSQL enforces it, and run_query, which connects as the read-only
+ *     login, says so when the login is full.
  *
  * Real database and the real definer functions (scripts/setup-direct-access.sql).
  */
@@ -29,9 +37,11 @@ jest.mock('@cloud/entitlements', () => {
 })
 
 import { execFileSync } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import { Client } from 'pg'
+import { makeCertificates, REACHED, startTlsPostgresStandIn, type Certificates, type StandIn } from '../helpers/tls-postgres-stand-in'
 import { prisma } from '@/lib/db/prisma'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import {
@@ -41,6 +51,7 @@ import {
   getDirectAccessStatus,
   provisionDirectAccess,
   readOnlyLogin,
+  reconcileDirectConnectionLimits,
   revokeDirectAccess,
 } from '@/lib/services/direct-access'
 import { dispatchTool } from '@/lib/ai/brain/tools'
@@ -50,6 +61,7 @@ const CONN = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || ''
 const ENV_KEYS = [
   'BACKENLY_EDITION',
   'NODE_ENV',
+  'DIRECT_DB_PORT',
   'DIRECT_DB_HOST',
   'DIRECT_DB_TLS_HOST',
   'DIRECT_DB_HOSTADDR',
@@ -144,6 +156,22 @@ describe('connections at once, by plan', () => {
     expect([await limitOf(ro), await limitOf(rw)]).toEqual([2, 2])
   }, 60_000)
 
+  it('reaches every login within the hour, with no read of its credentials, through the hourly pass', async () => {
+    const { ro, rw } = directAccessRoleNames(projectId)
+    mockPlan = 'BUILDER'
+    await getDirectAccessStatus(projectId)
+    expect([await limitOf(ro), await limitOf(rw)]).toEqual([5, 5])
+
+    // The plan shrinks in Cloud's billing; nothing reads the credentials.
+    mockPlan = 'SANDBOX'
+    const pass = await reconcileDirectConnectionLimits()
+    expect(pass.changed).toBeGreaterThanOrEqual(2)
+    expect([await limitOf(ro), await limitOf(rw)]).toEqual([2, 2])
+    // Nothing left to change: the next pass alters nothing of this project's.
+    await reconcileDirectConnectionLimits()
+    expect([await limitOf(ro), await limitOf(rw)]).toEqual([2, 2])
+  }, 60_000)
+
   it('is enforced by PostgreSQL, and run_query says so when the read-only login is full', async () => {
     const { roleName, password } = await readOnlyLogin(projectId)
     await login(roleName, password)
@@ -184,7 +212,7 @@ describe('strings that verify the server', () => {
 
   afterEach(() => setEnv({ NODE_ENV: 'test' }))
 
-  it('gives libpq tools verify-full through hostaddr, every other client verify-ca, both naming the published CA bundle', async () => {
+  it('gives libpq tools verify-full through hostaddr, verify-ca clients their string, node-postgres its settings, all naming the published CA bundle', async () => {
     setEnv(VERIFIED)
     const status = await getDirectAccessStatus(projectId)
     const ro = status.credentials.find((c) => c.mode === 'READ_ONLY')!
@@ -195,9 +223,17 @@ describe('strings that verify the server', () => {
       `postgresql://${roleName}:${password}@instance-1.abc123.ap-south-1.rds.example.test:5432/${database}` +
         `?hostaddr=192.0.2.10&sslmode=verify-full&sslrootcert=rds-ca-cloud-regions.pem`,
     )
-    expect(ro.otherClientsConnectionString).toBe(
+    expect(ro.verifyCaConnectionString).toBe(
       `postgresql://${roleName}:${password}@db.example.test:5432/${database}?sslmode=verify-ca&sslrootcert=rds-ca-cloud-regions.pem`,
     )
+    expect(ro.nodePostgres).toEqual({
+      host: '192.0.2.10',
+      port: 5432,
+      database,
+      user: roleName,
+      password,
+      ssl: { servername: 'instance-1.abc123.ap-south-1.rds.example.test', caFile: 'rds-ca-cloud-regions.pem', caUrl: ro.caBundle!.url },
+    })
     expect(ro.psqlCommand).toBe(`psql "${ro.connectionString}"`)
     expect(ro.pgDumpCommand.startsWith(`pg_dump "${ro.connectionString}"`)).toBe(true)
     expect(ro.caBundle).toEqual({ file: CA_BUNDLE_FILE, url: expect.stringMatching(/\/certs\/rds-ca-cloud-regions\.pem$/) })
@@ -212,13 +248,16 @@ describe('strings that verify the server', () => {
     expect(res.ok).toBe(true)
     expect(res.data).toMatchObject({
       connectionString: expect.stringContaining('sslmode=verify-full'),
-      otherClientsConnectionString: expect.stringContaining('sslmode=verify-ca'),
+      verifyCaConnectionString: expect.stringContaining('sslmode=verify-ca'),
+      nodePostgres: { host: '192.0.2.10', ssl: { servername: 'instance-1.abc123.ap-south-1.rds.example.test', caFile: 'rds-ca-cloud-regions.pem' } },
       caBundle: { file: 'rds-ca-cloud-regions.pem' },
       connectionLimit: 2,
     })
     expect(res.summary).toContain('sslrootcert=rds-ca-cloud-regions.pem')
     expect(res.summary).toMatch(/download it from \S+\/certs\/rds-ca-cloud-regions\.pem/)
-    expect(res.summary).toContain('node-postgres needs uselibpqcompat=true')
+    expect(res.summary).toContain('data.verifyCaConnectionString for Go (pgx), Python (asyncpg), Rust (sqlx)')
+    expect(res.summary).toContain('node-postgres (and Drizzle or Prisma on it) checks the host name even under verify-ca, so give it data.nodePostgres')
+    expect(res.summary).not.toMatch(/uselibpqcompat|every other client/)
     expect(res.summary).toContain('Each login may hold 2 connections at once')
   })
 
@@ -241,7 +280,8 @@ describe('strings that verify the server', () => {
       const [cred] = (await getDirectAccessStatus(east.id)).credentials
       expect(cred.connectionString).toContain('@instance-2.us-east-1.rds.example.test:5432/')
       expect(cred.connectionString).toContain('?hostaddr=198.51.100.10&sslmode=verify-full')
-      expect(cred.otherClientsConnectionString).toContain('@db.us-east-1.example.test:5432/')
+      expect(cred.verifyCaConnectionString).toContain('@db.us-east-1.example.test:5432/')
+      expect(cred.nodePostgres).toMatchObject({ host: '198.51.100.10', ssl: { servername: 'instance-2.us-east-1.rds.example.test' } })
     } finally {
       await prisma.databaseCredential.deleteMany({ where: { projectId: east.id } })
       await prisma.project.delete({ where: { id: east.id } })
@@ -253,9 +293,89 @@ describe('strings that verify the server', () => {
     setEnv({ NODE_ENV: 'production', DIRECT_DB_HOST: 'db.example.test', DIRECT_DB_HOSTADDR: '192.0.2.10' })
     const ro = (await getDirectAccessStatus(projectId)).credentials.find((c) => c.mode === 'READ_ONLY')!
     expect(ro.connectionString).toMatch(/@db\.example\.test:5432\/[^?]+\?sslmode=require$/)
-    expect(ro.otherClientsConnectionString).toBeUndefined()
+    expect(ro.verifyCaConnectionString).toBeUndefined()
+    expect(ro.nodePostgres).toBeUndefined()
     expect(ro.caBundle).toBeUndefined()
     expect(said.mock.calls.map((c) => String(c[0])).join('\n')).toContain('DIRECT_DB_HOSTADDR is set without DIRECT_DB_TLS_HOST')
     said.mockRestore()
+  })
+})
+
+describe('node-postgres against a server whose certificate names only the instance', () => {
+  const INSTANCE = 'instance-1.rds.example.test'
+  let dir = ''
+  let certs: Certificates
+  let standIn: StandIn
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'direct-pg-tls-'))
+    certs = makeCertificates(dir, INSTANCE)
+    standIn = await startTlsPostgresStandIn(certs)
+  }, 60_000)
+
+  afterAll(async () => {
+    await standIn?.close()
+    if (dir) rmSync(dir, { recursive: true, force: true })
+    setEnv({ NODE_ENV: 'test' })
+  })
+
+  /** The read-only login's credential, with the endpoint at the stand-in: localhost by name, 127.0.0.1 by address. */
+  async function credential() {
+    setEnv({
+      NODE_ENV: 'production',
+      DIRECT_DB_HOST: 'localhost',
+      DIRECT_DB_HOSTADDR: '127.0.0.1',
+      DIRECT_DB_TLS_HOST: INSTANCE,
+      DIRECT_DB_PORT: String(standIn.port),
+    })
+    return (await getDirectAccessStatus(projectId)).credentials.find((c) => c.mode === 'READ_ONLY')!
+  }
+
+  async function connectError(client: Client): Promise<string> {
+    client.on('error', () => {})
+    try {
+      await client.connect()
+      return 'connected'
+    } catch (err) {
+      return (err as Error).message
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
+
+  it('fails the verify-ca string, which node-postgres reads as a full check of a name the certificate does not carry', async () => {
+    const c = await credential()
+    const connectionString = c.verifyCaConnectionString!.replace('sslrootcert=rds-ca-cloud-regions.pem', `sslrootcert=${certs.caFile}`)
+    const error = await connectError(new Client({ connectionString }))
+    expect(error).toMatch(/does not match certificate's altnames/)
+    expect(error).not.toContain(REACHED)
+  })
+
+  it('reaches the server, verified in full, with the nodePostgres settings', async () => {
+    const n = (await credential()).nodePostgres!
+    const client = new Client({
+      host: n.host,
+      port: n.port,
+      database: n.database,
+      user: n.user,
+      password: n.password,
+      ssl: { ca: certs.ca, servername: n.ssl.servername },
+    })
+    expect(await connectError(client)).toBe(REACHED)
+  })
+
+  it('still refuses a certificate another CA signed', async () => {
+    const n = (await credential()).nodePostgres!
+    const client = new Client({
+      host: n.host,
+      port: n.port,
+      database: n.database,
+      user: n.user,
+      password: n.password,
+      ssl: { ca: certs.otherCa, servername: n.ssl.servername },
+    })
+    const error = await connectError(client)
+    expect(error).not.toContain(REACHED)
+    expect(error).toMatch(/self[- ]signed|unable to (verify|get local issuer)/)
   })
 })

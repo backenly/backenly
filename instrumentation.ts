@@ -811,6 +811,19 @@ export async function register() {
         )
       })
 
+      // ── Direct Postgres connection limits — hourly, from home ──────────────
+      // Each project's logins hold at most its plan's number of connections at
+      // once (lib/services/direct-access.ts). A plan changes in Cloud's billing,
+      // so this brings a new plan's limit to every login within the hour, where
+      // it differs; reading a login's credentials applies it at once as well.
+      // The logins are platform records, read here once for every region.
+      cron.platform('35 * * * *', async () => {
+        const { reconcileDirectConnectionLimits } = await import('./lib/services/direct-access')
+        await reconcileDirectConnectionLimits().catch((err: any) =>
+          console.error('[DirectAccess] connection limit pass error:', err?.message)
+        )
+      })
+
       // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────
       // Closes the previous UTC month. The first run of a month does the work;
       // every later run is a no-op (insert-only close), which also covers a day
