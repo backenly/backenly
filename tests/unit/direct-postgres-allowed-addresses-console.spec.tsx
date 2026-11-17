@@ -11,7 +11,17 @@
  * with the address the request came from. With addresses allowed, each is a
  * row with Remove, and the line under them says how many the plan allows.
  * Where the region does not limit addresses there is no such section.
+ *
+ * The endpoint is shared by every project in the region and admits the union
+ * of their addresses, so the page never says this project's list is the only
+ * way in: an address another project allows reaches it too, and the login's
+ * password is what lets a connection into this project. Removing an address
+ * leaves open connections open, and the dialog says so. An address past the
+ * plan's number (after a restore, or a smaller plan) is shown as not admitted.
  */
+
+/** What the page said before, which was not true of a shared endpoint. */
+const OVERCLAIMS = /Postgres takes connections only from these addresses|Postgres refuses every connection/
 
 import { act, fireEvent, render, screen } from '@testing-library/react'
 
@@ -35,12 +45,12 @@ const LOGIN = {
   rotatedAt: null,
 }
 
-function status(addresses: Array<{ cidr: string; createdAt: string }>, enforced = true) {
+function status(addresses: Array<{ cidr: string; createdAt: string; admitted?: boolean }>, enforced = true, notAdmitted?: string) {
   return {
     schema: 'workspace_p1',
     available: true,
     credentials: [LOGIN],
-    allowlist: { enforced, addresses, limit: 2, planName: 'Free' },
+    allowlist: { enforced, addresses: addresses.map((a) => ({ admitted: true, ...a })), limit: 2, planName: 'Free', ...(notAdmitted ? { notAdmitted } : {}) },
     you: { address: '198.51.100.23', allowable: true },
     pendingDriftEvents: 0,
   }
@@ -88,7 +98,11 @@ it('says “Allow an address first” before the logins and their strings, and o
   await renderPanel()
   const text = pageText()
   expect(text).toContain('Allow an address first')
-  expect(text).toContain('Postgres refuses every connection until this project allows the address it comes from.')
+  expect(text).toContain('The endpoint refuses an address no project in this region allows. Allow the one you connect from.')
+  expect(text).toContain(
+    "The database endpoint is shared by the projects in this region and admits only the addresses they allow. Allow the ones you connect from; a login's password is what lets a connection into this project.",
+  )
+  expect(text).not.toMatch(OVERCLAIMS)
   expect(text.indexOf('Allow an address first')).toBeLessThan(text.indexOf('Logins'))
   expect(text.indexOf('Allow an address first')).toBeLessThan(text.indexOf('postgresql://'))
 
@@ -105,7 +119,8 @@ it('lists each allowed address with Remove, marks the caller’s own, and says h
   expect(screen.getByText('198.51.100.0/24')).toBeTruthy()
   expect(screen.getByText('Your address')).toBeTruthy()
   expect(screen.getByRole('button', { name: 'Actions for 198.51.100.0/24' })).toBeTruthy()
-  expect(pageText()).toContain('Postgres takes connections only from these addresses: 1 of 2 on the Free plan.')
+  expect(pageText()).toContain('1 of 2 on the Free plan.')
+  expect(pageText()).not.toMatch(OVERCLAIMS)
   // The caller's address is already covered: no button to allow it again.
   expect(screen.queryByRole('button', { name: /Allow my address/ })).toBeNull()
   expect(pageText()).not.toContain('Allow an address first')
@@ -133,4 +148,31 @@ it('shows no allowed addresses where the region does not limit them', async () =
   await renderPanel()
   expect(pageText()).not.toMatch(/Allowed addresses|Allow an address first|Allow my address/)
   expect(pageText()).toContain('Logins')
+})
+
+it('says, before removing an address, that another project may still allow it and that open connections stay open', async () => {
+  current = status([{ cidr: '198.51.100.0/24', createdAt: '2026-11-17T03:00:00.000Z' }])
+  await renderPanel()
+  fireEvent.click(screen.getByRole('button', { name: 'Actions for 198.51.100.0/24' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
+  const dialog = screen.getByRole('dialog')
+  expect((dialog.textContent ?? '').replace(/\s+/g, ' ')).toContain(
+    "New connections from it are refused, unless another project in this region allows it too. Connections already open stay open: rotate a login's password to end them.",
+  )
+  expect(dialog.textContent ?? '').toContain('You can undo this in History.')
+})
+
+it('shows an address past the plan’s number as not admitted, with what to do', async () => {
+  current = status(
+    [
+      { cidr: '198.51.100.1/32', createdAt: '2026-11-17T01:00:00.000Z' },
+      { cidr: '198.51.100.2/32', createdAt: '2026-11-17T02:00:00.000Z' },
+      { cidr: '198.51.100.3/32', createdAt: '2026-11-17T03:00:00.000Z', admitted: false },
+    ],
+    true,
+    'Not admitted on the Free plan: remove one, or move to Pro for up to 10.',
+  )
+  await renderPanel()
+  expect(screen.getAllByText('Not admitted on the Free plan: remove one, or move to Pro for up to 10.')).toHaveLength(1)
+  expect(pageText()).toContain('3 of 2 on the Free plan.')
 })

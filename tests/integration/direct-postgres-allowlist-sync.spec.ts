@@ -20,6 +20,9 @@
  *     modified at all;
  *   - at most 100 entries go each way per modification, and a list too small
  *     for every address keeps the earliest allowed and says so;
+ *   - no project takes more of the list than its plan includes: one left with
+ *     more addresses than that (a restore from History, a move to a smaller
+ *     plan) has only its earliest on the list;
  *   - a region with no list configured has nothing to sync, says so, and
  *     calls nothing.
  *
@@ -27,6 +30,12 @@
  * (tests/helpers/fake-prefix-list.ts). No AWS call is made.
  */
 
+let mockPlan = 'SCALE'
+jest.mock('@cloud/entitlements', () => {
+  const actual = jest.requireActual('@cloud/entitlements')
+  const { selfHostedEntitlements } = jest.requireActual('@/lib/entitlements/self-hosted')
+  return { ...actual, cloudEntitlements: async () => ({ ...selfHostedEntitlements(), planName: mockPlan }) }
+})
 jest.mock('@aws-sdk/client-ec2', () => jest.requireActual('../helpers/fake-prefix-list').mockEc2Module())
 
 import { randomUUID } from 'crypto'
@@ -57,7 +66,11 @@ const allow = (projectId: string, ...cidrs: string[]) =>
   prisma.directAccessAddress.createMany({ data: cidrs.map((cidr) => ({ projectId, cidr })) })
 const disallow = (projectId: string, cidr: string) => prisma.directAccessAddress.deleteMany({ where: { projectId, cidr } })
 
-const SETTINGS = { DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID: HOME_LIST, DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID_US_EAST_1: EAST_LIST }
+const SETTINGS = {
+  BACKENLY_EDITION: 'cloud',
+  DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID: HOME_LIST,
+  DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID_US_EAST_1: EAST_LIST,
+}
 const saved = Object.fromEntries(Object.keys(SETTINGS).map((k) => [k, process.env[k]]))
 
 beforeAll(async () => {
@@ -71,6 +84,7 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  mockPlan = 'SCALE'
   prefixLists.reset()
   home = prefixLists.add(HOME_LIST, 'ap-south-1')
   eastList = prefixLists.add(EAST_LIST, 'us-east-1')
@@ -173,8 +187,11 @@ it('waits while the list is still applying a modification, then carries on', asy
 })
 
 it('adds and removes at most 100 entries per modification, each at the version it read', async () => {
-  const many = Array.from({ length: 250 }, (_, i) => `203.0.${Math.floor(i / 250)}.${i}/32`)
-  await allow(homeA, ...many)
+  // Five projects on Enterprise, fifty addresses each.
+  for (let p = 0; p < 5; p++) {
+    const id = await project(null)
+    await allow(id, ...Array.from({ length: 50 }, (_, i) => `203.0.${p}.${i}/32`))
+  }
   home.settleDescribes = 1
 
   expect(await syncAllowlist('ap-south-1')).toMatchObject({ status: 'synced', added: 250 })
@@ -195,6 +212,27 @@ it('keeps the earliest allowed addresses when the list cannot hold them all, and
   expect(home.cidrs()).toEqual(['192.0.2.1/32', '192.0.2.2/32'])
   expect(said.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/holds at most 2, so 1 cannot connect until its MaxEntries is raised/)
   said.mockRestore()
+})
+
+it('puts no more of a project’s addresses on the list than its plan includes, the earliest, when its plan shrinks', async () => {
+  const shop = await project(null)
+  const five = ['198.51.100.1/32', '198.51.100.2/32', '198.51.100.3/32', '198.51.100.4/32', '198.51.100.5/32']
+  for (const [i, cidr] of five.entries()) {
+    await prisma.directAccessAddress.create({ data: { projectId: shop, cidr, createdAt: new Date(Date.UTC(2026, 10, 17, i)) } })
+  }
+  mockPlan = 'BUILDER'
+  await syncAllowlist('ap-south-1')
+  expect(home.cidrs()).toEqual(five)
+
+  mockPlan = 'SANDBOX'
+  expect(await syncAllowlist('ap-south-1')).toMatchObject({ status: 'synced', removed: 3 })
+  expect(home.cidrs()).toEqual(['198.51.100.1/32', '198.51.100.2/32'])
+  // Still on the project's own list, to remove or to come back on a bigger plan.
+  expect(await prisma.directAccessAddress.count({ where: { projectId: shop } })).toBe(5)
+
+  mockPlan = 'BUILDER'
+  expect(await syncAllowlist('ap-south-1')).toMatchObject({ status: 'synced', added: 3 })
+  expect(home.cidrs()).toEqual(five)
 })
 
 it('says a region with no list configured has nothing to sync, and calls nothing', async () => {

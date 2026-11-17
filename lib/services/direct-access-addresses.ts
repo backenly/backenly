@@ -25,7 +25,7 @@ import { projectRegion } from '@/lib/data-plane/regional'
 import { directPostgresAllowanceFor } from '@/lib/entitlements/direct-postgres'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
-import { allowlistEnforced, syncAllowlistForProject, type AllowlistSync } from './direct-access-allowlist'
+import { admittedAddresses, allowlistEnforced, syncAllowlistForProject, type AllowlistSync } from './direct-access-allowlist'
 
 // ── Reading an address ────────────────────────────────────────────────────────
 
@@ -41,15 +41,23 @@ export interface AllowedAddress {
 export interface AllowlistState {
   /**
    * Whether the project's region admits only allowed addresses: its endpoint
-   * has a network allowlist (DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID). Where it does
-   * not (a self-hosted deployment, local development), there is no list to keep.
+   * has a network allowlist (DIRECT_DB_ALLOWLIST_PREFIX_LIST_ID), shared by the
+   * region's projects, which holds every address any of them allows. Where it
+   * does not (a self-hosted deployment, local development), there is no list.
    */
   enforced: boolean
-  addresses: AllowedAddress[]
+  /**
+   * In the order allowed, earliest first. `admitted` is false for one past the
+   * plan's number (after a restore, or a move to a plan that includes fewer):
+   * it is kept on the project's list and not put on the region's.
+   */
+  addresses: Array<AllowedAddress & { admitted: boolean }>
   /** How many the project's plan allows. */
   limit: number
   /** The plan, as it is sold. */
   planName: string
+  /** Where some address is not admitted: what to do about it, in a sentence. */
+  notAdmitted?: string
 }
 
 export async function listAllowedAddresses(projectId: string): Promise<AllowedAddress[]> {
@@ -68,12 +76,32 @@ export async function allowlistState(projectId: string): Promise<AllowlistState>
     listAllowedAddresses(projectId),
     directPostgresAllowanceFor(projectId),
   ])
+  const limit = allowance.allowedAddresses
+  const planName = planDisplayName(allowance.planName)
+  // The same rule, and the same order, as the region's list (allowedAddressesIn).
+  const admitted = new Set(admittedAddresses(addresses, limit).map((a) => a.cidr))
   return {
     enforced: allowlistEnforced(region),
-    addresses,
-    limit: allowance.allowedAddresses,
-    planName: planDisplayName(allowance.planName),
+    addresses: addresses.map((a) => ({ ...a, admitted: admitted.has(a.cidr) })),
+    limit,
+    planName,
+    ...(addresses.length > limit ? { notAdmitted: `Not admitted on the ${planName} plan: remove one${moreOnAnotherPlan(limit)}.` } : {}),
   }
+}
+
+/** For an agent: the addresses past the plan's number, and what to do about them. Null when there are none. */
+export function notAdmittedLine(list: AllowlistState): string | null {
+  const over = list.addresses.filter((a) => !a.admitted).map((a) => a.cidr)
+  if (over.length === 0) return null
+  return (
+    `${over.join(', ')} ${over.length === 1 ? 'is' : 'are'} not admitted: the ${list.planName} plan includes ${list.limit} ` +
+    `${list.limit === 1 ? 'address' : 'addresses'} and this project allows ${list.addresses.length}. Remove one${moreOnAnotherPlan(list.limit)}.`
+  )
+}
+
+/** Where a plan with more addresses is sold, said after "remove one". */
+function moreOnAnotherPlan(limit: number): string {
+  return limit < 10 ? ', or move to Pro for up to 10' : limit < 50 ? ', or ask about Enterprise for up to 50' : ''
 }
 
 // ── Changing it ───────────────────────────────────────────────────────────────
@@ -131,11 +159,9 @@ async function governed<T>(projectId: string, title: string, userId: string | un
 }
 
 function limitReached(count: number, limit: number, planName: string): AllowedAddressError {
-  const more =
-    limit < 10 ? ', or move to Pro for up to 10' : limit < 50 ? ', or ask about Enterprise for up to 50' : ''
   return new AllowedAddressError(
     'ADDRESS_LIMIT_REACHED',
-    `This project already allows ${count} ${count === 1 ? 'address' : 'addresses'}, the most the ${planDisplayName(planName)} plan includes. Remove one first${more}.`,
+    `This project already allows ${count} ${count === 1 ? 'address' : 'addresses'}, the most the ${planDisplayName(planName)} plan includes. Remove one first${moreOnAnotherPlan(limit)}.`,
   )
 }
 
@@ -210,9 +236,10 @@ export async function allowAddress(projectId: string, input: unknown, opts: { us
 }
 
 /**
- * Stop `input` connecting: the range exactly as it is on the list (typed in
- * any form that normalises to it). Another project that allows the same range
- * keeps it on the region's allowlist.
+ * Take `input` off the project's list: the range exactly as it is there (typed
+ * in any form that normalises to it). It leaves the region's allowlist unless
+ * another project in the region allows it too. Connections already open from
+ * it stay open; rotating a login's password ends them.
  */
 export async function removeAddress(projectId: string, input: unknown, opts: { userId?: string } = {}): Promise<{ cidr: string; sync: AllowlistSync }> {
   assertValidProjectId(projectId)

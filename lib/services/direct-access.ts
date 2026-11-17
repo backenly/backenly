@@ -132,10 +132,10 @@ export interface DirectAccessStatus {
    */
   logins?: Array<{ mode: DirectAccessMode; roleName: string; createdAt: string; rotatedAt: string | null }>
   /**
-   * Where connections can be made: the addresses allowed to make them
+   * Where connections can be made: the addresses this project allows
    * (lib/services/direct-access-addresses.ts). Where the region's endpoint
-   * admits only allowed addresses (`enforced`) and none is allowed yet, no
-   * connection gets through, whatever the login.
+   * admits only allowed addresses (`enforced`), it admits those of every
+   * project in the region; the login's password is what reaches this one.
    */
   allowlist?: AllowlistState
   pendingDriftEvents: number
