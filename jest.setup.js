@@ -56,7 +56,7 @@ console.log('✅ Test database configured:', process.env.TEST_DATABASE_URL.repla
 // construct, and they load after this file in the same registry, so they get
 // the wrapped constructor. A file that mocks either module is unaffected.
 ;(() => {
-  const handles = { pools: new Set(), clients: new Set() }
+  const handles = { pools: new Set(), clients: new Set(), pgClients: new Set() }
   globalThis.__backenlyDbHandles = handles
   const track = (Ctor, into) =>
     new Proxy(Ctor, {
@@ -69,6 +69,10 @@ console.log('✅ Test database configured:', process.env.TEST_DATABASE_URL.repla
   try {
     const pg = require('pg')
     pg.Pool = track(pg.Pool, handles.pools)
+    // A Client used on its own (the realtime listener's LISTEN connection, a
+    // test's own). A pool builds its clients from pg's internal class, not
+    // this export, so they stay the pool's to close.
+    pg.Client = track(pg.Client, handles.pgClients)
   } catch {
     /* pg not installed in this context */
   }
