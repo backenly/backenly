@@ -90,10 +90,8 @@ export async function retrySchemaCacheRefusals<R extends UpstreamReply>(
     try {
       reply = await resend()
     } catch (err) {
-      console.error(
-        `[postgrest] ${label}: resend after PGRST002 failed:`,
-        err instanceof Error ? err.message : err,
-      )
+      // A constant format string: the label carries the request's path.
+      console.error('[postgrest] %s: resend after PGRST002 failed: %s', label, err instanceof Error ? err.message : String(err))
       break
     }
     retries += 1
@@ -102,8 +100,12 @@ export async function retrySchemaCacheRefusals<R extends UpstreamReply>(
 
   const outcome = isSchemaCacheRefusal(reply) ? 'still refused' : `answered ${reply.upstream.status}`
   console.warn(
-    `[postgrest] ${label}: schema cache empty (PGRST002); ${outcome} after ` +
-      `${retries} ${retries === 1 ? 'retry' : 'retries'} in ${Date.now() - started} ms`,
+    '[postgrest] %s: schema cache empty (PGRST002); %s after %d %s in %d ms',
+    label,
+    outcome,
+    retries,
+    retries === 1 ? 'retry' : 'retries',
+    Date.now() - started,
   )
   return reply
 }
