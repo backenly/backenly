@@ -19,6 +19,8 @@
 
 import { Pool } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRoles } from '@/lib/autonomy/statement-attribution'
+import { statementClauses } from '@/lib/autonomy/statement-text'
 import { literalPrefix } from '@/lib/projects/backend-presence'
 import { sizeWords } from '@/lib/core/size-words'
 
@@ -499,6 +501,9 @@ export function extractIndexCandidate(
   } = {},
 ): IndexCandidate | null {
   if (!queryText || !schemaName) return null
+  // Read as SQL: a table or a WHERE inside a comment, a string or a function
+  // body is not one the statement reads.
+  queryText = statementClauses(queryText)
 
   // The table must be named with THIS project's schema. A bare "orders" could
   // belong to any tenant sharing the database. The schema is always quoted (its
@@ -592,44 +597,44 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
       return []
     }
 
+    const roles = statementRoles(schemaName)
     const rows = await pool.query<{
       query: string
       calls: string
       avg_ms: string
       avg_rows: string
+      by_own_role: boolean
     }>(
-      // ── Scoped to THIS tenant's schema ─────────────────────────────────────
+      // ── Only THIS project's statements ─────────────────────────────────────
       //
       // pg_stat_statements is per-DATABASE, and every project on this server
-      // shares one. Without this filter the scan read every tenant's statements
-      // and attributed the slowest to whichever project happened to be scanned,
-      // so a customer could be shown someone else's query text as their own
-      // performance problem — a cross-tenant leak of query shapes, and advice
-      // about a table they do not have.
-      //
-      // `position()` rather than LIKE on purpose: in LIKE, the `_` in
-      // `workspace_<id>` is a single-character wildcard, so the pattern would
-      // also match schemas that merely resemble this one.
+      // shares one. A statement is this project's when its own roles ran it, or
+      // PostgREST or Backenly ran it naming this project's schema
+      // (lib/autonomy/statement-attribution.ts); otherwise a customer could be
+      // shown a query that is not theirs as their own performance problem, and
+      // advice about a table they do not have.
       //
       // No `NOT LIKE '%pg_catalog%'`: PostgREST, which serves /api/v2 and v1
       // /db, selects `pg_catalog.count(…)` in every statement, so that filter
       // hid all REST traffic (lib/autonomy/slow-query-index.ts has the
       // measurement). The text is read long enough to reach PostgREST's WHERE,
       // which follows fully qualified column lists.
-      `SELECT LEFT(query, 4000) AS query,
-              calls,
-              ROUND((total_exec_time / NULLIF(calls, 0))::numeric, 2) AS avg_ms,
-              ROUND((rows / NULLIF(calls, 0))::numeric, 0) AS avg_rows
-         FROM pg_stat_statements
-        WHERE position($1 in query) > 0
-          AND query NOT LIKE '%information_schema%'
-          AND (total_exec_time / NULLIF(calls, 0)) > 100
+      `SELECT LEFT(s.query, 4000) AS query,
+              s.calls,
+              ROUND((s.total_exec_time / NULLIF(s.calls, 0))::numeric, 2) AS avg_ms,
+              ROUND((s.rows / NULLIF(s.calls, 0))::numeric, 0) AS avg_rows,
+              ${byOwnRoleColumn('r', '$2')} AS by_own_role
+         FROM pg_stat_statements s
+         JOIN pg_roles r ON r.oid = s.userid
+        WHERE ${projectStatementScope({ s: 's', r: 'r', schema: '$1', ownRoles: '$2', platformRoles: '$3' })}
+          AND s.query NOT LIKE '%information_schema%'
+          AND (s.total_exec_time / NULLIF(s.calls, 0)) > 100
         ORDER BY avg_ms DESC
         LIMIT 8`,
-      [schemaName],
+      [schemaName, roles.own, roles.platform],
     )
 
-    return rows.rows.map(r => {
+    return rows.rows.filter(r => projectStatement({ query: r.query, byOwnRole: r.by_own_role === true }, schemaName)).map(r => {
       const avgMs = Number(r.avg_ms)
       const calls = Number(r.calls)
       const avgRows = Number(r.avg_rows)
@@ -743,9 +748,10 @@ async function measuredFilterColumns(
     )
     if (ext.rows.length === 0) return picked
 
-    // Scoped to THIS schema: pg_stat_statements is per-database and every tenant
-    // shares one, so an unscoped read would index a column named in someone
-    // else's query. `position()` rather than LIKE, where `_` is a wildcard.
+    // Only THIS project's statements: pg_stat_statements is per-database and
+    // every project shares one, so an unscoped read would index a column named
+    // in a statement that is not this project's
+    // (lib/autonomy/statement-attribution.ts).
     //
     // No latency threshold here, deliberately. The evidence for a hot table is
     // its scan count, which the caller already measured; this query only has to
@@ -755,19 +761,23 @@ async function measuredFilterColumns(
     // No `NOT LIKE '%pg_catalog%'` (see detectSlowQueries): it hid every
     // PostgREST statement, so a table read only through the REST APIs could
     // never name its measured column, and its Hot table finding named none.
-    const stmts = await pool.query<{ query: string }>(
-      `SELECT LEFT(query, 4000) AS query
-         FROM pg_stat_statements
-        WHERE position($1 in query) > 0
-          AND query NOT LIKE '%information_schema%'
-        ORDER BY total_exec_time DESC
+    const roles = statementRoles(schemaName)
+    const stmts = await pool.query<{ query: string; by_own_role: boolean }>(
+      `SELECT LEFT(s.query, 4000) AS query,
+              ${byOwnRoleColumn('r', '$2')} AS by_own_role
+         FROM pg_stat_statements s
+         JOIN pg_roles r ON r.oid = s.userid
+        WHERE ${projectStatementScope({ s: 's', r: 'r', schema: '$1', ownRoles: '$2', platformRoles: '$3' })}
+          AND s.query NOT LIKE '%information_schema%'
+        ORDER BY s.total_exec_time DESC
         LIMIT 100`,
-      [schemaName],
+      [schemaName, roles.own, roles.platform],
     )
 
     const wanted = new Set(tableNames)
     const candidates = new Map<string, string>()
     for (const row of stmts.rows) {
+      if (!projectStatement({ query: row.query, byOwnRole: row.by_own_role === true }, schemaName)) continue
       const cand = extractIndexCandidate(row.query, schemaName)
       if (!cand || !wanted.has(cand.table)) continue
       // First match wins: rows arrive worst-first, so this is the column the

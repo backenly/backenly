@@ -61,6 +61,27 @@ import { generatePassword, scramSha256Verifier } from '@/tools/managed-db/region
 
 jest.setTimeout(300_000)
 
+/**
+ * The procedure is bash and psql from a PostgreSQL 16 bin directory, and the
+ * snapshot job pg_dump. CI installs them and runs every case (a skipped suite
+ * fails its run there); a machine without them skips the suite rather than
+ * failing each case on a missing binary.
+ */
+function missingTools(): string[] {
+  let dir = process.env.PG_BINDIR ?? ''
+  if (!dir) {
+    try {
+      dir = execFileSync('pg_config', ['--bindir'], { encoding: 'utf8' }).trim()
+    } catch {
+      return ['PG_BINDIR']
+    }
+  }
+  const suffix = process.platform === 'win32' ? '.exe' : ''
+  return ['initdb', 'pg_ctl', 'psql', 'pg_dump'].filter((tool) => !fs.existsSync(path.join(dir, `${tool}${suffix}`)))
+}
+const runnable = Boolean(process.env.CI) || missingTools().length === 0
+const suite = runnable ? describe : describe.skip
+
 const ROOT = process.cwd()
 const DB = 'backenly_regional'
 const ADMIN = 'regional_admin'
@@ -288,6 +309,11 @@ beforeAll(async () => {
 
   await rows(superUrl('postgres'), `CREATE ROLE ${ADMIN} LOGIN CREATEROLE CREATEDB BYPASSRLS PASSWORD '${ADMIN_PW}'`)
   await rows(superUrl('postgres'), `GRANT pg_monitor TO ${ADMIN}`)
+  // The RDS master grants the predefined monitoring roles (pg_monitor is how
+  // monitoring tools are given RDS statistics). PostgreSQL 16 lets a role grant
+  // another only with the ADMIN option on it, which is what roles.sql needs to
+  // give the application pg_read_all_stats.
+  await rows(superUrl('postgres'), `GRANT pg_read_all_stats TO ${ADMIN} WITH ADMIN OPTION`)
   await rows(superUrl('postgres'), `CREATE DATABASE ${DB} OWNER ${ADMIN}`)
 
   vectorAvailable = (await rows(superUrl(), `SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`)).length > 0
@@ -307,7 +333,7 @@ afterAll(async () => {
   }
 })
 
-describe('a region’s first database', () => {
+suite('a region’s first database', () => {
   it('is checked before anything is written, and the check lists every step and credential', async () => {
     const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
     expect(result.status).toBe(0)
@@ -408,7 +434,7 @@ describe('a region’s first database', () => {
   })
 })
 
-describe('the application, against the database the procedure built', () => {
+suite('the application, against the database the procedure built', () => {
   const id = randomUUID()
   const schema = `workspace_${id}`
   // Named as the platform names them, which is how the capture tells whose they are.
@@ -489,6 +515,33 @@ describe('the application, against the database the procedure built', () => {
     expect(await hasCapability('pgstattuple', 'us-east-1')).toMatchObject({ available: true, indeterminate: false })
   })
 
+  it('reads the text of the statements PostgREST runs, as the application', async () => {
+    // PostgREST logs in as the authenticator and runs each request as anon,
+    // authenticated or service_role. The application's slow-query checks read
+    // pg_stat_statements, which shows that text only to a role with the
+    // privileges of pg_read_all_stats (roles.sql).
+    const marker = `rest_read_${randomUUID().replace(/-/g, '')}`
+    const authenticator = new Client({ connectionString: loginUrl('backenly_authenticator') })
+    await authenticator.connect()
+    try {
+      await authenticator.query('BEGIN')
+      await authenticator.query(`SELECT set_config('role', 'service_role', true)`)
+      await authenticator.query(`SELECT 1 AS ${marker}`)
+      await authenticator.query('COMMIT')
+    } finally {
+      await authenticator.end().catch(() => {})
+    }
+    expect(await rows(app(), `SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') AS stats`)).toEqual([{ stats: true }])
+    const seen = await rows<{ query: string }>(
+      app(),
+      `SELECT s.query FROM pg_stat_statements s JOIN pg_roles r ON r.oid = s.userid
+        WHERE r.rolname = 'service_role' AND s.query LIKE '%' || $1 || '%'`,
+      [marker],
+    )
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((row) => row.query !== '<insufficient privilege>')).toBe(true)
+  })
+
   it('keeps each role to its job', async () => {
     // The app reads, adopts and prunes drift events; only the capture inserts them.
     expect(await refusal(app(), `INSERT INTO public.schema_drift_events ("id", "roleName", "commandTag") VALUES ('x', 'y', 'z')`)).toMatch(/permission denied/)
@@ -559,7 +612,7 @@ function dumpAsBackup(schema: string): { status: number; stdout: string; stderr:
   return { status: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
-describe('a project without direct access, which the application makes in the region', () => {
+suite('a project without direct access, which the application makes in the region', () => {
   // Every snapshot of such a project failed in pg_dump, as backenly_backup, with
   // "permission denied for schema": the backup role was given read on a
   // workspace only by the direct-access sync, and only for a project with a
@@ -669,7 +722,7 @@ describe('a project without direct access, which the application makes in the re
   })
 })
 
-describe('a project’s logins, held by the definer as Amazon RDS holds them', () => {
+suite('a project’s logins, held by the definer as Amazon RDS holds them', () => {
   // Deleting a project drops its bkn_ro_ / bkn_rw_ / bkn_fn_ logins, and
   // revoking direct access drops one. Both failed on RDS with 42501
   // ("permission denied to reassign objects"; for bkn_fn_, which a deletion
@@ -1003,7 +1056,7 @@ describe('a project’s logins, held by the definer as Amazon RDS holds them', (
   })
 })
 
-describe('a workspace made before the backup role was given every one', () => {
+suite('a workspace made before the backup role was given every one', () => {
   // As the region's existing projects were: a schema the application made, and
   // a table in it, with nothing granted to the backup role.
   const schema = `workspace_${randomUUID()}`
@@ -1060,7 +1113,7 @@ describe('a workspace made before the backup role was given every one', () => {
   })
 })
 
-describe('the procedure refuses', () => {
+suite('the procedure refuses', () => {
   it('to replace a live credential it was not asked to, and changes nothing', async () => {
     const before = await catalog()
     const result = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', ...verifiers(['backenly_app']) })

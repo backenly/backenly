@@ -1,5 +1,5 @@
 /**
- * LAYER 1 PRIVILEGE JOB — grant the app role CREATE, and verify it
+ * LAYER 1 PRIVILEGE JOB — grant the app role CREATE and pg_read_all_stats, and verify them
  * ================================================================
  *
  * Runs `tools/managed-db/sql/grant-workspace-create.sql` inside the VPC as the
@@ -38,7 +38,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { auditGrantSql, GRANT_SQL_PATH } from '../tools/managed-db/role-privilege-spec'
+import { auditGrantSql, GRANT_SQL_PATH, withoutGrants } from '../tools/managed-db/role-privilege-spec'
 
 const REGION = 'ap-south-1'
 
@@ -181,9 +181,9 @@ async function main(): Promise<void> {
   const masterUser = env('PGUSER') ?? 'backenly_admin'
   const database = env('PGDATABASE') ?? 'backenly'
 
-  // `check` runs the same file with the GRANT removed, so measuring an
+  // `check` runs the same file with every GRANT removed, so measuring an
   // environment cannot change it.
-  const shipped = mode === 'check' ? sql.replace(/^GRANT\s+CREATE[^;]*;$/gim, '\\echo (check mode: GRANT skipped)') : sql
+  const shipped = mode === 'check' ? withoutGrants(sql) : sql
   const encoded = Buffer.from(shipped, 'utf8').toString('base64')
 
   const container = {
