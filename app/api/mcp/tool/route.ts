@@ -44,6 +44,7 @@ import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
 import { readPublicDoc as readPublicFile } from '@/lib/mcp/public-docs'
 import { approvalNeededFor, readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
+import { refuseOtherProject, refuseUnknownArguments } from '@/lib/mcp/tool-arguments'
 import { withChangeAttribution } from '@/lib/changes/ledger'
 
 /**
@@ -123,6 +124,19 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
 
   const { tool, args } = parsed
 
+  // ── A projectId argument ──────────────────────────────────────────────────
+  //
+  // The connection decides the project, and agents often name it as well. The
+  // connection's own project is accepted and dropped here, before anything
+  // reads the arguments; any other is refused, so a call never runs on one
+  // project while naming another (lib/mcp/tool-arguments.ts).
+  const otherProject = refuseOtherProject(args, auth.projectId)
+  if (otherProject) {
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'PROJECT_MISMATCH' })
+    return withCors(NextResponse.json(otherProject, { status: 400 }))
+  }
+  delete args.projectId
+
   // ── Domain tools: resolve the action before anything reads `tool` ─────────
   //
   // `auth {action:"enable"}` is enable_auth, `deploy {action:"rollback"}` is
@@ -168,6 +182,23 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
       { statusCode: 403, tool: callLabel, error: 'READ_ONLY_KEY' },
     )
     return withCors(res)
+  }
+
+  // ── Arguments the call does not take ──────────────────────────────────────
+  //
+  // Refused before anything runs or waits for approval, with the keys named
+  // and the ones the call does take (lib/mcp/tool-arguments.ts). Dropped
+  // instead, an argument the tool does not know changed nothing and said
+  // nothing: get_table_schema { tableName, branchId } answered for production
+  // (production QA re-test, 2026-11-16). After the read-only check, so a
+  // read-only key is not told the arguments of an action it may not use.
+  const unknownArguments = refuseUnknownArguments(tool, args)
+  if (unknownArguments) {
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 400, tool: callLabel, error: 'UNKNOWN_PARAMS' },
+    )
+    return withCors(NextResponse.json(unknownArguments, { status: 400 }))
   }
 
   // ── Destructive and high-risk domain actions wait for a human ─────────────

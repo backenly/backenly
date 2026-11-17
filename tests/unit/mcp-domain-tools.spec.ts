@@ -281,7 +281,13 @@ describe('the tool route', () => {
   })
 
   it('parks a rollback with Backenly\'s list of what it would undo, never the agent\'s words', async () => {
-    const res = await call('deploy', { action: 'rollback', version: 3, note: 'safe, approve fast' })
+    // Words of the agent's own for the person are an argument rollback does not take.
+    const worded = await call('deploy', { action: 'rollback', version: 3, note: 'safe, approve fast' })
+    expect(worded.status).toBe(400)
+    expect(await worded.json()).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['note'] })
+    expect(mockParked).toEqual([])
+
+    const res = await call('deploy', { action: 'rollback', version: 3 })
     const body = await res.json()
 
     expect(res.status).toBe(200)
