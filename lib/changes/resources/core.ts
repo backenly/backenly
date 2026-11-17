@@ -23,6 +23,8 @@
  *   keys          API keys
  *   integrations  integration keys and which integrations are active
  *   frontends     the allowed origins (connected frontends): the CORS allowlist
+ *   addresses     the addresses a project's direct Postgres logins may connect
+ *                 from: its part of the region's network allowlist
  *
  * ── What never comes back ───────────────────────────────────────────────────
  *
@@ -40,10 +42,10 @@ import { createHash } from 'crypto'
 import type { Prisma } from '@prisma/client'
 import { canonicalJson } from '../integrity'
 
-export type ResourceId = 'auth' | 'storage' | 'functions' | 'webhooks' | 'env' | 'keys' | 'integrations' | 'frontends'
+export type ResourceId = 'auth' | 'storage' | 'functions' | 'webhooks' | 'env' | 'keys' | 'integrations' | 'frontends' | 'addresses'
 
 /** The order resources are listed in, everywhere. A stored record's keys come back in jsonb's order, not this one. */
-export const RESOURCE_ORDER: readonly ResourceId[] = ['auth', 'storage', 'functions', 'webhooks', 'env', 'keys', 'integrations', 'frontends']
+export const RESOURCE_ORDER: readonly ResourceId[] = ['auth', 'storage', 'functions', 'webhooks', 'env', 'keys', 'integrations', 'frontends', 'addresses']
 
 export interface ResourceItem {
   /** What a person calls it: "bucket avatars". */

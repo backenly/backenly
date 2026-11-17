@@ -46,6 +46,7 @@ import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
 import { rotateProjectChannel } from '@/lib/realtime/channels'
+import { allowlistState, type AllowlistState } from '@/lib/services/direct-access-addresses'
 
 export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -130,6 +131,13 @@ export interface DirectAccessStatus {
    * can still be revoked. Their passwords and strings are not given.
    */
   logins?: Array<{ mode: DirectAccessMode; roleName: string; createdAt: string; rotatedAt: string | null }>
+  /**
+   * Where connections can be made: the addresses this project allows
+   * (lib/services/direct-access-addresses.ts). Where the region's endpoint
+   * admits only allowed addresses (`enforced`), it admits those of every
+   * project in the region; the login's password is what reaches this one.
+   */
+  allowlist?: AllowlistState
   pendingDriftEvents: number
 }
 
@@ -546,12 +554,11 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
       pendingDriftEvents,
     }
   }
-  return {
-    schema,
-    available: true,
-    credentials: await Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))),
-    pendingDriftEvents,
-  }
+  const [credentials, allowlist] = await Promise.all([
+    Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))),
+    allowlistState(projectId),
+  ])
+  return { schema, available: true, credentials, allowlist, pendingDriftEvents }
 }
 
 // ── Grants sync — the hook called after DDL, for every project ───────────────
