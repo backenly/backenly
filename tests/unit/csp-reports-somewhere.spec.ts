@@ -28,8 +28,19 @@ it('sends no report-only policy without a report-to or report-uri directive', as
 })
 
 it('CONTROL: keeps the enforced policy as it was', async () => {
-  const enforced = (await headers()).filter((h) => h.key === 'Content-Security-Policy')
+  const rules: Array<{ source: string; headers: Header[] }> = await config.headers()
+  const enforced = rules
+    .filter((r) => r.source === '/:path*')
+    .flatMap((r) => r.headers)
+    .filter((h) => h.key === 'Content-Security-Policy')
   expect(enforced).toHaveLength(1)
+  // The only other enforced policy is the one every answer on a function's
+  // path carries (tests/unit/function-answers-are-data.spec.ts).
+  const elsewhere = rules
+    .filter((r) => r.source !== '/:path*')
+    .flatMap((r) => r.headers)
+    .filter((h) => h.key === 'Content-Security-Policy')
+  expect(new Set(elsewhere.map((h) => h.value))).toEqual(new Set(["sandbox; default-src 'none'"]))
   for (const directive of [
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline'",

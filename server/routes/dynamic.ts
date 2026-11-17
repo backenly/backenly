@@ -26,6 +26,7 @@ import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '
 import { handleViaPostgrest } from './postgrest-handler'
 import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
+import { isFunctionAnswerPath } from '@/lib/services/ai-functions/reply'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import {
   SERVICE_ROLE_IN_BROWSER,
@@ -460,7 +461,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // Only `manual` triggerType functions are directly callable; auto-fired
   // triggers (on_db_*, on_signup, cron) reject with 405 to make the reason
   // obvious instead of silently 404'ing in the executor lookup.
-  if (path.length >= 2 && path[0].toLowerCase() === 'fn') {
+  //
+  // Only on a function's path as sent, too: `fn` and `db` written as plain
+  // segments, not ones percent-decoding made (%66n, fn%2F{name}). Those are the
+  // paths every server in front of this one gives a function's answer its
+  // headers on (isFunctionAnswerPath, lib/services/ai-functions/reply.ts).
+  if (path.length >= 2 && path[0].toLowerCase() === 'fn' && isFunctionAnswerPath(req.baseUrl + req.path)) {
     const fnName = path[1]
     try {
       const fn = await prisma.aiFunction.findFirst({

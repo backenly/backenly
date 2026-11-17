@@ -89,6 +89,14 @@ tests/integration/function-row-events-data-plane.spec.ts
 # function's answer (#604). The real runtime, Next routes and function rows.
 tests/integration/function-routes-answer-real-status.spec.ts
 
+# A function's answer typed as HTML, SVG or JavaScript is sent as text/plain,
+# and every answer on a function's path carries nosniff and the sandbox
+# policy, from the runtime and through the web server in front of it (the
+# config's headers by Next's own matcher, the real forwarding route and Next's
+# response code); JSON, text and CSV answers are sent as before. The real
+# runtime, route, API key and function rows.
+tests/integration/function-answers-are-data.spec.ts
+
 # Row-event runs past the month's allowance are not queued; a burst larger than
 # what is left leaves one notice, and the first refusal drops the function's
 # queue with one record (production QA re-test, 2026-11-16, #40). Real capture,

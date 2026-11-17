@@ -24,10 +24,12 @@
  * already recorded it, lib/traffic/recorded-v1.ts). The response streams back
  * with the runtime's status and headers, minus its CORS headers: on this
  * ingress Next's middleware answers CORS, and two Access-Control-Allow-Origin
- * values are a CORS failure in every browser.
+ * values are a CORS failure in every browser. On a function's path, the answer
+ * is sent as data (isFunctionAnswerPath).
  */
 
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
+import { FUNCTION_ANSWER_HEADERS, functionAnswerType, isFunctionAnswerPath } from '@/lib/services/ai-functions/reply'
 
 const REQUEST_DROP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te',
@@ -117,6 +119,15 @@ export async function forwardToRuntime(request: Request, origin: string): Promis
     if (keepResponseHeader(key) && key.toLowerCase() !== 'set-cookie') out.set(key, value)
   })
   for (const cookie of upstream.headers.getSetCookie?.() ?? []) out.append('set-cookie', cookie)
+
+  // A function's answer is data, never a page of this origin, whatever the
+  // runtime behind this sent (lib/services/ai-functions/reply.ts). next.config.js
+  // gives these paths the same two headers, and its values are the ones sent.
+  if (isFunctionAnswerPath(incoming.pathname)) {
+    const type = out.get('content-type')
+    if (type !== null) out.set('content-type', functionAnswerType(type))
+    for (const [name, value] of Object.entries(FUNCTION_ANSWER_HEADERS)) out.set(name, value)
+  }
 
   return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: out })
 }
