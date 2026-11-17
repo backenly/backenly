@@ -521,6 +521,130 @@ describe('error handling', () => {
     }
   })
 
+  describe('while PostgREST reloads its schema cache (PGRST002)', () => {
+    // Production QA re-test (2026-11-16): during a merge the REST API briefly
+    // answered 503 DATA_PLANE_UNAVAILABLE. PostgREST refuses requests with
+    // PGRST002 while a failed schema-cache reload is retried, about a second,
+    // and refuses them before running anything, so the gateway sends them again.
+    const REFUSAL = { code: 'PGRST002', message: 'Could not query the database for the schema cache. Retrying.' }
+
+    /** Answers in order; the last answer repeats. */
+    function upstreamAnswers(answers: Array<{ status: number; body: unknown }>) {
+      global.fetch = jest.fn(async () => {
+        const next = answers.length > 1 ? answers.shift()! : answers[0]
+        return {
+          ok: next.status >= 200 && next.status < 300,
+          status: next.status,
+          headers: { get: () => null },
+          text: async () => JSON.stringify(next.body),
+        }
+      }) as unknown as typeof fetch
+    }
+
+    let random: jest.SpyInstance
+    beforeEach(() => {
+      jest.useFakeTimers()
+      // No jitter: the waits are exactly 250, 500 and 1000 ms.
+      random = jest.spyOn(Math, 'random').mockReturnValue(0.5)
+    })
+    afterEach(() => {
+      random.mockRestore()
+      jest.useRealTimers()
+    })
+
+    it('sends the request again and answers 200 once the cache is back', async () => {
+      upstreamAnswers([
+        { status: 503, body: REFUSAL },
+        { status: 200, body: [{ id: 1, name: 'ready' }] },
+      ])
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(249)
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      await jest.advanceTimersByTimeAsync(1)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(2)
+      const [firstUrl, first] = (global.fetch as jest.Mock).mock.calls[0]
+      const [secondUrl, second] = (global.fetch as jest.Mock).mock.calls[1]
+      expect(secondUrl).toBe(firstUrl)
+      expect(second.method).toBe(first.method)
+      expect(second.headers).toBe(first.headers)
+      expect(res.statusCode).toBe(200)
+      expect(res.body.data).toEqual([{ id: 1, name: 'ready' }])
+      expect(res.headers['retry-after']).toBeUndefined()
+    })
+
+    it('sends a write again with the same body, because PostgREST never ran it', async () => {
+      upstreamAnswers([
+        { status: 503, body: REFUSAL },
+        { status: 503, body: REFUSAL },
+        { status: 201, body: [{ id: 9, name: 'x' }] },
+      ])
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('POST', {}, { name: 'x' }), res, ['orders'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(750)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(3)
+      const calls = (global.fetch as jest.Mock).mock.calls
+      for (const [url, init] of calls.slice(1)) {
+        expect(url).toBe(calls[0][0])
+        expect(init.method).toBe('POST')
+        expect(init.body).toBe(calls[0][1].body)
+        expect(init.headers).toBe(calls[0][1].headers)
+      }
+      expect(JSON.parse(calls[2][1].body)).toEqual({ name: 'x' })
+      expect(res.statusCode).toBe(201)
+      expect(res.body.data).toEqual({ id: 9, name: 'x' })
+    })
+
+    it('answers 503 with Retry-After: 1 when the refusal outlasts about 2 s', async () => {
+      upstreamAnswers([{ status: 503, body: REFUSAL }])
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('PATCH', {}, { name: 'x' }), res, ['orders', '7'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(1_749)
+      expect(global.fetch).toHaveBeenCalledTimes(3)
+      expect(res.statusCode).toBe(0)
+      await jest.advanceTimersByTimeAsync(1)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(4)
+      expect(res.statusCode).toBe(503)
+      expect(res.headers['retry-after']).toBe('1')
+      expect(res.body.code).toBe('DATA_PLANE_UNAVAILABLE')
+      expect(res.body.error).toMatch(/did not run this request/)
+      expect(res.body.layer).toBe('platform')
+    })
+
+    it('never waits more than 2 s in all, however the jitter falls', async () => {
+      random.mockReturnValue(0.999999)
+      upstreamAnswers([{ status: 503, body: REFUSAL }])
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(1_999)
+      expect(res.statusCode).toBe(0)
+      await jest.advanceTimersByTimeAsync(1)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(4)
+      expect(res.statusCode).toBe(503)
+      expect(res.headers['retry-after']).toBe('1')
+    })
+
+    it('does not send again a 503 that is not PGRST002', async () => {
+      // No database connection (PGRST000): it may not clear within a second,
+      // and a write refused for another reason is not known to be unrun.
+      upstreamAnswers([{ status: 503, body: { code: 'PGRST000', message: 'Could not connect' } }])
+      const res = mockRes()
+      await handleViaPostgrest(mockReq('POST', {}, { name: 'x' }), res, ['orders'], { projectId: PROJECT })
+
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      expect(res.statusCode).toBeGreaterThanOrEqual(500)
+      expect(res.headers['retry-after']).toBeUndefined()
+    })
+  })
+
   it('maps a unique violation to 409', async () => {
     stubUpstream(400, { code: '23505', message: 'duplicate key' })
     const res = mockRes()
