@@ -373,14 +373,10 @@ export function buildFixAction(
         params: { issue: type, provider: details.provider },
       }
 
-    case 'auth_spike':
-      // Auth-spike anomalies are diagnostic, not actionable — but FIX_AUTH at
-      // minimum re-validates the auth subsystem (jwtSecret, users table, etc.)
-      // so any concurrent corruption gets repaired. We still surface the anomaly.
-      return {
-        action: 'FIX_AUTH',
-        params: { issue: 'auth_spike' },
-      }
+    // auth_spike has no repair: a run of failed sign-ins is diagnosed, not
+    // fixed. It mapped to FIX_AUTH, which re-checks auth configuration a wave of
+    // wrong passwords says nothing about, and that put "Approve & fix" on it.
+    // getManualRemediationHint says what to look at.
 
     // ── Integrations ────────────────────────────────────────────────────────
     case 'integration_key_invalid':
@@ -792,6 +788,20 @@ If the column is deliberately different now, tell your coding agent to rebuild i
         `anyone who views your site's source, and it still works from curl or any server. ` +
         `Three steps: swap the browser code to a client key (Project → API keys), move this key ` +
         `to a server route or a Backenly function, then revoke and reissue it.`
+      )
+    }
+
+    // A run of failed sign-ins (workspace-observer.ts detectAuthSpike). Nothing
+    // to repair; the hint says what tells the two usual causes apart.
+    case 'auth_spike': {
+      const failed = Number(details?.failedSignIns ?? details?.errorCount) || 0
+      const ok = Number(details?.successfulSignIns) || 0
+      const counts = failed > 0 ? `${failed} password sign-ins failed and ${ok} succeeded in the last 10 minutes. ` : ''
+      return (
+        `${counts}Backenly already refuses an address or an account after repeated failures, so no ` +
+        'setting needs changing. If one of your clients keeps sending a password that has since ' +
+        'changed, fix that client. If your users do not sign in at this rate, someone is trying ' +
+        'passwords; magic-link sign-in (Auth settings) leaves no password to guess. Dismiss this once you know which.'
       )
     }
 

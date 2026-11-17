@@ -215,9 +215,13 @@ describe('generateFixPlansFromRawFindings', () => {
     expect(plans[0].autoFixable).toBe(true)
   })
 
-  test('auth_spike → requiresApproval', () => {
+  // Was requiresApproval. A run of failed sign-ins has nothing in the backend
+  // to repair, so the classifier rates it notify-only and the plan follows
+  // (production QA, 2026-11-16: "Approve & fix" on it changed nothing).
+  test('auth_spike → notify only', () => {
     const plans = generateFixPlansFromRawFindings([makeRaw('auth_spike', 'critical')])
-    expect(plans[0].requiresApproval).toBe(true)
+    expect(plans[0].requiresApproval).toBe(false)
+    expect(plans[0].notifyOnly).toBe(true)
   })
 
   // This asserted autoFixable=true. The plan's rating comes from the classifier,
