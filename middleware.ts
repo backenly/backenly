@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { v1ErrorBody } from '@/lib/api/v1/error-shape'
+import { v1DbDeprecationHeaders } from '@/lib/api/v1/deprecation'
 import { postgrestErrorBody } from '@/lib/api/v2/error-shape'
 import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
@@ -285,7 +286,7 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
     ? 'Content-Type, Authorization, X-Requested-With, X-User-Id, X-Project-Id, X-User-Token, x-api-key, Prefer, Range, Range-Unit, Accept-Profile, Content-Profile'
     : 'Content-Type, Authorization, X-Requested-With'
   /** Response headers cross-origin JavaScript is permitted to read. */
-  const exposedHeaders = 'Content-Range, Content-Location, Location, Range-Unit, Preference-Applied, X-Backenly-Environment, Retry-After'
+  const exposedHeaders = 'Content-Range, Content-Location, Location, Range-Unit, Preference-Applied, X-Backenly-Environment, Retry-After, Deprecation, Link'
 
   // SDK (/api/v1/*) auth is via x-api-key in headers, NOT cookies. Don't
   // advertise credentials — that prevents browsers from sending cookies and
@@ -381,7 +382,9 @@ export async function middleware(request: NextRequest) {
       : pathname.startsWith('/api/v1/')
         ? v1ErrorBody(413, refusal)
         : { success: false, code, message }
-    return applyCorsHeaders(NextResponse.json(body, { status: 413 }))
+    // A /db route answered here says it is deprecated, as every /db response
+    // does (lib/api/v1/deprecation.ts).
+    return applyCorsHeaders(NextResponse.json(body, { status: 413, headers: v1DbDeprecationHeaders(pathname) ?? undefined }))
   }
 
   // ✅ Public API routes

@@ -5382,7 +5382,9 @@ async function executeGenerateAPI(
       // storage key and other things read it. Only the human/agent-facing
       // message is made absolute — the thing being reported is "where do I call
       // this", and a relative fragment does not answer that.
-      message: `✅ API for "${tableName}" is live at /api/v1/${projectId}/db/${tableName.toLowerCase()} (GET, POST, and /{id} for PUT/DELETE)${domainNote}`,
+      // /api/v2 is the REST API; /db is deprecated, kept for existing apps
+      // (lib/api/v1/deprecation.ts).
+      message: `✅ API for "${tableName}" is live at /api/v2/${projectId}/${tableName.toLowerCase()}, in PostgREST's grammar (GET, POST, PATCH, DELETE; ?id=eq.<id> for one row)${domainNote}`,
       // The table row IS the API's identity now — there is no separate
       // definition record to hand back.
       data: { tableName, basePath: apiBasePath, tableId: table.id },
@@ -6741,7 +6743,7 @@ async function executeListAPIs(projectId: string): Promise<ExecutionResult> {
     const apiList = apis
       .map((api) => {
         const rls = api.rlsEnabled ? 'RLS on' : '⚠ no RLS'
-        return `✅ **/db/${api.name}** — LIST, GET, CREATE, UPDATE, DELETE · ${api.recordCount} rows · ${rls}`
+        return `✅ **/api/v2/${projectId}/${api.name}** — LIST, GET, CREATE, UPDATE, DELETE · ${api.recordCount} rows · ${rls}`
       })
       .join('\n')
 
@@ -6749,8 +6751,8 @@ async function executeListAPIs(projectId: string): Promise<ExecutionResult> {
       success: true,
       message:
         `🚀 **Your APIs (${apis.length}):**\n\n${apiList}\n\n` +
-        `Typed contract: \`/api/v1/${projectId}/db/{table}\`\n` +
-        `PostgREST grammar: \`/api/v2/${projectId}/{table}\` (filters, ordering, \`?select=*,related(*)\`)`,
+        `REST API: \`/api/v2/${projectId}/{table}\`, in PostgREST's grammar (filters, ordering, \`?select=*,related(*)\`).\n` +
+        `\`/api/v1/${projectId}/db/{table}\` is deprecated, kept for existing apps.`,
       data: { apis },
     }
   } catch (error: any) {
@@ -6809,8 +6811,8 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
     if (apiDefs.length > 0) {
       lines.push(`### REST APIs (${apiDefs.length} resource${apiDefs.length !== 1 ? 's' : ''})`)
       for (const def of apiDefs) {
-        // Every exposed table serves the CRUD set the /db/* route registers.
-        lines.push(`- **${def.name}** - GET · POST · PUT · PATCH · DELETE - base: \`/api/v1/${projectId}/db/${def.name}\``)
+        // Every exposed table is served on /api/v2, the REST API.
+        lines.push(`- **${def.name}** - GET · POST · PATCH · DELETE - base: \`/api/v2/${projectId}/${def.name}\``)
       }
       lines.push('')
     }
@@ -14815,7 +14817,7 @@ async function executeRegisterSchema(projectId: string): Promise<ExecutionResult
 
     return {
       success: true,
-      message: `✅ **Registered \`${result.schema}\` with the data plane.** Every \`/db/*\` endpoint for this project is served again.`,
+      message: `✅ **Registered \`${result.schema}\` with the data plane.** This project's REST API (\`/api/v2\`, and the deprecated \`/db\`) is served again.`,
       data: result,
     }
   } catch (error: any) {
@@ -14944,7 +14946,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
       message: `✅ Full-text search added to **${tableName}**.\n\n`
         + `- **Indexed columns**: ${validSearchCols.join(', ')}\n`
         + `- **GIN index**: \`${idxName}\`\n`
-        + `- **Search endpoint**: \`GET /api/v1/${projectId}/db/${tableName}/search?q=keyword\`\n\n`
+        + `- **Search**: \`GET /api/v2/${projectId}/${tableName}?search_vector=wfts(english).<words>\` (PostgREST's full-text filter on the indexed column)\n\n`
         + `Searches use PostgreSQL full-text search with English stemming.`,
       data: { tableName, searchColumns: validSearchCols, indexName: idxName },
     }

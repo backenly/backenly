@@ -280,7 +280,8 @@ describe('detection', () => {
     expect(refunds.presenceRate).toBeCloseTo(0.2, 1)
     expect(refunds.plan.validity).toBe('executable')
     expect(refunds.plan.contractBlockers.join('\n')).toMatch(/refund-mailer/)
-    expect(refunds.clientMigration[0].after).toBe('GET /db/orders?select=id,order_refunds(refund_amount,refund_reason,refunded_at)')
+    // PostgREST's grammar, on the REST API that speaks it (/db refuses `select=`).
+    expect(refunds.clientMigration[0].after).toBe('GET /api/v2/{projectId}/orders?select=id,order_refunds(refund_amount,refund_reason,refunded_at)')
     planId = refunds.planId
     planVersion = refunds.plan.planVersion
   })
