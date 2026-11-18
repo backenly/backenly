@@ -49,8 +49,8 @@ import { UserTally, countUsers, listUsers, listUsersPage, mapFirebaseUser, readH
 import { downloadObject, findDefaultBucket, listObjects, listObjectsPage, mimeTypeFor, readProjectInfo } from './firebase-storage'
 import { pendingRules, readFirestoreRules } from './firebase-rules'
 import { backenlyDestination, type FirebaseDestination } from './firebase-destination'
-import { throwIfAborted } from '../pg-engine'
-import { fileRefusal, rowRefusal } from '../limits'
+import { batchCost, throwIfAborted } from '../pg-engine'
+import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, RowRoom, fileRefusal, rowRefusal, tableCountRefusal, userCountRefusal } from '../limits'
 import { ByteBudget, FILE_BYTES_IN_FLIGHT, waitForHeadroom } from '../pressure'
 
 export interface FirebaseLimits {
@@ -273,6 +273,9 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
     const overFiles = fileRefusal(fileBytes, ctx.limits)
     if (overFiles) warnings.unshift(overFiles)
     let refusal: string | null = sizeRefusal(fs.bytes, ctx.limits)
+    if (!refusal && fs.tables.length > MAX_IMPORT_TABLES) refusal = tableCountRefusal(fs.tables.length)
+    const movingUsers = users.users ? users.users.total - users.users.skipped : 0
+    if (!refusal && movingUsers > MAX_IMPORT_USERS) refusal = userCountRefusal(movingUsers)
     const empty =
       fs.tables.length === 0 &&
       users.users !== null && users.users.total === 0 &&
@@ -305,12 +308,13 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
     const reader = new FirestoreReader(client, sa.projectId)
     let tops: string[]
     try {
-      tops = await reader.listCollectionIds()
+      tops = await reader.listCollectionIds(null, MAX_IMPORT_TABLES)
     } catch (err) {
       if (firestoreAbsence(err)) return
       if (err instanceof GoogleApiError && err.permissionDenied) throw new ImportInputError(FIRESTORE_DENIED, 'serviceAccountJson')
       throw err
     }
+    if (tops.length > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(null))
     const found = await mapLimit(tops, 4, async (id): Promise<DiscoveredCollection> => {
       const profile = new CollectionProfile()
       for (const d of await reader.sample(id, 100)) profile.add(d)
@@ -335,7 +339,7 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
     verified: boolean
   }
 
-  async function moveFirestore(client: GoogleClient, projectId: string, ctx: RunContext, dest: FirebaseDestination, warnings: string[]) {
+  async function moveFirestore(client: GoogleClient, projectId: string, ctx: RunContext, dest: FirebaseDestination, warnings: string[], room: RowRoom) {
     ctx.progress({ phase: 'tables' })
     const reader = new FirestoreReader(client, projectId)
     let found: DiscoveredCollection[]
@@ -369,6 +373,8 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
 
     const create = async (batch: Array<{ plan: TablePlan; known: number | null }>, title: string) => {
       throwIfAborted(ctx.signal)
+      // Collections found while moving count too: past the limit, no more tables are made.
+      if (state.size + batch.length > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(null))
       const unindexed = await dest.createTables(batch.map((b) => b.plan), title)
       for (const t of unindexed) {
         const p = batch.find((b) => b.plan.name === t)?.plan
@@ -396,6 +402,8 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
       }
       const rows = s.buffer.map((r) => writeRow(s.plan, r))
       s.buffer = []
+      // The estimate from a sample passed the plan's limit; what arrives is counted against its room.
+      await room.take(batchCost(rows))
       s.copied += await dest.insertRows(s.plan.name, writeColumns(s.plan), rows)
     }
 
@@ -493,7 +501,14 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
     return { tables: state.size, rows }
   }
 
-  async function moveUsers(client: GoogleClient, projectId: string, ctx: RunContext, dest: FirebaseDestination, warnings: string[]): Promise<number | undefined> {
+  async function moveUsers(
+    client: GoogleClient,
+    projectId: string,
+    ctx: RunContext,
+    dest: FirebaseDestination,
+    warnings: string[],
+    room: RowRoom,
+  ): Promise<number | undefined> {
     try {
       const hash = await readHashSettings(client, projectId)
       const estimate = (await countUsers(client, projectId)) ?? 0
@@ -512,6 +527,9 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
           if (outcome.kind === 'imported') rows.push(outcome.user)
         }
         imported += rows.length
+        if (imported > MAX_IMPORT_USERS) throw new ImportInputError(userCountRefusal(null))
+        // Users are rows of the project's database too: the same room as the tables'.
+        await room.take(batchCost(rows.map((u) => Object.values(u))))
         copied += await dest.insertUsers(rows)
         ctx.progress({ users: { total: Math.max(estimate, tally.total), copied } })
       }
@@ -633,15 +651,17 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
     const { client } = google(sa, ctx.signal)
     const dest = (options.destination ?? ((c: RunContext) => backenlyDestination({ projectId: c.projectId, userId: c.userId })))(ctx)
     const warnings: string[] = []
+    // Documents and users are counted against the plan's room as they are written (lib/import/limits.ts).
+    const room = new RowRoom(ctx.limits, () => dest.measureRows())
     try {
-      const fs = await moveFirestore(client, sa.projectId, ctx, dest, warnings)
+      const fs = await moveFirestore(client, sa.projectId, ctx, dest, warnings, room)
       if (fs.tables > 0) {
         // Nothing is queued to approve (a Firestore rule has no exact translation); the tables wait closed.
         warnings.push(
           `${fs.tables === 1 ? 'The moved table answers' : `All ${n(fs.tables)} moved tables answer`} only your server key until you set ${fs.tables === 1 ? 'its' : 'their'} access rules: Firestore rules aren't translated.`,
         )
       }
-      const users = ctx.include.users ? await moveUsers(client, sa.projectId, ctx, dest, warnings) : undefined
+      const users = ctx.include.users ? await moveUsers(client, sa.projectId, ctx, dest, warnings, room) : undefined
       const files = ctx.include.files ? await moveFiles(client, sa.projectId, ctx, dest, warnings) : undefined
       ctx.progress({ phase: 'verifying', rulesPending: fs.tables })
       return {

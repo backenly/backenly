@@ -13,8 +13,8 @@ import { connectSource, isSupabaseHost, parsePostgresUrl, readSnapshot, supabase
 import { authShape, countAuthUsers, countRows, existingSchemas, readCatalog, schemaBytes, type AuthCounts, type AuthShape } from '../pg-source'
 import { buildPlan, type ImportPlan, type SourceCatalog } from '../pg-plan'
 import { previewRules, proposeRules, recordRulesForApproval, type RuleProposal } from '../rules'
-import { fileRefusal, formatBytes, rowRefusal } from '../limits'
-import { addDeferredKeys, copyRows, createTables, destinationCounts, throwIfAborted } from '../pg-engine'
+import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, fileRefusal, formatBytes, rowRefusal, tableCountRefusal, userCountRefusal } from '../limits'
+import { addDeferredKeys, copyRows, createTables, destinationCounts, rowRoomFor, throwIfAborted } from '../pg-engine'
 import { copyAuthUsers, prepareUsersTable } from '../supabase-auth'
 import { StorageWalk, StorageWalkLimitError, copyFiles, createBuckets, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
 
@@ -74,6 +74,7 @@ export async function analyze(
     if (shape.present) auth = { shape, counts: await countAuthUsers(db, shape) }
   }
   const plan = buildPlan(catalog, { source: opts.source, usersMoving: opts.usersMoving && !!auth, schemas: present })
+  if (plan.tables.length > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(plan.tables.length), 'connectionString')
   if (missing.length) plan.warnings.push(`No schema named ${missing.join(', ')} in this database; nothing from ${missing.length === 1 ? 'it' : 'them'} moves.`)
   const rls = new Map(catalog.tables.map((t) => [`${t.schema}.${t.name}`, t.rlsEnabled]))
   const { proposals, warnings } = proposeRules(plan, catalog.policies, rls, opts.source)
@@ -93,6 +94,11 @@ export function hiddenRowsRefusal(hidden: string[], user: string): string | null
     `Row-level security hides rows of ${list} from the user ${user}, so Backenly would move only part of them. ` +
     `Connect as the tables' owner or a user with BYPASSRLS (on Supabase, the postgres user).`
   )
+}
+
+/** The users that move: with a password, with a provider, or with an email alone. */
+export function movingUsersOf(counts: AuthCounts): number {
+  return counts.withPassword + counts.providerOnly + counts.emailOnly
 }
 
 export function authWarnings(counts: AuthCounts): string[] {
@@ -130,16 +136,20 @@ export function previewOf(
     notes: t.rowsExact ? t.notes : [`About ${t.rows.toLocaleString('en-US')} rows (estimated)`, ...t.notes],
   }))
   const fileBytes = (input.buckets ?? []).reduce((s, b) => s + b.bytes, 0)
+  const users = a.auth ? movingUsersOf(a.auth.counts) : 0
   const refusal =
-    hiddenRowsRefusal(a.hidden, input.user) ?? rowRefusal(a.rowBytes, input.ctx.limits) ?? (input.buckets ? fileRefusal(fileBytes, input.ctx.limits) : null)
-  const users = a.auth
+    hiddenRowsRefusal(a.hidden, input.user) ??
+    rowRefusal(a.rowBytes, input.ctx.limits) ??
+    (users > MAX_IMPORT_USERS ? userCountRefusal(users) : null) ??
+    (input.buckets ? fileRefusal(fileBytes, input.ctx.limits) : null)
+  const usersPreview = a.auth
     ? { total: a.auth.counts.total, withPassword: a.auth.counts.withPassword, providerOnly: a.auth.counts.providerOnly, skipped: a.auth.counts.skipped }
     : null
   return {
     source: input.source,
     sourceLabel: input.sourceLabel,
     tables,
-    users,
+    users: usersPreview,
     buckets: input.buckets,
     rules: previewRules(a.proposals),
     warnings: [...a.plan.warnings, ...a.ruleWarnings, ...(a.auth ? authWarnings(a.auth.counts) : []), ...input.warnings],
@@ -209,13 +219,19 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
           withAuth: input.source === 'supabase' && input.users,
           countAll: true,
         })
-        const refusal = hiddenRowsRefusal(a.hidden, opened.parsed.user) ?? rowRefusal(a.rowBytes, ctx.limits)
+        const movingUsers = a.auth ? movingUsersOf(a.auth.counts) : 0
+        const refusal =
+          hiddenRowsRefusal(a.hidden, opened.parsed.user) ??
+          rowRefusal(a.rowBytes, ctx.limits) ??
+          (movingUsers > MAX_IMPORT_USERS ? userCountRefusal(movingUsers) : null)
         if (refusal) throw new ImportInputError(refusal, 'connectionString')
         if (a.plan.tables.length === 0 && !a.auth) throw new ImportInputError('There are no tables to move in this database.', 'connectionString')
         warnings.push(...a.plan.warnings, ...a.ruleWarnings, ...(a.auth ? authWarnings(a.auth.counts) : []))
 
         for (const t of a.plan.tables) ledger.set(t.name, { name: t.name, sourceRows: t.rows, copiedRows: 0, verified: false })
-        const movingUsers = a.auth ? a.auth.counts.withPassword + a.auth.counts.providerOnly + a.auth.counts.emailOnly : 0
+        // What the source reported passed the checks above; what it sends is counted as it is written.
+        const written = [...a.plan.tables.map((t) => t.name), ...(a.auth ? ['users'] : [])]
+        const room = await rowRoomFor(ctx.projectId, () => written, ctx.limits)
         ctx.progress({
           phase: 'tables',
           tables: [...ledger.values()],
@@ -233,6 +249,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
         await copyRows(db, ctx.projectId, a.plan, {
           signal: ctx.signal,
           secret,
+          room,
           onRows: (name, n) => {
             const row = ledger.get(name)
             if (!row) return
@@ -245,6 +262,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
           ctx.progress({ phase: 'users' })
           usersCopied = await copyAuthUsers(db, ctx.projectId, a.auth.shape, {
             signal: ctx.signal,
+            room,
             onUsers: (n) => ctx.progress({ users: { total: movingUsers, copied: n } }),
           })
           if (usersCopied < movingUsers) {

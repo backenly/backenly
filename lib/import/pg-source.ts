@@ -10,6 +10,8 @@
  * `character varying(50)[]` and `post_status`.
  */
 
+import { ImportInputError } from './driver'
+import { MAX_IMPORT_TABLES, tableCountRefusal } from './limits'
 import type { CatalogColumn, CatalogForeignKey, CatalogPolicy, CatalogTable, SourceCatalog } from './pg-plan'
 import type { SourceReader } from './net'
 
@@ -17,6 +19,14 @@ const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
 
 /** Over this many estimated rows a table is not counted exactly in the preview. */
 export const EXACT_COUNT_LIMIT = 5_000_000
+
+/**
+ * The most tables the catalog is read for: twice what one import moves, so a
+ * schema of Supabase's own tables or empty ones beside the app's still plans,
+ * while a source of a hundred thousand tables is refused before its columns,
+ * keys and policies are read.
+ */
+const CATALOG_TABLES = MAX_IMPORT_TABLES * 2
 
 export async function readCatalog(db: SourceReader, schemas: string[]): Promise<SourceCatalog> {
   const tablesRes = await db.query<{
@@ -41,9 +51,11 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
        JOIN pg_catalog.pg_roles r ON r.rolname = current_user
       WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1::text[])
-      ORDER BY n.nspname, c.relname`,
-    [schemas],
+      ORDER BY n.nspname, c.relname
+      LIMIT $2`,
+    [schemas, CATALOG_TABLES],
   )
+  if (tablesRes.rows.length >= CATALOG_TABLES) throw new ImportInputError(tableCountRefusal(null), 'connectionString')
   const oids = tablesRes.rows.map((r) => r.oid)
   // A partitioned table holds nothing itself (pg_table_size says 0): its rows are its partitions'.
   const partitioned = await partitionBytes(db, tablesRes.rows.filter((r) => r.partitioned).map((r) => r.oid))

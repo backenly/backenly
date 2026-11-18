@@ -60,6 +60,12 @@ export interface FirebaseDestination {
   /** Rows of `columns`, in order; how many were written. */
   insertRows(table: string, columns: PlannedColumn[], rows: unknown[][]): Promise<number>
   countRows(table: string): Promise<number>
+  /**
+   * Bytes the tables this import writes hold now (its tables and the users
+   * table), as pg_table_size measures them: what the plan's room is checked
+   * against when the import's own count says it is full (lib/import/limits.ts RowRoom).
+   */
+  measureRows(): Promise<number>
   prepareUsers(): Promise<void>
   insertUsers(users: ImportedUser[]): Promise<number>
   /** Users that arrived from Firebase (firebase_uid set). */
@@ -170,6 +176,8 @@ export function backenlyDestination(input: { projectId: string; userId: string }
   const { projectId, userId } = input
   // The project's own schema; schemaIdent refuses it unless the id is a uuid.
   const schema = `workspace_${projectId}`
+  /** The tables this import writes rows into, for measureRows. */
+  const tablesWritten = new Set<string>()
 
   async function act(action: string, params: Record<string, unknown>): Promise<void> {
     const { executeAction } = await import('@/lib/ai/minimal-executor')
@@ -220,6 +228,7 @@ export function backenlyDestination(input: { projectId: string; userId: string }
       if (plans.length === 0) return unindexed
       await governed(title, async () => {
         for (const plan of plans) {
+          tablesWritten.add(plan.name)
           await act('CREATE_TABLE', createTableParams(plan))
           await act('SET_PERMISSION', { tableName: plan.name, template: 'admin_only' })
           if (plan.parentTable) {
@@ -257,7 +266,18 @@ export function backenlyDestination(input: { projectId: string; userId: string }
       }, true)
     },
 
+    async measureRows() {
+      // A table not created yet (to_regclass gives null) measures nothing.
+      const r = await (await pool()).query<{ bytes: string }>(
+        `SELECT COALESCE(sum(pg_catalog.pg_table_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
+           FROM unnest($2::text[]) AS t`,
+        [schema, [...tablesWritten]],
+      )
+      return Number(r.rows[0]?.bytes ?? 0)
+    },
+
     async prepareUsers() {
+      tablesWritten.add('users')
       const { workspaceRawClient } = await import('@/lib/data-plane/regional')
       const { ensureEmailVerifiedColumn } = await import('@/lib/services/end-user-auth-flows')
       await governed('Turn on sign-in for the users moved from Firebase', async () => {

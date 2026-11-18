@@ -22,8 +22,10 @@
 
 import { createHmac } from 'crypto'
 import type { Pool } from 'pg'
+import type { ImportLimits } from './driver'
 import type { ImportPlan, PlannedTable } from './pg-plan'
 import type { SourceReader } from './net'
+import { ROW_OVERHEAD_BYTES, RowRoom } from './limits'
 import { waitForHeadroom, yieldToServer } from './pressure'
 import { SourceWireError } from './source-guard'
 
@@ -186,6 +188,33 @@ export interface CopyContext {
   secret: Buffer
   /** Called after every batch with the table's running total. */
   onRows: (table: string, copied: number) => void
+  /** The plan's room, every batch counted against it before it is written (lib/import/limits.ts). */
+  room: RowRoom
+}
+
+/**
+ * The room for an import into `projectId`, measured on its own database:
+ * pg_table_size of the import's `tables` in the project's schema (a table not
+ * created yet measures nothing).
+ */
+export async function rowRoomFor(projectId: string, tables: () => readonly string[], limits: ImportLimits | undefined): Promise<RowRoom> {
+  const { projectPool } = await import('@/lib/data-plane/regional')
+  const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+  const pool = await projectPool(projectId, 'import', { max: 4 })
+  const schema = workspaceSchemaName(projectId)
+  return new RowRoom(limits, async () => {
+    const r = await pool.query<{ bytes: string }>(
+      `SELECT COALESCE(sum(pg_catalog.pg_table_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
+         FROM unnest($2::text[]) AS t`,
+      [schema, [...tables()]],
+    )
+    return Number(r.rows[0]?.bytes ?? 0)
+  })
+}
+
+/** About what a batch of destination rows costs: its values' bytes, and a row's overhead each. */
+export function batchCost(values: readonly unknown[][]): number {
+  return approxBytes(values) + ROW_OVERHEAD_BYTES * values.length
 }
 
 /** One source row → the destination values, in `t.copy` order. Exported for the tests. */
@@ -293,6 +322,8 @@ export async function copyRows(
         )
         if (rows.length === 0) break
         const values = rows.map((r) => rowValues(t, r, ctx.secret))
+        // Counted before it is written: past the plan's room the import stops here.
+        await ctx.room.take(batchCost(values))
         try {
           await insertBatch(pool, schema, t, values)
         } catch (err) {

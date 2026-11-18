@@ -2493,3 +2493,10 @@ tests/integration/v1-db-deprecated-on-both-servers.spec.ts
 # catalog and cursor reads, and stops a 65 MB row before holding it. Real
 # PostgreSQL through connectSource and readSnapshot.
 tests/integration/import-source-reads-real-postgres.spec.ts
+# An import stops at the room the plan has left whatever the source reported:
+# a source that says 0 bytes and then sends rows without end is counted batch
+# by batch, the project's tables measured when the count says the room is
+# full, and the copy stops there in the pre-check's words, holding no more
+# than the room. Real provisioned project, governed table creation and the
+# project's own database; the source is a stand-in reader.
+tests/integration/import-stops-at-the-plans-room.spec.ts

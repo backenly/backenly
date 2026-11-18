@@ -10,11 +10,26 @@
  *   - Memory: an import pauses while the process is over its limit and stops
  *     if it stays there; parallel downloads share a byte budget (lib/import/pressure.ts).
  *   - The pre-checks compare a source with what is LEFT of the plan (lib/import/limits.ts).
+ *     What a source reports can be wrong, so rows are counted as they are
+ *     written and the import stops at the room (RowRoom); tables and users
+ *     are capped per import.
  */
+import { ImportInputError } from '@/lib/import/driver'
 import { ImportGate, withSlot } from '@/lib/import/gate'
 import { BATCH_TARGET_BYTES, approxBytes, batchSizeFor, initialBatchSize, nextBatchSize } from '@/lib/import/pg-engine'
 import { ByteBudget, ImportMemoryError, containerMemoryLimit, memoryIsTight, waitForHeadroom } from '@/lib/import/pressure'
-import { fileRefusal, limitsLeft, MAX_IMPORT_ROW_BYTES, rowRefusal } from '@/lib/import/limits'
+import {
+  MAX_IMPORT_ROW_BYTES,
+  MAX_IMPORT_TABLES,
+  MAX_IMPORT_USERS,
+  RowRoom,
+  fileRefusal,
+  limitsLeft,
+  roomRefusal,
+  rowRefusal,
+  tableCountRefusal,
+  userCountRefusal,
+} from '@/lib/import/limits'
 
 const MB = 1024 * 1024
 const flush = () => new Promise((r) => setImmediate(r))
@@ -276,5 +291,61 @@ describe('the pre-checks count what the organization already uses', () => {
     expect(rowRefusal(600 * MB, l)).toBe(
       'This source holds about 600 MB of rows, and Free includes 500 MB of database storage. Upgrade the organization, then import.',
     )
+  })
+})
+
+describe('rows are counted against the room as they are written', () => {
+  const free = limitsLeft({ planRowBytes: 500 * MB, planFileBytes: null, usedRowBytes: 380 * MB, usedFileBytes: 0, planName: 'Free' })
+
+  it('lets batches through while the count fits, without measuring', async () => {
+    const measure = jest.fn(async () => 0)
+    const room = new RowRoom(free, measure)
+    await room.take(60 * MB)
+    await room.take(60 * MB)
+    expect(measure).not.toHaveBeenCalled()
+  })
+
+  it('measures before refusing, and goes on when the tables hold less than the count said', async () => {
+    // The count runs ahead of what PostgreSQL stores: 120 MB counted, 70 MB on disk.
+    const measure = jest.fn(async () => 70 * MB)
+    const room = new RowRoom(free, measure)
+    await room.take(100 * MB)
+    await room.take(40 * MB)
+    expect(measure).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops at the room, saying it in the pre-check words, whatever the source reported', async () => {
+    const room = new RowRoom(free, async () => 110 * MB)
+    await room.take(100 * MB)
+    const err = await room.take(30 * MB).catch((e) => e)
+    expect(err).toBeInstanceOf(ImportInputError)
+    expect(err.message).toBe(
+      'Backenly stopped the import after 110 MB of rows: the organization has 120 MB left of the 500 MB of database storage on Free. Free some space or upgrade the organization, then import again.',
+    )
+  })
+
+  it('refuses on the count when the tables cannot be measured', async () => {
+    const room = new RowRoom(free, async () => {
+      throw new Error('measurement failed')
+    })
+    await room.take(119 * MB)
+    await expect(room.take(2 * MB)).rejects.toThrow(/^Backenly stopped the import after 119 MB of rows/)
+  })
+
+  it('says the plan, or the one-import limit, when nothing else is in use', () => {
+    const plain = limitsLeft({ planRowBytes: 500 * MB, planFileBytes: null, usedRowBytes: 0, usedFileBytes: 0, planName: 'Free' })
+    expect(roomRefusal(499 * MB, plain)).toBe(
+      'Backenly stopped the import after 499 MB of rows: Free includes 500 MB of database storage. Upgrade the organization, then import again.',
+    )
+    expect(roomRefusal(5 * 1024 * MB, undefined)).toBe(
+      'Backenly stopped the import after 5 GB of rows; one import moves up to 5 GB. Contact us to move a larger database.',
+    )
+  })
+
+  it('caps the tables and users one import moves', () => {
+    expect(MAX_IMPORT_TABLES).toBe(1000)
+    expect(MAX_IMPORT_USERS).toBe(1_000_000)
+    expect(tableCountRefusal(1500)).toBe('This source has 1,500 tables; one import moves up to 1,000. Contact us to move a larger database.')
+    expect(userCountRefusal(null)).toBe('This source has more than 1,000,000 users; one import moves up to 1,000,000. Contact us to move more.')
   })
 })
