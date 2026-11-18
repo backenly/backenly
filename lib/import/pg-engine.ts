@@ -24,6 +24,7 @@ import { createHmac } from 'crypto'
 import type { Pool } from 'pg'
 import type { ImportPlan, PlannedTable } from './pg-plan'
 import type { SourceReader } from './net'
+import { waitForHeadroom, yieldToServer } from './pressure'
 
 const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
 
@@ -123,6 +124,59 @@ export function batchSizeFor(columnCount: number): number {
   return Math.max(1, Math.min(1000, Math.floor(60_000 / Math.max(1, columnCount))))
 }
 
+/**
+ * About how much one batch of rows may hold in this process's memory. A FETCH
+ * is bounded by rows, never by bytes, so the batch size follows the rows'
+ * measured size: a table of wide JSON or binary values is read a few rows at
+ * a time (lib/import/pressure.ts says why memory is scarce here).
+ */
+export const BATCH_TARGET_BYTES = 8 * 1024 * 1024
+
+/** The first batch: sized from the source's own average row (pg_table_size / rows), or a cautious few. */
+export function initialBatchSize(t: Pick<PlannedTable, 'rows' | 'bytes' | 'copy'>): number {
+  const max = batchSizeFor(t.copy.length)
+  if (!(t.rows > 0) || !(t.bytes > 0)) return Math.min(max, 50)
+  const average = t.bytes / t.rows
+  return clampBatch(Math.floor(BATCH_TARGET_BYTES / Math.max(1, average)), max)
+}
+
+/**
+ * The next batch, from what the last one measured: as many rows as fit the
+ * target at the measured average, growing at most twofold per batch.
+ */
+export function nextBatchSize(current: number, rows: number, bytes: number, columnCount: number): number {
+  const max = batchSizeFor(columnCount)
+  if (rows <= 0) return clampBatch(current, max)
+  const average = Math.max(1, bytes / rows)
+  const fits = Math.floor(BATCH_TARGET_BYTES / average)
+  return clampBatch(Math.min(fits, current * 2), max)
+}
+
+function clampBatch(n: number, max: number): number {
+  return Math.max(1, Math.min(max, Number.isFinite(n) ? n : 1))
+}
+
+/** About how many bytes a fetched batch holds: text and binary by length, JSON by its text, the rest as 8. */
+export function approxBytes(rows: readonly unknown[][]): number {
+  let total = 0
+  for (const row of rows) for (const value of row) total += valueBytes(value)
+  return total
+}
+
+function valueBytes(value: unknown): number {
+  if (value === null || value === undefined) return 0
+  if (typeof value === 'string') return value.length
+  if (Buffer.isBuffer(value)) return value.length
+  if (typeof value === 'object' && !(value instanceof Date)) {
+    try {
+      return JSON.stringify(value)?.length ?? 8
+    } catch {
+      return 8
+    }
+  }
+  return 8
+}
+
 export interface CopyContext {
   signal: AbortSignal
   /** The secret derivedUuid keys with, held for this import only. */
@@ -220,13 +274,14 @@ export async function copyRows(
     ctx.onRows(t.name, 0)
     if (t.copy.length === 0) continue
     const cursor = `bkn_import_${i}`
-    const batch = batchSizeFor(t.copy.length)
+    let batch = initialBatchSize(t)
     await source.query(
       `DECLARE ${cursor} NO SCROLL CURSOR FOR SELECT ${t.select.join(', ')} FROM ${q(t.sourceSchema)}.${q(t.sourceName)}`,
     )
     try {
       for (;;) {
         throwIfAborted(ctx.signal)
+        await waitForHeadroom(ctx.signal)
         const { rows } = await source.queryArrays(`FETCH FORWARD ${batch} FROM ${cursor}`)
         if (rows.length === 0) break
         const values = rows.map((r) => rowValues(t, r, ctx.secret))
@@ -238,6 +293,8 @@ export async function copyRows(
         n += rows.length
         copied.set(t.name, n)
         ctx.onRows(t.name, n)
+        batch = nextBatchSize(batch, rows.length, approxBytes(rows), t.copy.length)
+        await yieldToServer()
       }
     } finally {
       await source.query(`CLOSE ${cursor}`).catch(() => {})

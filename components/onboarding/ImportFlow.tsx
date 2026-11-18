@@ -572,8 +572,8 @@ export function ImportFlow({
         <MoveStep
           job={job}
           planned={preview?.tables ?? null}
-          projectName={project.name}
-          region={project.region}
+          projectName={project.name ?? job.projectName ?? null}
+          region={project.region ?? job.region ?? null}
           now={now}
           staleSince={staleSince}
           onStop={() => {

@@ -24,6 +24,8 @@ import type { ImportPreviewBucket } from './contract'
 import { ImportInputError } from './driver'
 import { redactedMessage } from './redact'
 import { throwIfAborted } from './pg-engine'
+import { MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
+import { waitForHeadroom } from './pressure'
 
 export interface StorageSource {
   /** https://<ref>.supabase.co, checked by lib/import/net.ts checkProjectUrl. */
@@ -227,12 +229,15 @@ export async function copyFiles(
     for await (const o of walkObjects(src, b, ctx.signal)) {
       throwIfAborted(ctx.signal)
       const label = `${b.name}/${o.path}`
-      if (o.size > target.maxBytes) {
-        result.skipped.push({ path: label, why: `larger than ${Math.round(target.maxBytes / 1024 / 1024)} MB` })
+      // One file at a time, never more than an upload may carry through the server (lib/storage/body-limits.ts).
+      const maxBytes = Math.min(target.maxBytes, MAX_BUFFERED_UPLOAD_FILE_BYTES)
+      if (o.size > maxBytes) {
+        result.skipped.push({ path: label, why: `larger than ${Math.round(maxBytes / 1024 / 1024)} MB` })
         continue
       }
+      await waitForHeadroom(ctx.signal)
       const res = await call(src, 'GET', `/storage/v1/object/${encodeURIComponent(b.id)}/${encodePath(o.path)}`, {
-        maxBytes: target.maxBytes + 1,
+        maxBytes: maxBytes + 1,
         timeoutMs: 5 * 60_000,
       }).catch((err) => {
         result.skipped.push({ path: label, why: err instanceof Error ? err.message : 'download failed' })
