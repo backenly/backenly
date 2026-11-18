@@ -69,8 +69,10 @@ const DEFAULT_LIMITS = {
   heartbeatMs: 10_000,
   /** A job not heard from for this long belongs to a process that stopped. */
   staleMs: 60_000,
-  /** How long the quick check before creating the project may take. */
+  /** How long the quick check before creating the project may take, from when it holds its slot. */
   checkMs: 60_000,
+  /** How long the Review step's read of a source may take, from when it holds its slot. */
+  inspectMs: 5 * 60_000,
   /** How long a look at a source (the preview, the check) waits for its slot before it is refused. */
   lookWaitMs: 30_000,
 }
@@ -114,8 +116,13 @@ export class ImportRefusedError extends Error {
  * slots (lib/import/gate.ts LOOK_GATE), so previews cannot pile up beside a
  * running import, each holding a source's answers in memory. Refused like a
  * full import line when no slot frees up in time; nothing was read.
+ *
+ * `read` gets a signal that fires `ms` after the slot is held. The drivers
+ * hand it to the source's connection, which it ends, failing the statement in
+ * flight, so a slow source gives the slot back at its deadline rather than
+ * keeping every other organization's previews and starts waiting behind it.
  */
-function lookAtSource<T>(fn: () => Promise<T>): Promise<T> {
+export function lookAtSource<T>(read: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
   return withSlot(
     LOOK_GATE,
     {
@@ -129,7 +136,7 @@ function lookAtSource<T>(fn: () => Promise<T>): Promise<T> {
           { 'Retry-After': '60' },
         ),
     },
-    fn,
+    () => read(AbortSignal.timeout(ms)),
   )
 }
 
@@ -182,15 +189,18 @@ export async function startImport(
       { 'Retry-After': '120' },
     )
   }
-  await opts.spendBudget?.()
   const limits = await limitsForAccount(account)
 
   const check = driver.check
   if (check) {
-    await lookAtSource(() => {
-      const signal = AbortSignal.timeout(IMPORT_LIMITS.checkMs)
-      return check.call(driver, input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits })
-    })
+    // The budget is spent once the check holds its slot: a start turned away
+    // because others are being read spends none of the organization's starts.
+    await lookAtSource(async (signal) => {
+      await opts.spendBudget?.()
+      await check.call(driver, input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits })
+    }, IMPORT_LIMITS.checkMs)
+  } else {
+    await opts.spendBudget?.()
   }
 
   // The normal creation path: the organization's owner owns it, its plan counts it, its region holds it.
@@ -282,11 +292,10 @@ export async function inspectImport(input: { userId: string; orgId: string; conn
   const account = await creationAccountFor(input.userId, input.orgId, { initialize: false })
   const limits = await limitsForAccount(account)
   try {
-    return await lookAtSource(() => {
-      // Five minutes of reading, from when the slot is held.
-      const signal = AbortSignal.timeout(5 * 60_000)
-      return driver.inspect(input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits })
-    })
+    return await lookAtSource(
+      (signal) => driver.inspect(input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits }),
+      IMPORT_LIMITS.inspectMs,
+    )
   } catch (err) {
     throw sayable(err, input.connection)
   }

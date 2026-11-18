@@ -44,10 +44,11 @@ export const supabaseDriver: ImportDriver<'supabase'> = {
   async inspect(connection, ctx: DriverContext): Promise<ImportPreview> {
     const secrets = secretsOf(connection)
     const storage = await storageOf(connection, secrets)
-    const { conn, parsed } = await openSource(connection.connectionString, secrets)
+    // The preview's deadline ends the connection, and the statement in flight.
+    const { conn, parsed } = await openSource(connection.connectionString, secrets, ctx.signal)
     try {
       const { analysis, label } = await readSnapshot(conn, async (db) => ({
-        analysis: await analyze(db, { source: 'supabase', schemas: SCHEMAS, usersMoving: true, withAuth: true, countAll: false }),
+        analysis: await analyze(db, { source: 'supabase', schemas: SCHEMAS, usersMoving: true, withAuth: true, countAll: false, signal: ctx.signal }),
         label: await sourceLabelOf(db, parsed, 'supabase'),
       }))
       // A Storage listing past what one import reads is said as the refusal: leaving files out moves the rest.

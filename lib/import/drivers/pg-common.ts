@@ -23,10 +23,14 @@ export interface OpenedSource {
   parsed: ParsedPgUrl
 }
 
-/** Parse and connect. A Supabase host is only ever reached encrypted, whichever source was picked. */
-export async function openSource(connectionString: string, secrets: readonly string[]): Promise<OpenedSource> {
+/**
+ * Parse and connect. A Supabase host is only ever reached encrypted, whichever
+ * source was picked. `signal` (the preview's or the check's deadline, the
+ * job's cancel) ends the connection, and the statement in flight, when it fires.
+ */
+export async function openSource(connectionString: string, secrets: readonly string[], signal?: AbortSignal): Promise<OpenedSource> {
   const parsed = parsePostgresUrl(connectionString)
-  const conn = await connectSource(parsed, { requireTls: isSupabaseHost(parsed.host), secrets })
+  const conn = await connectSource(parsed, { requireTls: isSupabaseHost(parsed.host), secrets, signal })
   return { conn, parsed }
 }
 
@@ -58,7 +62,7 @@ export interface Analysis {
 /** Read the catalog, count, plan and translate the rules, inside the caller's snapshot. */
 export async function analyze(
   db: SourceReader,
-  opts: { source: 'supabase' | 'postgres'; schemas: string[]; usersMoving: boolean; withAuth: boolean; countAll: boolean },
+  opts: { source: 'supabase' | 'postgres'; schemas: string[]; usersMoving: boolean; withAuth: boolean; countAll: boolean; signal?: AbortSignal },
 ): Promise<Analysis> {
   const present = await existingSchemas(db, opts.schemas)
   const missing = opts.schemas.filter((s) => !present.includes(s))
@@ -69,7 +73,7 @@ export async function analyze(
   // The tables that would move, refused past the limit before each is counted: one count can take minutes.
   const moving = buildPlan(catalog, { source: opts.source, usersMoving: false, schemas: present }).tables.length
   if (moving > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(moving), 'connectionString')
-  await countRows(db, catalog.tables, opts.countAll ? { all: true } : undefined)
+  await countRows(db, catalog.tables, { all: opts.countAll, signal: opts.signal })
 
   let auth: Analysis['auth'] = null
   if (opts.withAuth) {
@@ -164,7 +168,7 @@ export async function checkPg(
   connectionString: string,
   opts: { secrets: readonly string[]; schemas: string[]; ctx: DriverContext },
 ): Promise<void> {
-  const { conn } = await openSource(connectionString, opts.secrets)
+  const { conn } = await openSource(connectionString, opts.secrets, opts.ctx.signal)
   try {
     await readSnapshot(conn, async (db) => {
       const present = await existingSchemas(db, opts.schemas)
@@ -206,7 +210,8 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
   const ledger = new Map<string, ImportProgressTable>()
   const push = (name: string) => ctx.progress({ tables: [{ ...ledger.get(name)! }] })
 
-  const opened = await openSource(input.connectionString, input.secrets)
+  // A cancel or the job's deadline ends the connection, and the statement in flight, at once.
+  const opened = await openSource(input.connectionString, input.secrets, ctx.signal)
   const { conn } = opened
   let usersCopied: number | undefined
   let analysis: Analysis
@@ -220,6 +225,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
           usersMoving: input.users,
           withAuth: input.source === 'supabase' && input.users,
           countAll: true,
+          signal: ctx.signal,
         })
         const movingUsers = a.auth ? movingUsersOf(a.auth.counts) : 0
         const refusal =

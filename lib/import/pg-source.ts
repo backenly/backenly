@@ -297,8 +297,10 @@ export async function schemaBytes(db: SourceReader, schemas: string[]): Promise<
  * over EXACT_COUNT_LIMIT keeps its estimate (said "about" in the preview); one
  * whose count runs out of time does too.
  */
-export async function countRows(db: SourceReader, tables: CatalogTable[], opts: { all?: boolean } = {}): Promise<void> {
+export async function countRows(db: SourceReader, tables: CatalogTable[], opts: { all?: boolean; signal?: AbortSignal } = {}): Promise<void> {
   for (const t of tables) {
+    // A count can take minutes: the preview's deadline or the job's cancel is heard between them.
+    opts.signal?.throwIfAborted()
     if (!opts.all && t.rows > EXACT_COUNT_LIMIT) continue
     // A savepoint, so a count that runs out of time leaves the snapshot usable.
     await db.query('SAVEPOINT backenly_count')
@@ -308,7 +310,11 @@ export async function countRows(db: SourceReader, tables: CatalogTable[], opts: 
       t.rowsExact = true
       await db.query('RELEASE SAVEPOINT backenly_count')
     } catch (err: any) {
-      await db.query('ROLLBACK TO SAVEPOINT backenly_count')
+      // Ended by the deadline, a cancel or the connection's end: that is the reason, not the savepoint.
+      opts.signal?.throwIfAborted()
+      await db.query('ROLLBACK TO SAVEPOINT backenly_count').catch(() => {
+        throw err
+      })
       // 57014: statement timeout. The estimate stands, said "about".
       if (err?.code !== '57014') throw err
     }

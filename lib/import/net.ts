@@ -213,6 +213,12 @@ export interface SourceConnectOptions {
   secrets: readonly string[]
   connectTimeoutMs?: number
   lookup?: Lookup
+  /**
+   * The caller's deadline or cancel: when it fires the connection is ended at
+   * once, failing whatever statement is waiting with the signal's reason, so a
+   * read never outlives the request or the job it belongs to.
+   */
+  signal?: AbortSignal
 }
 
 export const SOURCE_LIMITS = {
@@ -252,7 +258,10 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
   if (opts.requireTls && (mode === 'disable' || mode === 'allow')) {
     refuse(`Supabase is only reached over an encrypted connection: remove sslmode=${mode} from the connection string.`)
   }
+  const signal = opts.signal
+  signal?.throwIfAborted()
   const { address, family } = await resolveCheckedAddress(parsed.host, { lookup: opts.lookup })
+  signal?.throwIfAborted()
 
   // Which TLS to try, in order.
   const attempts: Array<ClientConfig['ssl'] | false> =
@@ -282,6 +291,8 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
     guardSourceClient(client)
     // An error after connect (the source restarting) must not crash the process.
     client.on('error', () => {})
+    const stop = () => endNow(client, signal!.reason)
+    signal?.addEventListener('abort', stop, { once: true })
     try {
       await client.connect()
       return {
@@ -289,17 +300,27 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
         host: parsed.host,
         tls: !!ssl,
         end: async () => {
+          signal?.removeEventListener('abort', stop)
           await client.end().catch(() => {})
         },
       }
     } catch (err) {
+      signal?.removeEventListener('abort', stop)
       lastErr = err
       await client.end().catch(() => {})
+      // The deadline or a cancel, not the source: said as such, not as a connection failure.
+      signal?.throwIfAborted()
       const fallBack = i + 1 < attempts.length && NO_SSL.test(String((err as Error)?.message ?? ''))
       if (!fallBack) break
     }
   }
   throw new ImportInputError(describeSourceError(lastErr, { host: parsed.host, port: parsed.port, family, secrets: opts.secrets }), FIELD)
+}
+
+/** End `client`'s connection now, failing its statement in progress with `reason`. */
+function endNow(client: PgClient, reason: unknown): void {
+  const stream = (client as unknown as { connection?: { stream?: { destroy(err?: Error): void } } }).connection?.stream
+  stream?.destroy(reason instanceof Error ? reason : new Error('The read was stopped.'))
 }
 
 /**

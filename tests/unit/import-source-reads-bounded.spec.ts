@@ -15,8 +15,8 @@
  * client (connectSource) against a stand-in server that answers as no
  * PostgreSQL would: a 1.9 GB row, an answer that never ends, a huge message,
  * a text field with no end and a row before any statement at sign-in, rows
- * whose lengths do not add up, and the 1.9 GB row over TLS (the guard counts
- * what the server said, not the ciphertext).
+ * whose lengths do not add up, the 1.9 GB row over TLS (the guard counts what
+ * the server said, not the ciphertext), and a read that outlives its deadline.
  * No database.
  */
 
@@ -27,6 +27,9 @@ import { join } from 'path'
 import type { Duplex } from 'stream'
 import { connectSource, type ParsedPgUrl, type SourceConnection } from '@/lib/import/net'
 import { ImportInputError } from '@/lib/import/driver'
+import { LOOK_GATE } from '@/lib/import/gate'
+import { lookAtSource } from '@/lib/import/jobs'
+import { countRows } from '@/lib/import/pg-source'
 import {
   MAX_SOURCE_MESSAGE_BYTES,
   MAX_SOURCE_RESPONSE_BYTES,
@@ -361,6 +364,62 @@ describe('a real pg client against a source that answers as no PostgreSQL would'
       expect(err).toBeInstanceOf(SourceWireError)
       expect(err.message).toMatch(/^The source sent one row of 1\.9 GB; Backenly reads at most 64 MB at once/)
       expect(await sent()).toBeLessThan(32 * MB)
+    })
+  })
+
+  describe('a deadline', () => {
+    /** A source that signs in and then never answers: every statement would wait out its own timeout. */
+    async function silentSource() {
+      let closed = false
+      source = await startFakeSource({
+        onQuery: (_sql, socket) => {
+          socket.once('close', () => (closed = true))
+        },
+      })
+      return { closed: () => closed }
+    }
+
+    it('ends the connection, and the statement in flight, when it passes', async () => {
+      const s = await silentSource()
+      conn = await connectSource(at(source!.port, 'disable'), { requireTls: false, secrets: [], signal: AbortSignal.timeout(300) })
+      const started = Date.now()
+      const err = await conn.client.query('SELECT count(*) FROM huge').catch((e) => e)
+      expect(err.name).toBe('TimeoutError')
+      expect(Date.now() - started).toBeLessThan(5_000)
+      await new Promise((r) => setTimeout(r, 100))
+      expect(s.closed()).toBe(true)
+    })
+
+    it('gives the look slot back when a preview outlives it, so the next look goes ahead', async () => {
+      await silentSource()
+      const port = source!.port
+      const err = await lookAtSource(async (signal) => {
+        const c = await connectSource(at(port, 'disable'), { requireTls: false, secrets: [], signal })
+        try {
+          return await c.client.query('SELECT count(*) FROM huge')
+        } finally {
+          await c.end()
+        }
+      }, 300).catch((e) => e)
+      expect(err.name).toBe('TimeoutError')
+      expect(LOOK_GATE.counts()).toEqual({ running: 0, waiting: 0 })
+      await expect(lookAtSource(async () => 'next', 1_000)).resolves.toBe('next')
+    })
+
+    it('is heard between one count and the next', async () => {
+      const deadline = new AbortController()
+      deadline.abort(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }))
+      const asked: string[] = []
+      const reader = {
+        query: async (text: string) => {
+          asked.push(text)
+          return { rows: [{ n: '1' }], fields: [] }
+        },
+        queryArrays: async () => ({ rows: [], fields: [] }),
+      }
+      const table = { schema: 'public', name: 't', columns: [], primaryKey: [], uniques: [], foreignKeys: [], rlsEnabled: false, partitioned: false, bytes: 0, rows: 0, rowsExact: false }
+      await expect(countRows(reader as any, [table], { all: true, signal: deadline.signal })).rejects.toMatchObject({ name: 'TimeoutError' })
+      expect(asked).toEqual([])
     })
   })
 })

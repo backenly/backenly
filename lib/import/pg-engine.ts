@@ -42,6 +42,8 @@ export class ImportAborted extends Error {
 export function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return
   const reason = signal.reason
+  // A deadline (AbortSignal.timeout, as on a preview) says itself, so the caller can say "took too long".
+  if ((reason as Error | undefined)?.name === 'TimeoutError') throw reason
   throw reason instanceof ImportAborted ? reason : new ImportAborted('canceled')
 }
 
