@@ -313,12 +313,17 @@ export interface FilesContext {
 export interface FilesResult {
   copied: number
   bytes: number
+  /** The first few files that did not move, to name in the warning; `skippedCount` says how many there were. */
   skipped: Array<{ path: string; why: string }>
+  skippedCount: number
   /** Set when the plan's storage ran out: nothing after it was tried. */
   stoppedForQuota: boolean
   /** Why the listing stopped (StorageWalkLimitError), when it did: nothing after it was tried. */
   stopped?: string
 }
+
+/** Files named in the warning about those that did not move; the rest are counted, not kept. */
+const SKIPPED_NAMED = 3
 
 /** Download each object and store it in its bucket. */
 export async function copyFiles(
@@ -333,7 +338,11 @@ export async function copyFiles(
   const { consoleUploader } = await import('@/lib/storage/uploader')
   // uploadedBy is an end user's field; the person moving files in is recorded as the console's uploader.
   const uploader = consoleUploader(ctx.userId)
-  const result: FilesResult = { copied: 0, bytes: 0, skipped: [], stoppedForQuota: false }
+  const result: FilesResult = { copied: 0, bytes: 0, skipped: [], skippedCount: 0, stoppedForQuota: false }
+  const skip = (path: string, why: string) => {
+    result.skippedCount++
+    if (result.skipped.length < SKIPPED_NAMED) result.skipped.push({ path, why })
+  }
   ctx.onFile(0, 0)
   const walk = new StorageWalk()
   for (const b of buckets) {
@@ -346,7 +355,7 @@ export async function copyFiles(
       // One file at a time, never more than an upload may carry through the server (lib/storage/body-limits.ts).
       const maxBytes = Math.min(target.maxBytes, MAX_BUFFERED_UPLOAD_FILE_BYTES)
       if (o.size > maxBytes) {
-        result.skipped.push({ path: label, why: `larger than ${Math.round(maxBytes / 1024 / 1024)} MB` })
+        skip(label, `larger than ${Math.round(maxBytes / 1024 / 1024)} MB`)
         continue
       }
       await waitForHeadroom(ctx.signal)
@@ -354,12 +363,12 @@ export async function copyFiles(
         maxBytes: maxBytes + 1,
         timeoutMs: 5 * 60_000,
       }).catch((err) => {
-        result.skipped.push({ path: label, why: err instanceof Error ? err.message : 'download failed' })
+        skip(label, err instanceof Error ? err.message : 'download failed')
         return null
       })
       if (!res) continue
       if (!res.ok) {
-        result.skipped.push({ path: label, why: `Supabase answered ${res.status}` })
+        skip(label, `Supabase answered ${res.status}`)
         continue
       }
       const buffer = Buffer.from(await res.arrayBuffer())
@@ -376,7 +385,7 @@ export async function copyFiles(
             result.stoppedForQuota = true
             return result
           }
-          result.skipped.push({ path: label, why: SKIP_WORDS[(err as any).code as string] ?? 'refused by the upload checks' })
+          skip(label, SKIP_WORDS[(err as any).code as string] ?? 'refused by the upload checks')
           continue
         }
         throw err

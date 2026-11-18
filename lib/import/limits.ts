@@ -126,6 +126,13 @@ export function roomRefusal(written: number, limits: ImportLimits | undefined): 
   return `${stopped}; one import moves up to ${formatBytes(MAX_IMPORT_ROW_BYTES)}. Contact us to move a larger database.`
 }
 
+/** Why the import stopped when what it had written could not be measured: nothing more was taken on trust. */
+export function unmeasuredRefusal(limits: ImportLimits | undefined): string {
+  const max = limits?.maxRowBytes ?? MAX_IMPORT_ROW_BYTES
+  const room = max < MAX_IMPORT_ROW_BYTES ? `the ${formatBytes(max)} the organization has left` : `the ${formatBytes(MAX_IMPORT_ROW_BYTES)} one import moves`
+  return `Backenly stopped the import because it could not measure the rows already written, and without that it cannot keep within ${room}. Start it again in a few minutes.`
+}
+
 /**
  * At most how many times its count (pg-engine.ts rowCost) a value can take in
  * PostgreSQL. A count is the value's text, but at least 8 bytes, plus 8; what
@@ -151,12 +158,16 @@ export const PAGE_SLACK_BYTES = 64 * 1024
  * count. Far from the room that costs a measurement now and then; near it, a
  * batch goes in a few rows at a time with a measurement between, until not
  * one more row fits. Then the import stops, saying the room, with the tables
- * holding no more than it.
+ * holding no more than it. A measurement that fails takes nothing on trust:
+ * the worst case of what was counted since the last one stands, and if that
+ * leaves no room the import stops saying it could not measure.
  */
 export class RowRoom {
   /** What the import's tables held when last measured. */
   private held = 0
-  /** Counted since. */
+  /** Assumed beyond `held` because a measurement failed: the worst case of what was counted. */
+  private assumed = 0
+  /** Counted since the last measurement. */
   private since = 0
 
   constructor(
@@ -177,22 +188,25 @@ export class RowRoom {
   async fit(counts: readonly number[]): Promise<number> {
     let n = this.fitting(counts)
     if (n < counts.length) {
-      // A measurement that fails is no evidence of room: the worst case of the count stands.
-      const worst = this.held + STORED_PER_COUNTED * this.since
-      this.held = await this.measure().then(
-        (b) => Math.max(0, Number(b) || 0),
-        () => worst,
-      )
+      try {
+        this.held = Math.max(0, Number(await this.measure()) || 0)
+        this.assumed = 0
+      } catch {
+        // No evidence of room: the worst case of what was counted stands.
+        this.assumed += STORED_PER_COUNTED * this.since
+      }
       this.since = 0
       n = this.fitting(counts)
     }
-    if (n === 0) throw new ImportInputError(roomRefusal(this.held, this.limits))
+    if (n === 0) {
+      throw new ImportInputError(this.assumed > 0 ? unmeasuredRefusal(this.limits) : roomRefusal(this.held, this.limits))
+    }
     for (let i = 0; i < n; i++) this.since += Math.max(0, counts[i])
     return n
   }
 
   private fitting(counts: readonly number[]): number {
-    const free = this.room - PAGE_SLACK_BYTES - this.held - STORED_PER_COUNTED * this.since
+    const free = this.room - PAGE_SLACK_BYTES - this.held - this.assumed - STORED_PER_COUNTED * this.since
     let taken = 0
     let n = 0
     for (const c of counts) {

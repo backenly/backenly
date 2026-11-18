@@ -357,9 +357,13 @@ describe('rows are written only as far as the room lets them in', () => {
       written.push(rows.length)
       return rows.length
     }).catch((e) => e)
-    // What fit at eight times its count went in; then the worst case of that count stands.
+    // What fit at eight times its count went in; then the worst case of that count stands,
+    // and the refusal says the rows could not be measured, not that the worst case was written.
     expect(written).toEqual([14])
-    expect(err.message).toMatch(/^Backenly stopped the import after 112 MB of rows/)
+    expect(err).toBeInstanceOf(ImportInputError)
+    expect(err.message).toBe(
+      'Backenly stopped the import because it could not measure the rows already written, and without that it cannot keep within the 120 MB the organization has left. Start it again in a few minutes.',
+    )
   })
 
   it('counts a value at its length but at least 8 bytes, plus 8, and each row at 64 more', () => {

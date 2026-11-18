@@ -344,9 +344,9 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
         onFile: (copied, copiedBytes) => ctx.progress({ files: { total: totalFiles, copied, bytes: totalBytes, copiedBytes } }),
       })
       filesCopied = files.copied
-      if (files.skipped.length) {
-        const sample = files.skipped.slice(0, 3).map((s) => `${s.path} (${s.why})`).join(', ')
-        warnings.push(`${plural(files.skipped.length, 'file')} did not move: ${sample}${files.skipped.length > 3 ? ', …' : ''}.`)
+      if (files.skippedCount) {
+        const sample = files.skipped.map((s) => `${s.path} (${s.why})`).join(', ')
+        warnings.push(`${plural(files.skippedCount, 'file')} did not move: ${sample}${files.skippedCount > files.skipped.length ? ', …' : ''}.`)
       }
       if (files.stoppedForQuota) warnings.push(`Files stopped at ${formatBytes(files.bytes)}: the plan's file storage is full.`)
       if (files.stopped) warnings.push(`Files stopped at ${plural(files.copied, 'file')}: ${files.stopped}`)

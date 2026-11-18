@@ -133,6 +133,21 @@ const FIRESTORE_DENIED = 'This key can\'t read Firestore. Give the service accou
 /** The files phase ends here; what moved stays, and the import finishes with the reason. */
 class FilesStopped extends Error {}
 
+/** Files that did not move: all counted, the first three named. A bucket of a million keeps three names, not a million. */
+class Named {
+  count = 0
+  private readonly names: string[] = []
+
+  add(name: string): void {
+    this.count++
+    if (this.names.length < 3) this.names.push(name)
+  }
+
+  text(): string {
+    return `${this.names.join(', ')}${this.count > this.names.length ? ` and ${n(this.count - this.names.length)} more` : ''}`
+  }
+}
+
 export function createFirebaseDriver(options: FirebaseDriverOptions = {}): ImportDriver<'firebase'> {
   const limits: FirebaseLimits = { ...DEFAULT_FIREBASE_LIMITS, ...(options.limits ?? {}) }
 
@@ -575,14 +590,13 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
 
   async function moveFiles(client: GoogleClient, projectId: string, ctx: RunContext, dest: FirebaseDestination, warnings: string[]): Promise<number | undefined> {
     const progress = { total: 0, copied: 0, bytes: 0, copiedBytes: 0 }
-    const tooLarge: string[] = []
-    const refused: string[] = []
+    const tooLarge = new Named()
+    const refused = new Named()
     let stopped: string | null = null
-    const list = (items: string[]) => `${items.slice(0, 3).join(', ')}${items.length > 3 ? ` and ${n(items.length - 3)} more` : ''}`
     const say = () => {
       if (stopped) warnings.push(`Files stopped at ${n(progress.copied)} of ${n(progress.total)}: ${stopped}`)
-      if (tooLarge.length) warnings.push(`${n(tooLarge.length)} ${tooLarge.length === 1 ? 'file is' : 'files are'} over ${mb(limits.maxFileBytes)} and didn't move: ${list(tooLarge)}.`)
-      if (refused.length) warnings.push(`${n(refused.length)} ${refused.length === 1 ? 'file' : 'files'} didn't move: ${list(refused)}.`)
+      if (tooLarge.count) warnings.push(`${n(tooLarge.count)} ${tooLarge.count === 1 ? 'file is' : 'files are'} over ${mb(limits.maxFileBytes)} and didn't move: ${tooLarge.text()}.`)
+      if (refused.count) warnings.push(`${n(refused.count)} ${refused.count === 1 ? 'file' : 'files'} didn't move: ${refused.text()}.`)
     }
 
     try {
@@ -609,11 +623,11 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
         await mapLimit(page, 4, async (o) => {
           if (stopped) return
           if (o.size > limits.maxFileBytes) {
-            tooLarge.push(`${o.name} (${mb(o.size)})`)
+            tooLarge.add(`${o.name} (${mb(o.size)})`)
             return
           }
           if (DANGEROUS_EXTENSIONS.includes(uploadExtension(o.name))) {
-            refused.push(`${o.name} (an executable file)`)
+            refused.add(`${o.name} (an executable file)`)
             return
           }
           await waitForHeadroom(ctx.signal)
@@ -625,7 +639,7 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
             releaseBytes()
             // One file gone or refused since it was listed; the rest still move.
             if (err instanceof GoogleApiError) {
-              refused.push(`${o.name} (${err.message})`)
+              refused.add(`${o.name} (${err.message})`)
               return
             }
             throw err
@@ -645,7 +659,7 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
           } else if (outcome.stop) {
             stopped = outcome.message
           } else {
-            refused.push(`${o.name} (${outcome.message})`)
+            refused.add(`${o.name} (${outcome.message})`)
           }
         })
         ctx.progress({ files: { ...progress } })

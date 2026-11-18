@@ -253,6 +253,7 @@ export async function startImport(
     driver,
     connection: input.connection,
     limits,
+    refreshLimits: () => limitsForAccount(account),
   })
   return { jobId, projectId: project.id }
 }
@@ -321,6 +322,8 @@ function runInThisProcess(input: {
   driver: ImportDriver
   connection: ImportConnection
   limits: ImportLimits
+  /** The organization's limits again, read when the job leaves the line. */
+  refreshLimits: () => Promise<ImportLimits>
 }): void {
   const controller = new AbortController()
   let progress = input.payload.progress
@@ -336,7 +339,15 @@ function runInThisProcess(input: {
 }
 
 async function execute(
-  input: { jobId: string; projectId: string; payload: JobPayload; driver: ImportDriver; connection: ImportConnection; limits: ImportLimits },
+  input: {
+    jobId: string
+    projectId: string
+    payload: JobPayload
+    driver: ImportDriver
+    connection: ImportConnection
+    limits: ImportLimits
+    refreshLimits: () => Promise<ImportLimits>
+  },
   controller: AbortController,
   state: { get: () => ImportProgress; set: (p: ImportProgress) => void },
 ): Promise<void> {
@@ -397,6 +408,9 @@ async function execute(
       state.set({ ...state.get(), status: 'queued', queuePosition: place })
       dirty = true
     })
+    // What is left of the plan now, not when the job joined the line: an import
+    // admitted after another one in the same organization sees what that one wrote.
+    ctx.limits = await input.refreshLimits().catch(() => input.limits)
     // The clock starts with the move: "Took 2 s" means the move, not the wait in line.
     state.set({ ...state.get(), status: 'running', queuePosition: null, startedAt: new Date().toISOString() })
     dirty = true
@@ -460,7 +474,19 @@ async function execute(
   } finally {
     clearInterval(ticker)
     if (deadline) clearTimeout(deadline)
+    // Record the project's size before giving up the slot, so the next import
+    // admitted in this organization counts these rows in what is left.
+    if (release) await recordProjectSize(projectId)
     release?.()
+  }
+}
+
+async function recordProjectSize(projectId: string): Promise<void> {
+  try {
+    const { snapshotProjectDbStorage } = await import('@/lib/usage/db-storage')
+    await snapshotProjectDbStorage(projectId)
+  } catch {
+    // The hourly measurement records it anyway.
   }
 }
 
