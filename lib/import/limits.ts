@@ -206,13 +206,14 @@ export class RowRoom {
 /**
  * Write `rows` through `write`, as many at a time as `room` lets in, until all
  * are written or the room refuses (its ImportInputError). Returns what `write`
- * said it wrote.
+ * said it wrote. The rows' type comes from `rows` alone, so a `count` that
+ * reads rows as readonly does not make them readonly for `write`.
  */
 export async function writeWithinRoom<T>(
   room: RowRoom,
   rows: readonly T[],
-  count: (row: T) => number,
-  write: (rows: T[]) => Promise<number>,
+  count: (row: NoInfer<T>) => number,
+  write: (rows: NoInfer<T>[]) => Promise<number>,
 ): Promise<number> {
   const counts = rows.map(count)
   let written = 0
