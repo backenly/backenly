@@ -145,8 +145,9 @@ it('stops at the room when a source that reported 0 bytes keeps sending rows', a
   expect(err.message).toMatch(
     /^Backenly stopped the import after \d+ MB of rows: the organization has 4 MB left of the 6 MB of database storage on Free\. Free some space or upgrade the organization, then import again\.$/,
   )
+  // Measured as the plan's usage is (lib/usage/db-storage.ts): indexes and TOAST included.
   const [held] = await prisma.$queryRawUnsafe<Array<{ bytes: string; n: string }>>(
-    `SELECT pg_table_size('"${schema}"."blobs"'::regclass)::text AS bytes, (SELECT count(*) FROM "${schema}"."blobs")::text AS n`,
+    `SELECT pg_total_relation_size('"${schema}"."blobs"'::regclass)::text AS bytes, (SELECT count(*) FROM "${schema}"."blobs")::text AS n`,
   )
   expect(Number(held.n)).toBeGreaterThan(0)
   expect(Number(held.n)).toBeLessThan(sent)

@@ -145,12 +145,13 @@ export const PAGE_SLACK_BYTES = 64 * 1024
  * The pre-checks compare the size a source REPORTS, which can be wrong: a
  * partitioned table, an estimate from a sample, a server that answers 0. This
  * keeps to what arrives. Only PostgreSQL knows what rows take once stored, so
- * the import's tables are measured the way the pre-check measured the source
- * (pg_table_size), and between measurements a row is let in only while it
- * would fit even at STORED_PER_COUNTED times its count. Far from the room that
- * costs a measurement now and then; near it, a batch goes in a few rows at a
- * time with a measurement between, until not one more row fits. Then the
- * import stops, saying the room, with the tables holding no more than it.
+ * the import's tables are measured the way the plan's usage is
+ * (pg_total_relation_size: rows, TOAST and indexes), and between measurements
+ * a row is let in only while it would fit even at STORED_PER_COUNTED times its
+ * count. Far from the room that costs a measurement now and then; near it, a
+ * batch goes in a few rows at a time with a measurement between, until not
+ * one more row fits. Then the import stops, saying the room, with the tables
+ * holding no more than it.
  */
 export class RowRoom {
   /** What the import's tables held when last measured. */
@@ -160,7 +161,7 @@ export class RowRoom {
 
   constructor(
     readonly limits: ImportLimits | undefined,
-    /** Bytes the import's tables hold now, as pg_table_size measures them. */
+    /** Bytes the import's tables hold now, as pg_total_relation_size measures them. */
     private readonly measure: () => Promise<number>,
   ) {}
 

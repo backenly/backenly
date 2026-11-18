@@ -195,9 +195,10 @@ export interface CopyContext {
 }
 
 /**
- * The room for an import into `projectId`, measured on its own database:
- * pg_table_size of the import's `tables` in the project's schema (a table not
- * created yet measures nothing).
+ * The room for an import into `projectId`, measured on its own database the
+ * way the plan's usage is (lib/usage/db-storage.ts): pg_total_relation_size of
+ * the import's `tables` in the project's schema, indexes and TOAST included
+ * (a table not created yet measures nothing).
  */
 export async function rowRoomFor(projectId: string, tables: () => readonly string[], limits: ImportLimits | undefined): Promise<RowRoom> {
   const { projectPool } = await import('@/lib/data-plane/regional')
@@ -206,7 +207,7 @@ export async function rowRoomFor(projectId: string, tables: () => readonly strin
   const schema = workspaceSchemaName(projectId)
   return new RowRoom(limits, async () => {
     const r = await pool.query<{ bytes: string }>(
-      `SELECT COALESCE(sum(pg_catalog.pg_table_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
+      `SELECT COALESCE(sum(pg_catalog.pg_total_relation_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
          FROM unnest($2::text[]) AS t`,
       [schema, [...tables()]],
     )

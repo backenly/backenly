@@ -62,8 +62,8 @@ export interface FirebaseDestination {
   countRows(table: string): Promise<number>
   /**
    * Bytes the tables this import writes hold now (its tables and the users
-   * table), as pg_table_size measures them: what the plan's room is checked
-   * against when the import's own count says it is full (lib/import/limits.ts RowRoom).
+   * table), measured as the plan's usage is: pg_total_relation_size, indexes
+   * and TOAST included. What the plan's room keeps to (lib/import/limits.ts RowRoom).
    */
   measureRows(): Promise<number>
   prepareUsers(): Promise<void>
@@ -269,7 +269,7 @@ export function backenlyDestination(input: { projectId: string; userId: string }
     async measureRows() {
       // A table not created yet (to_regclass gives null) measures nothing.
       const r = await (await pool()).query<{ bytes: string }>(
-        `SELECT COALESCE(sum(pg_catalog.pg_table_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
+        `SELECT COALESCE(sum(pg_catalog.pg_total_relation_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
            FROM unnest($2::text[]) AS t`,
         [schema, [...tablesWritten]],
       )
