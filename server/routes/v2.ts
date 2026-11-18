@@ -56,6 +56,7 @@ import {
 } from '@/lib/postgrest/schema-cache-retry'
 import { authRefusalStatus, getProjectIdFromAuth, refuseIfKeyLacksMethodPermission } from './dynamic'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
+import { dataAnswerType } from '@/lib/security/data-answers'
 import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { asyncRoute } from '../lib/async-route'
@@ -277,7 +278,12 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
       if (v) res.setHeader(h, v)
     }
     res.status(upstream.status)
-    res.type(upstream.headers.get('content-type') ?? 'application/json')
+    // PostgREST answers in the media type the request asked for, and a project's
+    // schema can define more: a type a browser would show as a page or run as
+    // script goes out as text/plain, PostgREST's own (JSON, geo+json, the
+    // vnd.pgrst types, CSV, octet-stream, text) as they are
+    // (lib/security/data-answers.ts).
+    res.type(dataAnswerType(upstream.headers.get('content-type') ?? 'application/json'))
     return res.send(text)
   } catch (err) {
     return res.status(502).json({
