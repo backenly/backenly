@@ -18,6 +18,7 @@ import {
 import { CODE_LENGTH, CodeField, ResendCodeButton, useCooldown } from '@/components/site/EmailCodeFields'
 import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT, validatePasswordStrength } from '@/lib/auth/password-policy'
 import { useUserSession } from '@/lib/hooks/useUserSession'
+import { returnPathFrom } from '@/lib/auth/return-path'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
   AuthChrome,
@@ -80,11 +81,9 @@ function SignupForm() {
   const [setupTokenRequired, setSetupTokenRequired] = useState(!!claimLinkToken)
   const [setupToken, setSetupToken] = useState(claimLinkToken)
 
-  // Honor ?redirect= (e.g. an org-invite accept page) — sanitized the same way
-  // as login so we never loop back into /auth/*.
-  const rawRedirect = searchParams.get('redirect') || '/app'
-  const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
-  const redirectUrl = isAuthPath ? '/app' : rawRedirect
+  // Honor ?redirect= (e.g. an org-invite accept page): a path on this site
+  // only, the same rule as sign-in (lib/auth/return-path.ts); anything else, /app.
+  const redirectUrl = returnPathFrom(searchParams.get('redirect'))
   const { isLoggedIn } = useUserSession({ confirmSignedIn: true })
 
   useEffect(() => {
