@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
-import { introspectAuthUsersTable, SYNTHETIC_USER_SQL } from '@/lib/services/end-user-auth-table'
+import { introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
+import { CHECK_ACCOUNT_SQL } from '@/lib/services/check-accounts'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 
 const ZERO = {
@@ -78,7 +79,7 @@ export async function GET(request: NextRequest) {
 
       // Exclude soft-deleted rows and internal behavioral-verifier accounts so
       // the identity metrics reflect only real end-users.
-      const whereParts = [`NOT ${SYNTHETIC_USER_SQL}`]
+      const whereParts = [`NOT ${CHECK_ACCOUNT_SQL}`]
       if (has('deleted_at')) whereParts.push(`"deleted_at" IS NULL`)
       const whereClause = `WHERE ${whereParts.join(' AND ')}`
       const sql = `SELECT ${select.join(', ')} FROM "${schemaName}"."users" ${whereClause}`

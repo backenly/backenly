@@ -147,12 +147,13 @@ describe.each(Object.keys(runtimes) as Array<keyof typeof runtimes>)('%s runtime
     for (let i = 0; i < n; i++) signed.push((await signup(probe, probeIp, internalTrafficToken()!)).status)
     expect(signed).toEqual([201, ...Array(n - 1).fill(409)])
 
-    // A reserved address alone is counted like anyone's. Express used to give
+    // Without the token, the address of one of Backenly's own check accounts is
+    // refused, and each attempt is counted like anyone's. Express used to give
     // it a bucket of its own on the address.
     const counted: number[] = []
     const plainIp = freshIp()
     for (let i = 0; i < n; i++) counted.push((await signup(unsigned, plainIp)).status)
-    expect(counted).toEqual([201, ...Array(SIGNUP.ipConflicts.limit).fill(409), 429])
+    expect(counted).toEqual(Array(n).fill(400))
   }, 180_000)
 })
 

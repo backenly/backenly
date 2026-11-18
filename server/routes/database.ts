@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express'
+import { carriesInternalToken } from '@/lib/security/platform-probe'
+import { headerValue } from '../lib/header-value'
 import { prisma } from '@/lib/db'
 import { v1AuthMiddleware, checkPermission, checkCapability } from '../lib/auth'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
@@ -39,6 +41,8 @@ async function resolveRlsIdentity(req: Request, projectId: string, serviceRole: 
   const endUser = await resolveEndUserFromToken(
     projectId,
     req.headers['x-user-token'] as string | undefined,
+    null,
+    { carriesProbeToken: carriesInternalToken({ headers: { get: (name: string) => headerValue(req.headers[name.toLowerCase()]) } }) },
   )
   // A blocked user gets the promised 403, never a silent downgrade to the
   // anonymous identity — public-readable tables would still serve them.

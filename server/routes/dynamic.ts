@@ -13,6 +13,8 @@
  */
 
 import { Router } from 'express'
+import { carriesInternalToken } from '@/lib/security/platform-probe'
+import { headerValue } from '../lib/header-value'
 import type { Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { isRegionError } from '@/lib/data-plane/regional'
@@ -245,7 +247,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       const branch = key.branch
         ? { id: key.branch.id, name: key.branch.name, schemaName: key.branch.schemaName }
         : null
-      const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch)
+      const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch, { carriesProbeToken: carriesInternalToken({ headers: { get: (name: string) => headerValue(req.headers[name.toLowerCase()]) } }) })
       if (endUser === 'blocked') {
         // The promised behavior of block_end_user: a 403 on the next
         // request, not a silent downgrade to the anonymous identity.

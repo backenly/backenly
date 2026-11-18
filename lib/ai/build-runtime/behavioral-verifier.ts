@@ -16,8 +16,26 @@
 
 import type { VerificationCheck, VerificationReport } from './verifier'
 import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
+import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+
+/**
+ * A request to the project's runtime, marked as Backenly's own, as the contract
+ * probe's and the live check's are (lib/traffic/request-recorder.ts). The users
+ * these scenarios sign up are Backenly's check accounts
+ * (lib/services/check-accounts.ts): signed like this, the sign-up route takes
+ * them as the platform's probe (lib/security/platform-probe.ts), so they are
+ * not counted as the project's users and run no sign-up hooks. Each scenario
+ * removes its users when it finishes. Nothing here is counted as the project's
+ * traffic either.
+ */
+function verifierFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), ...internalTrafficHeaders() },
+  })
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -122,7 +140,7 @@ async function scenarioAuthSignupAndSignin(
 
   try {
     // Step 1: Signup
-    const signupRes = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
+    const signupRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, name: 'Behavioral Test User' }),
@@ -158,7 +176,7 @@ async function scenarioAuthSignupAndSignin(
     tokenPair = { accessToken: rawToken, userId: signupBody?.user?.id ?? '' }
 
     // Step 3: Signin returns a fresh token
-    const signinRes = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signin`, {
+    const signinRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/auth/signin`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -211,7 +229,7 @@ async function scenarioProtectedRouteRejectsUnauthenticated(
 
   try {
     // Try to list records from a protected table without a token
-    const res = await fetch(`${APP_URL}/api/v1/${projectId}/db/users`, {
+    const res = await verifierFetch(`${APP_URL}/api/v1/${projectId}/db/users`, {
       method: 'GET',
       // No Authorization header
     })
@@ -225,7 +243,7 @@ async function scenarioProtectedRouteRejectsUnauthenticated(
     })
 
     // Also try POST (create) without auth
-    const postRes = await fetch(`${APP_URL}/api/v1/${projectId}/db/users`, {
+    const postRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/db/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'hacker@evil.com', role: 'admin' }),
@@ -263,7 +281,7 @@ async function scenarioAdminRouteRejectsNonAdmin(
 
   try {
     // Signup as a regular user
-    const signupRes = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
+    const signupRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password: 'TestPass123!' }),
@@ -289,7 +307,7 @@ async function scenarioAdminRouteRejectsNonAdmin(
     ]
 
     for (const endpoint of adminEndpoints) {
-      const res = await fetch(`${APP_URL}${endpoint}`, {
+      const res = await verifierFetch(`${APP_URL}${endpoint}`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -355,7 +373,7 @@ async function scenarioRLSCrossUserIsolation(
 
   try {
     // ── Create user A ──────────────────────────────────────────────────────
-    const resA = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
+    const resA = await verifierFetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: emailA, password: 'TestPass123!' }),
@@ -371,7 +389,7 @@ async function scenarioRLSCrossUserIsolation(
     checks.push({ label: 'Created User A', status: 'pass', detail: emailA })
 
     // ── Create user B ──────────────────────────────────────────────────────
-    const resB = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
+    const resB = await verifierFetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: emailB, password: 'TestPass123!' }),
@@ -387,7 +405,7 @@ async function scenarioRLSCrossUserIsolation(
     checks.push({ label: 'Created User B', status: 'pass', detail: emailB })
 
     // ── User A writes a row ────────────────────────────────────────────────
-    const writeRes = await fetch(`${APP_URL}/api/v1/${projectId}/db/${tableName}`, {
+    const writeRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/db/${tableName}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -417,7 +435,7 @@ async function scenarioRLSCrossUserIsolation(
     })
 
     // ── User B attempts to read user A's row directly ──────────────────────
-    const directReadRes = await fetch(`${APP_URL}/api/v1/${projectId}/db/${tableName}/${createdRowId}`, {
+    const directReadRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/db/${tableName}/${createdRowId}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${tokenB}` },
     })
@@ -434,7 +452,7 @@ async function scenarioRLSCrossUserIsolation(
     })
 
     // ── User B lists all rows — should see 0 from user A ──────────────────
-    const listRes = await fetch(`${APP_URL}/api/v1/${projectId}/db/${tableName}`, {
+    const listRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/db/${tableName}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${tokenB}` },
     })
@@ -478,7 +496,7 @@ async function scenarioCreditGuardBlocksWhenZero(
 
   try {
     // Create a user with 0 credits (default for new signups)
-    const signupRes = await fetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
+    const signupRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password: 'TestPass123!' }),
@@ -498,7 +516,7 @@ async function scenarioCreditGuardBlocksWhenZero(
     let testedAtLeastOne = false
 
     for (const endpoint of jobEndpoints) {
-      const createRes = await fetch(`${APP_URL}/api/v1/${projectId}/db/${endpoint}`, {
+      const createRes = await verifierFetch(`${APP_URL}/api/v1/${projectId}/db/${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

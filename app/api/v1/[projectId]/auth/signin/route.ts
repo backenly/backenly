@@ -224,7 +224,7 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
 
     // Count this end-user as active for the month (MAU tracking — never blocks).
     // A preview branch's test users are not the month's active users.
-    if (!env.branch) trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+    if (!env.branch) trackEndUserActive(projectId, String(user.id), user.email, { platformProbe: probe }).catch(() => {})
     // Stamp last_login so the Auth dashboard's "active · 30d" metric is real.
     stampLastLogin(projectId, user.id, schemaName).catch(() => {})
 

@@ -11,7 +11,8 @@ import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, buildUserInsert, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
+import { isCheckAccountAddress } from '@/lib/services/check-accounts'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import jwt from 'jsonwebtoken'
@@ -46,6 +47,9 @@ import { authorizingProject } from '@/lib/auth-projection/read'
  * branch instead: its own `users` table, a token only that branch accepts, and
  * none of production's side effects (lib/branches/auth-environment.ts).
  */
+
+/** The answer to a sign-up with the address of one of Backenly's own check accounts. */
+const RESERVED_ADDRESS = 'This email address is reserved. Sign up with another one.'
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await props.params
   return inAuthEnvironment(request, projectId, (env) => signUp(request, projectId, env))
@@ -100,10 +104,16 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
-    // Behavioral-verifier signups use reserved `.internal` emails. They must not
-    // consume the project's MAU quota or trip its cap — they are throwaway rows
-    // cleaned up moments later and never shown to the developer.
-    const isInternalTest = isReservedTestEmail(email)
+    // The addresses of Backenly's own check accounts are signed up by its
+    // signed probe only (lib/services/check-accounts.ts).
+    if (isCheckAccountAddress(email) && !probe) {
+      return createErrorResponse(ErrorCodes.VALIDATION_ERROR, RESERVED_ADDRESS, 400, { fields: { email: [RESERVED_ADDRESS] } })
+    }
+
+    // The probe's sign-ups are Backenly's own checks: they do not use the
+    // project's monthly active users or trip its cap, and need no verified
+    // address. Every other sign-up does, whatever its address.
+    const isInternalTest = probe
 
     // Guarantee the users table satisfies the auth contract — creates it when
     // missing, self-heals a drifted one (adds `role` / `is_blocked` / a
@@ -204,14 +214,14 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     if (!env.branch) {
       // Count this new end-user toward the project's MAU for the month. Verifier
       // accounts are excluded inside trackEndUserActive itself.
-      trackEndUserActive(projectId, String(user.id), email).catch(() => {})
+      trackEndUserActive(projectId, String(user.id), email, { platformProbe: probe }).catch(() => {})
 
       // Notify webhook subscribers and fire on_signup AI functions (#599).
       // Emitted here, not by a database trigger: the `users` table deliberately
       // carries none, since it holds the bcrypt hash (Realtime once leaked it
       // by broadcasting row_to_json(NEW) from this table). The shared emitter
       // builds the payload from a fixed field list and skips reserved test accounts.
-      void emitEndUserCreated(projectId, user)
+      void emitEndUserCreated(projectId, user, { platformProbe: probe })
     }
 
     // Non-blocking: the branded verification email (24h token), only where the

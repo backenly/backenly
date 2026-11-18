@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
-import { introspectAuthUsersTable, SYNTHETIC_USER_SQL } from '@/lib/services/end-user-auth-table'
+import { introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
+import { CHECK_ACCOUNT_SQL } from '@/lib/services/check-accounts'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 
 /**
@@ -59,8 +60,9 @@ export async function GET(request: NextRequest) {
       const whereParts: string[] = []
       const values: unknown[] = []
       if (has('deleted_at')) whereParts.push(`"deleted_at" IS NULL`)
-      // Never show internal behavioral-verifier accounts to the developer.
-      whereParts.push(`NOT ${SYNTHETIC_USER_SQL}`)
+      // Backenly's own check accounts are not the app's users
+      // (lib/services/check-accounts.ts); everyone else is listed.
+      whereParts.push(`NOT ${CHECK_ACCOUNT_SQL}`)
       if (search) {
         values.push(`%${search}%`)
         const idx = values.length

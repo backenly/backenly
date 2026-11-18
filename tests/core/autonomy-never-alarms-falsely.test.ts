@@ -510,11 +510,10 @@ describe('a platform fault is never filed against a tenant', () => {
 import { trackEndUserActive } from '@/lib/quota/kernel'
 
 describe("synthetic probe sign-ins never count toward a customer's active users", () => {
-  it('records a real end user and ignores a verifier account', async () => {
+  it("records a real end user and ignores the signed probe's own check account", async () => {
     const p = await builtProject()
     try {
-      await trackEndUserActive(p.projectId, randomUUID(), '__cv_abc123@backenly.internal')
-      await trackEndUserActive(p.projectId, randomUUID(), 'selftest@backenly-selftest.com')
+      await trackEndUserActive(p.projectId, randomUUID(), '__cv_abc123@backenly.internal', { platformProbe: true })
       expect(await prisma.projectActiveUser.count({ where: { projectId: p.projectId } })).toBe(0)
 
       await trackEndUserActive(p.projectId, randomUUID(), 'real.person@example.com')
