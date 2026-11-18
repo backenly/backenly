@@ -18,6 +18,13 @@
  * goes through the same upload checks as any other upload: quota, executable
  * types (blocked as on every Backenly bucket), type spoofing. An object those
  * checks refuse is skipped and named; the rest keep moving.
+ *
+ * The listing is the server's to answer, so how much of it is read is
+ * Backenly's to bound (STORAGE_WALK_LIMITS): pages of at most 2 MB, and per
+ * walk of every bucket a number of files, folders and list calls, waiting for
+ * memory headroom before each call. A walk past one of them stops with a
+ * StorageWalkLimitError naming it: the preview says files cannot move as they
+ * are, and an import already moving rows finishes without the files.
  */
 
 import type { ImportPreviewBucket } from './contract'
@@ -53,6 +60,64 @@ const LIST_PAGE = 1000
 /** Supabase's dashboard leaves this in every folder it creates. */
 const PLACEHOLDER = '.emptyFolderPlaceholder'
 
+const MB = 1024 * 1024
+
+/** The most of Storage's listing one import reads, whatever the server answers. */
+export const STORAGE_WALK_LIMITS = {
+  /** Buckets in the source. */
+  buckets: 100,
+  /** Files, over every bucket. */
+  files: 200_000,
+  /** Folders, over every bucket. */
+  folders: 20_000,
+  /** List calls, over every bucket: each folder takes one more call than its pages. */
+  requests: 50_000,
+  /** One answer to a list call: a page of 1,000 of Supabase's entries is well under 1 MB. */
+  pageBytes: 2 * MB,
+  /** One path: an object's name in Storage is at most 1,024 characters. */
+  pathChars: 1024,
+}
+
+export type StorageWalkLimits = typeof STORAGE_WALK_LIMITS
+
+/** Storage's listing went past what one import reads; the message says which limit and what to do. */
+export class StorageWalkLimitError extends ImportInputError {
+  constructor(message: string) {
+    super(message, 'projectUrl')
+    this.name = 'StorageWalkLimitError'
+  }
+}
+
+const LEAVE_FILES_OUT = 'Leave files out (no Project URL or service_role key) to move the rest, or contact us to move them.'
+const count = (n: number) => n.toLocaleString('en-US')
+
+/** What one walk over a source's buckets has read so far, against STORAGE_WALK_LIMITS. */
+export class StorageWalk {
+  files = 0
+  folders = 0
+  requests = 0
+
+  constructor(readonly limits: StorageWalkLimits = STORAGE_WALK_LIMITS) {}
+
+  request(): void {
+    if (++this.requests > this.limits.requests) {
+      throw new StorageWalkLimitError(`Listing Supabase Storage took more than ${count(this.limits.requests)} calls, the most one import makes. ${LEAVE_FILES_OUT}`)
+    }
+  }
+
+  file(): void {
+    if (++this.files > this.limits.files) {
+      throw new StorageWalkLimitError(`Supabase Storage holds more than ${count(this.limits.files)} files; one import moves up to ${count(this.limits.files)}. ${LEAVE_FILES_OUT}`)
+    }
+  }
+
+  folder(): void {
+    if (++this.folders > this.limits.folders) {
+      throw new StorageWalkLimitError(`Supabase Storage holds more than ${count(this.limits.folders)} folders; one import lists up to ${count(this.limits.folders)}. ${LEAVE_FILES_OUT}`)
+    }
+  }
+}
+
 async function call(
   src: StorageSource,
   method: 'GET' | 'POST',
@@ -60,6 +125,7 @@ async function call(
   opts: { body?: unknown; maxBytes?: number; timeoutMs?: number } = {},
 ) {
   const { safeFetch } = await import('@/lib/security/outbound-guard')
+  const maxBytes = opts.maxBytes ?? STORAGE_WALK_LIMITS.pageBytes
   try {
     return await safeFetch(`${src.origin}${path}`, {
       method,
@@ -70,10 +136,15 @@ async function call(
       },
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
       timeoutMs: opts.timeoutMs ?? 30_000,
-      maxBytes: opts.maxBytes ?? 20 * 1024 * 1024,
+      maxBytes,
       egressScope: 'import',
     })
   } catch (err) {
+    if (opts.maxBytes === undefined && /^Response exceeded \d+ bytes/.test((err as Error)?.message ?? '')) {
+      throw new StorageWalkLimitError(
+        `Supabase Storage answered one listing with more than ${Math.round(maxBytes / MB)} MB, more than Backenly reads at once. ${LEAVE_FILES_OUT}`,
+      )
+    }
     throw new ImportInputError(`Couldn't reach Storage: ${redactedMessage(err, src.secrets, 200)}`, 'projectUrl')
   }
 }
@@ -84,11 +155,14 @@ function refusal(status: number): ImportInputError {
   return new ImportInputError(`Supabase Storage answered ${status}.`, 'projectUrl')
 }
 
-export async function listBuckets(src: StorageSource): Promise<SupabaseBucket[]> {
+export async function listBuckets(src: StorageSource, limits: StorageWalkLimits = STORAGE_WALK_LIMITS): Promise<SupabaseBucket[]> {
   const res = await call(src, 'GET', '/storage/v1/bucket')
   if (!res.ok) throw refusal(res.status)
   const body = await res.json().catch(() => null)
   if (!Array.isArray(body)) throw new ImportInputError("That address doesn't answer as Supabase Storage. Check the Project URL.", 'projectUrl')
+  if (body.length > limits.buckets) {
+    throw new StorageWalkLimitError(`Supabase Storage has more than ${count(limits.buckets)} buckets; one import moves up to ${count(limits.buckets)}. ${LEAVE_FILES_OUT}`)
+  }
   return body
     .filter((b: any) => b && typeof b.name === 'string')
     .map((b: any) => ({
@@ -100,8 +174,17 @@ export async function listBuckets(src: StorageSource): Promise<SupabaseBucket[]>
     }))
 }
 
-/** Every object of a bucket, folder by folder, page by page. */
-export async function* walkObjects(src: StorageSource, bucket: SupabaseBucket, signal: AbortSignal): AsyncGenerator<SourceObject> {
+/**
+ * Every object of a bucket, folder by folder, page by page. `walk` counts
+ * against STORAGE_WALK_LIMITS; pass one walk to every bucket of a source so the
+ * limits hold for the source, not for each bucket.
+ */
+export async function* walkObjects(
+  src: StorageSource,
+  bucket: SupabaseBucket,
+  signal: AbortSignal,
+  walk: StorageWalk = new StorageWalk(),
+): AsyncGenerator<SourceObject> {
   const folders: string[] = ['']
   while (folders.length > 0) {
     const prefix = folders.shift()!
@@ -109,21 +192,31 @@ export async function* walkObjects(src: StorageSource, bucket: SupabaseBucket, s
     // next page starts after what came back, and only an empty page ends the folder.
     for (let offset = 0; ; ) {
       throwIfAborted(signal)
+      await waitForHeadroom(signal)
+      walk.request()
       const res = await call(src, 'POST', `/storage/v1/object/list/${encodeURIComponent(bucket.id)}`, {
         body: { prefix, limit: LIST_PAGE, offset, sortBy: { column: 'name', order: 'asc' } },
       })
       if (!res.ok) throw refusal(res.status)
       const page = await res.json().catch(() => null)
       if (!Array.isArray(page) || page.length === 0) break
+      if (page.length > LIST_PAGE) {
+        throw new StorageWalkLimitError(`Supabase Storage answered one listing with more than the ${count(LIST_PAGE)} entries asked for, so Backenly stopped reading it. ${LEAVE_FILES_OUT}`)
+      }
       offset += page.length
       for (const entry of page) {
         if (!entry || typeof entry.name !== 'string' || !entry.name) continue
         const path = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (path.length > walk.limits.pathChars) {
+          throw new StorageWalkLimitError(`Supabase Storage listed a path longer than ${count(walk.limits.pathChars)} characters, which no Storage object has. ${LEAVE_FILES_OUT}`)
+        }
         if (entry.id === null || entry.id === undefined) {
+          walk.folder()
           folders.push(path)
           continue
         }
         if (entry.name === PLACEHOLDER) continue
+        walk.file()
         const size = Number(entry.metadata?.size ?? entry.metadata?.contentLength ?? 0)
         yield { bucket: bucket.id, path, size: Number.isFinite(size) ? size : 0, mimeType: entry.metadata?.mimetype ?? null }
       }
@@ -132,12 +225,13 @@ export async function* walkObjects(src: StorageSource, bucket: SupabaseBucket, s
 }
 
 /** The Review step's buckets: each one walked, its files counted and summed. */
-export async function inspectStorage(src: StorageSource, signal: AbortSignal): Promise<ImportPreviewBucket[]> {
+export async function inspectStorage(src: StorageSource, signal: AbortSignal, limits: StorageWalkLimits = STORAGE_WALK_LIMITS): Promise<ImportPreviewBucket[]> {
   const out: ImportPreviewBucket[] = []
-  for (const b of await listBuckets(src)) {
+  const walk = new StorageWalk(limits)
+  for (const b of await listBuckets(src, limits)) {
     let files = 0
     let bytes = 0
-    for await (const o of walkObjects(src, b, signal)) {
+    for await (const o of walkObjects(src, b, signal, walk)) {
       files++
       bytes += o.size
     }
@@ -188,6 +282,16 @@ export async function createBuckets(projectId: string, buckets: SupabaseBucket[]
   return out
 }
 
+/** `objects`, ending where the listing reaches one of its limits, which `onLimit` is told. */
+async function* untilLimit<T>(objects: AsyncGenerator<T>, onLimit: (why: string) => void): AsyncGenerator<T> {
+  try {
+    yield* objects
+  } catch (err) {
+    if (!(err instanceof StorageWalkLimitError)) throw err
+    onLimit(err.message)
+  }
+}
+
 /** Why the upload checks (lib/storage/upload-policy.ts) refused a file, in a few words. */
 const SKIP_WORDS: Record<string, string> = {
   EXECUTABLE_BLOCKED: 'an executable type, which Backenly buckets refuse',
@@ -210,6 +314,8 @@ export interface FilesResult {
   skipped: Array<{ path: string; why: string }>
   /** Set when the plan's storage ran out: nothing after it was tried. */
   stoppedForQuota: boolean
+  /** Why the listing stopped (StorageWalkLimitError), when it did: nothing after it was tried. */
+  stopped?: string
 }
 
 /** Download each object and store it in its bucket. */
@@ -227,10 +333,12 @@ export async function copyFiles(
   const uploader = consoleUploader(ctx.userId)
   const result: FilesResult = { copied: 0, bytes: 0, skipped: [], stoppedForQuota: false }
   ctx.onFile(0, 0)
+  const walk = new StorageWalk()
   for (const b of buckets) {
+    if (result.stopped) break
     const target = targets.get(b.id)
     if (!target) continue
-    for await (const o of walkObjects(src, b, ctx.signal)) {
+    for await (const o of untilLimit(walkObjects(src, b, ctx.signal, walk), (why) => (result.stopped = why))) {
       throwIfAborted(ctx.signal)
       const label = `${b.name}/${o.path}`
       // One file at a time, never more than an upload may carry through the server (lib/storage/body-limits.ts).

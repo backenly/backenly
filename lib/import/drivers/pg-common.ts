@@ -16,7 +16,7 @@ import { previewRules, proposeRules, recordRulesForApproval, type RuleProposal }
 import { fileRefusal, formatBytes, rowRefusal } from '../limits'
 import { addDeferredKeys, copyRows, createTables, destinationCounts, throwIfAborted } from '../pg-engine'
 import { copyAuthUsers, prepareUsersTable } from '../supabase-auth'
-import { copyFiles, createBuckets, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
+import { StorageWalk, StorageWalkLimitError, copyFiles, createBuckets, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
 
 export interface OpenedSource {
   conn: SourceConnection
@@ -292,24 +292,39 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
     ctx.progress({ phase: 'files' })
     let totalFiles = 0
     let totalBytes = 0
-    for (const b of buckets) {
-      for await (const o of walkObjects(input.storage, b, ctx.signal)) {
-        totalFiles++
-        totalBytes += o.size
+    // One walk over every bucket, within the listing's limits. Past one, the
+    // rows and users stay moved and the files stay in Supabase, said why.
+    let unlisted: string | null = null
+    try {
+      const walk = new StorageWalk()
+      for (const b of buckets) {
+        for await (const o of walkObjects(input.storage, b, ctx.signal, walk)) {
+          totalFiles++
+          totalBytes += o.size
+        }
       }
+    } catch (err) {
+      if (!(err instanceof StorageWalkLimitError)) throw err
+      unlisted = err.message
     }
-    ctx.progress({ files: { total: totalFiles, copied: 0, bytes: totalBytes, copiedBytes: 0 } })
-    const files = await copyFiles(input.storage, ctx.projectId, buckets, targets, {
-      signal: ctx.signal,
-      userId: ctx.userId,
-      onFile: (copied, copiedBytes) => ctx.progress({ files: { total: totalFiles, copied, bytes: totalBytes, copiedBytes } }),
-    })
-    filesCopied = files.copied
-    if (files.skipped.length) {
-      const sample = files.skipped.slice(0, 3).map((s) => `${s.path} (${s.why})`).join(', ')
-      warnings.push(`${plural(files.skipped.length, 'file')} did not move: ${sample}${files.skipped.length > 3 ? ', …' : ''}.`)
+    if (unlisted) {
+      filesCopied = 0
+      warnings.push(`Files did not move: ${unlisted}`)
+    } else {
+      ctx.progress({ files: { total: totalFiles, copied: 0, bytes: totalBytes, copiedBytes: 0 } })
+      const files = await copyFiles(input.storage, ctx.projectId, buckets, targets, {
+        signal: ctx.signal,
+        userId: ctx.userId,
+        onFile: (copied, copiedBytes) => ctx.progress({ files: { total: totalFiles, copied, bytes: totalBytes, copiedBytes } }),
+      })
+      filesCopied = files.copied
+      if (files.skipped.length) {
+        const sample = files.skipped.slice(0, 3).map((s) => `${s.path} (${s.why})`).join(', ')
+        warnings.push(`${plural(files.skipped.length, 'file')} did not move: ${sample}${files.skipped.length > 3 ? ', …' : ''}.`)
+      }
+      if (files.stoppedForQuota) warnings.push(`Files stopped at ${formatBytes(files.bytes)}: the plan's file storage is full.`)
+      if (files.stopped) warnings.push(`Files stopped at ${plural(files.copied, 'file')}: ${files.stopped}`)
     }
-    if (files.stoppedForQuota) warnings.push(`Files stopped at ${formatBytes(files.bytes)}: the plan's file storage is full.`)
   }
 
   throwIfAborted(ctx.signal)
