@@ -10,7 +10,7 @@ import { randomBytes } from 'crypto'
 import type { ImportPreview, ImportPreviewBucket, ImportProgressTable, ImportSourceId } from '../contract'
 import { ImportInputError, type DriverContext, type RunContext, type RunResult } from '../driver'
 import { connectSource, isSupabaseHost, parsePostgresUrl, readSnapshot, supabaseRefOf, type ParsedPgUrl, type SourceConnection, type SourceReader } from '../net'
-import { authShape, countAuthUsers, countRows, existingSchemas, readCatalog, type AuthCounts, type AuthShape } from '../pg-source'
+import { authShape, countAuthUsers, countRows, existingSchemas, readCatalog, schemaBytes, type AuthCounts, type AuthShape } from '../pg-source'
 import { buildPlan, type ImportPlan, type SourceCatalog } from '../pg-plan'
 import { previewRules, proposeRules, recordRulesForApproval, type RuleProposal } from '../rules'
 import { fileRefusal, formatBytes, rowRefusal } from '../limits'
@@ -157,13 +157,8 @@ export async function checkPg(
     await readSnapshot(conn, async (db) => {
       const present = await existingSchemas(db, opts.schemas)
       if (present.length === 0) throw new ImportInputError(`This database has no schema named ${opts.schemas.join(', ')}.`, 'schemas')
-      const r = await db.query<{ bytes: string }>(
-        `SELECT COALESCE(sum(pg_table_size(c.oid)), 0)::bigint::text AS bytes
-           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-          WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1::text[])`,
-        [present],
-      )
-      const refusal = rowRefusal(Number(r.rows[0]?.bytes ?? 0), opts.ctx.limits)
+      // Partitions counted under their tables: a partitioned table alone measures 0.
+      const refusal = rowRefusal(await schemaBytes(db, present), opts.ctx.limits)
       if (refusal) throw new ImportInputError(refusal)
     })
   } finally {

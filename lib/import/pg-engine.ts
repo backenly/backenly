@@ -25,6 +25,7 @@ import type { Pool } from 'pg'
 import type { ImportPlan, PlannedTable } from './pg-plan'
 import type { SourceReader } from './net'
 import { waitForHeadroom, yieldToServer } from './pressure'
+import { SourceWireError } from './source-guard'
 
 const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
 
@@ -128,7 +129,9 @@ export function batchSizeFor(columnCount: number): number {
  * About how much one batch of rows may hold in this process's memory. A FETCH
  * is bounded by rows, never by bytes, so the batch size follows the rows'
  * measured size: a table of wide JSON or binary values is read a few rows at
- * a time (lib/import/pressure.ts says why memory is scarce here).
+ * a time (lib/import/pressure.ts says why memory is scarce here). This is the
+ * aim; the ceiling is lib/import/source-guard.ts, which ends the connection
+ * when one row, or one batch, is larger than the source made it look.
  */
 export const BATCH_TARGET_BYTES = 8 * 1024 * 1024
 
@@ -282,7 +285,12 @@ export async function copyRows(
       for (;;) {
         throwIfAborted(ctx.signal)
         await waitForHeadroom(ctx.signal)
-        const { rows } = await source.queryArrays(`FETCH FORWARD ${batch} FROM ${cursor}`)
+        const rows = await source.queryArrays(`FETCH FORWARD ${batch} FROM ${cursor}`).then(
+          (r) => r.rows,
+          (err) => {
+            throw err instanceof SourceWireError ? new SourceWireError(`Reading ${t.sourceName}: ${err.message}`) : err
+          },
+        )
         if (rows.length === 0) break
         const values = rows.map((r) => rowValues(t, r, ctx.secret))
         try {

@@ -2487,3 +2487,9 @@ tests/integration/approval-cards-know-what-history-restores.spec.ts
 # Deprecation, Link rel="successor-version" to the table on /api/v2), from the
 # runtime over a real socket and from Next's handlers; /api/v2 says neither (#22).
 tests/integration/v1-db-deprecated-on-both-servers.spec.ts
+# A source is read through the importer's own connection: a partitioned table
+# is measured by its partitions (sub-partitions and partitions in another
+# schema included), the guard on what a source sends passes a real server's
+# catalog and cursor reads, and stops a 65 MB row before holding it. Real
+# PostgreSQL through connectSource and readSnapshot.
+tests/integration/import-source-reads-real-postgres.spec.ts

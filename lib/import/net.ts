@@ -17,6 +17,8 @@
  *   - TLS names the host the person typed (`servername`), so a certificate is
  *     checked against that name although the socket was opened to an address;
  *   - Supabase is only reached encrypted;
+ *   - what the source sends is bounded before pg holds it: one message, and
+ *     one statement's answer (lib/import/source-guard.ts);
  *   - every statement runs inside a READ ONLY transaction, so the source can
  *     only be read even if a statement Backenly sends were wrong.
  *
@@ -30,6 +32,7 @@ import { Client as PgClient, type ClientConfig } from 'pg'
 import { outboundAddressRefusal, privateEgressAllowedFor } from '@/lib/security/outbound-guard'
 import { ImportInputError } from './driver'
 import { redactedMessage } from './redact'
+import { SourceWireError, guardSourceClient } from './source-guard'
 
 // ── Connection strings ────────────────────────────────────────────────────────
 
@@ -259,6 +262,8 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
       application_name: 'backenly-import',
       keepAlive: true,
     })
+    // Before connect, so the startup exchange is bounded too.
+    guardSourceClient(client)
     // An error after connect (the source restarting) must not crash the process.
     client.on('error', () => {})
     try {
@@ -290,6 +295,8 @@ export function describeSourceError(
   err: unknown,
   ctx: { host: string; port: number; family?: 4 | 6; secrets: readonly string[] },
 ): string {
+  // The limits on what a source sends say themselves (lib/import/source-guard.ts).
+  if (err instanceof SourceWireError) return err.message
   const e = err as { code?: string; message?: string } | null
   const code = e?.code ?? ''
   const where = `${ctx.host}:${ctx.port}`

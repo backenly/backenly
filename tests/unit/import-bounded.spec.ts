@@ -4,12 +4,14 @@
  *
  *   - One import runs at a time per process; the rest wait in order, told
  *     their place, and a cancel while waiting leaves the line (lib/import/gate.ts).
+ *     A look at a source (the preview, the check) takes a slot of its own
+ *     gate, waits a little, and is refused rather than stacked.
  *   - A batch of rows is sized by bytes, not only by count (lib/import/pg-engine.ts).
  *   - Memory: an import pauses while the process is over its limit and stops
  *     if it stays there; parallel downloads share a byte budget (lib/import/pressure.ts).
  *   - The pre-checks compare a source with what is LEFT of the plan (lib/import/limits.ts).
  */
-import { ImportGate } from '@/lib/import/gate'
+import { ImportGate, withSlot } from '@/lib/import/gate'
 import { BATCH_TARGET_BYTES, approxBytes, batchSizeFor, initialBatchSize, nextBatchSize } from '@/lib/import/pg-engine'
 import { ByteBudget, ImportMemoryError, containerMemoryLimit, memoryIsTight, waitForHeadroom } from '@/lib/import/pressure'
 import { fileRefusal, limitsLeft, MAX_IMPORT_ROW_BYTES, rowRefusal } from '@/lib/import/limits'
@@ -76,6 +78,61 @@ describe('one import at a time, the rest in line', () => {
     await gate.acquire('b', new AbortController().signal)
     expect(gate.counts()).toEqual({ running: 2, waiting: 0 })
     expect(gate.hasRoom()).toBe(false)
+  })
+})
+
+describe('looking at a source (the preview, the check before a start) takes a slot too', () => {
+  const busy = () => new Error('busy')
+
+  it('lets one look read at a time and the next one wait for it', async () => {
+    const gate = new ImportGate(() => 1, () => 4)
+    let finishFirst: () => void = () => {}
+    const order: string[] = []
+    const first = withSlot(gate, { waitMs: 5_000, busy }, async () => {
+      order.push('first reads')
+      await new Promise<void>((r) => (finishFirst = r))
+      order.push('first done')
+    })
+    const second = withSlot(gate, { waitMs: 5_000, busy }, async () => {
+      order.push('second reads')
+    })
+    await flush()
+    expect(order).toEqual(['first reads'])
+    expect(gate.counts()).toEqual({ running: 1, waiting: 1 })
+    finishFirst()
+    await Promise.all([first, second])
+    expect(order).toEqual(['first reads', 'first done', 'second reads'])
+    expect(gate.counts()).toEqual({ running: 0, waiting: 0 })
+  })
+
+  it('refuses a look that waited too long, or found the line full, without reading', async () => {
+    const gate = new ImportGate(() => 1, () => 1)
+    let finish: () => void = () => {}
+    const held = withSlot(gate, { waitMs: 5_000, busy }, () => new Promise<void>((r) => (finish = r)))
+    const read = jest.fn(async () => {})
+    await expect(withSlot(gate, { waitMs: 20, busy }, read)).rejects.toThrow('busy')
+    expect(read).not.toHaveBeenCalled()
+    expect(gate.counts()).toEqual({ running: 1, waiting: 0 })
+
+    // One waits in the line of one; the next finds it full.
+    const waiting = withSlot(gate, { waitMs: 5_000, busy }, read)
+    await flush()
+    await expect(withSlot(gate, { waitMs: 5_000, busy }, read)).rejects.toThrow('busy')
+    finish()
+    await held
+    await waiting
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('frees the slot when the look fails', async () => {
+    const gate = new ImportGate(() => 1, () => 0)
+    await expect(
+      withSlot(gate, { waitMs: 0, busy }, async () => {
+        throw new Error('source refused')
+      }),
+    ).rejects.toThrow('source refused')
+    expect(gate.counts()).toEqual({ running: 0, waiting: 0 })
+    await expect(withSlot(gate, { waitMs: 0, busy }, async () => 'read')).resolves.toBe('read')
   })
 })
 

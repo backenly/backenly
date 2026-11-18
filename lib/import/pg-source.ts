@@ -45,6 +45,8 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
     [schemas],
   )
   const oids = tablesRes.rows.map((r) => r.oid)
+  // A partitioned table holds nothing itself (pg_table_size says 0): its rows are its partitions'.
+  const partitioned = await partitionBytes(db, tablesRes.rows.filter((r) => r.partitioned).map((r) => r.oid))
   const tables = new Map<number, CatalogTable>()
   for (const r of tablesRes.rows) {
     tables.set(r.oid, {
@@ -57,7 +59,7 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
       rlsEnabled: r.rls,
       rowsHidden: r.hidden,
       partitioned: r.partitioned,
-      bytes: Number(r.bytes) || 0,
+      bytes: r.partitioned ? partitioned.get(r.oid) ?? 0 : Number(r.bytes) || 0,
       rows: Number(r.estimate) || 0,
       rowsExact: false,
     })
@@ -234,6 +236,48 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
     materializedViews: Number(extra.rows[0]?.matviews ?? 0),
     extensions,
   }
+}
+
+/**
+ * The bytes under each partitioned table: pg_table_size of every partition and
+ * sub-partition, summed, since the partitioned table itself has no storage and
+ * measures 0. Through pg_inherits, which every PostgreSQL with partitioning has
+ * (pg_partition_tree is 12 and later only).
+ */
+export async function partitionBytes(db: SourceReader, oids: number[]): Promise<Map<number, number>> {
+  if (oids.length === 0) return new Map()
+  const r = await db.query<{ oid: number; bytes: string }>(
+    `WITH RECURSIVE tree(root, rel) AS (
+       SELECT p, p FROM unnest($1::oid[]) AS p
+       UNION
+       SELECT t.root, i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent = t.rel
+     )
+     SELECT root::int AS oid, COALESCE(sum(pg_catalog.pg_table_size(rel)), 0)::bigint::text AS bytes
+       FROM tree
+      GROUP BY root`,
+    [oids],
+  )
+  return new Map(r.rows.map((x) => [Number(x.oid), Number(x.bytes) || 0]))
+}
+
+/**
+ * The bytes the tables of `schemas` hold, as the plan's limits measure a source
+ * (pg_table_size: rows and TOAST, no indexes), partitions counted under their
+ * table wherever they live, and each table once.
+ */
+export async function schemaBytes(db: SourceReader, schemas: string[]): Promise<number> {
+  const r = await db.query<{ bytes: string }>(
+    `WITH RECURSIVE tree(rel) AS (
+       SELECT c.oid
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1::text[])
+       UNION
+       SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent = t.rel
+     )
+     SELECT COALESCE(sum(pg_catalog.pg_table_size(rel)), 0)::bigint::text AS bytes FROM tree`,
+    [schemas],
+  )
+  return Number(r.rows[0]?.bytes ?? 0) || 0
 }
 
 /**
