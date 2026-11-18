@@ -152,6 +152,8 @@ BEGIN
       ('public.backenly_direct_strip_schema_changes(text,text,text)',   false),
       ('public.backenly_pgrst_prune_schemas()',                         false),
       ('public.backenly_pgrst_apply_owner_defaults(text)',              false),
+      ('public.backenly_pgrst_apply_soft_delete(text)',                 false),
+      ('public.backenly_pgrst_cutover_blockers(text)',                  false),
       ('public.backenly_capture_ddl()',                                 false),
       ('public.backenly_capture_drop()',                                false),
       ('public.backenly_capture_home_schema(text)',                     false)

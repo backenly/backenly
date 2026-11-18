@@ -819,6 +819,12 @@ REVOKE ALL ON FUNCTION public.backenly_pgrst_revoke_internal(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_register_schema(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_unregister_schema(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_reload() FROM PUBLIC;
+-- Nobody calls these two but their owner: backenly_pgrst_on_ddl (postgrest-ddl-sync.sql) runs
+-- apply_soft_delete as its definer, and the cutover report is read by operators as the owner. Left
+-- with PostgreSQL's default EXECUTE for PUBLIC, any role that can run SQL could create the soft-delete
+-- policy on another schema's tables and read another schema's report.
+REVOKE ALL ON FUNCTION public.backenly_pgrst_apply_soft_delete(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.backenly_pgrst_cutover_blockers(text) FROM PUBLIC;
 
 DO $grant$
 DECLARE r text := public.backenly_app_role();
