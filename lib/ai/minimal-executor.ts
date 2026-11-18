@@ -83,6 +83,7 @@ export interface AIAction {
     | 'GENERATE_API' | 'LIST_APIS'
     // Storage
     | 'CREATE_BUCKET' | 'DELETE_BUCKET' | 'UPLOAD_FILE' | 'LIST_FILES' | 'LIST_BUCKETS' | 'DELETE_FILE' | 'GENERATE_SIGNED_URL' | 'SET_BUCKET_PUBLIC' | 'SET_BUCKET_POLICY'
+    | 'SET_BUCKET_UPLOADS'
     // Connect Frontend
     | 'CONNECT_FRONTEND' | 'DISCONNECT_FRONTEND' | 'LIST_CONNECTED_APPS'
     // Deploy
@@ -1565,9 +1566,10 @@ API:
 - LIST_APIS - Show all API endpoints
 
 STORAGE:
-- CREATE_BUCKET - Create storage bucket
+- CREATE_BUCKET - Create storage bucket (only the app's server uploads into it unless uploads is signed_in)
 - SET_BUCKET_PUBLIC - Make bucket public/private
 - SET_BUCKET_POLICY - Set a bucket's access policy (public_read | cdn_cacheable | private | owner_only)
+- SET_BUCKET_UPLOADS - Set who may upload into a bucket (signed_in: any signed-in user of the app | server_only: only the app's server)
 - LIST_BUCKETS - List all storage buckets
 - UPLOAD_FILE - Upload file to bucket
 - LIST_FILES - List files in bucket
@@ -1833,7 +1835,10 @@ User: "Link users to products through an orders table"
 
 // Storage
 User: "Create an avatars bucket"
-{"action": "CREATE_BUCKET", "params": {"bucketName": "avatars"}}
+{"action": "CREATE_BUCKET", "params": {"bucketName": "avatars", "uploads": "signed_in"}}
+
+User: "Create a bucket for product photos"
+{"action": "CREATE_BUCKET", "params": {"bucketName": "product_photos", "isPublic": true}}
 
 User: "Make avatars bucket public"
 {"action": "SET_BUCKET_PUBLIC", "params": {"bucketName": "avatars", "isPublic": true}}
@@ -2201,6 +2206,16 @@ export async function validateAction(
         errors.push('policy is required (public_read | cdn_cacheable | private | owner_only)')
       }
       preview = `Set bucket "${action.params.bucketName}" access policy to ${action.params.policy}`
+      break
+
+    case 'SET_BUCKET_UPLOADS':
+      if (!action.params.bucketName) {
+        errors.push('Bucket name is required')
+      }
+      if (!action.params.uploads) {
+        errors.push('uploads is required (signed_in | server_only)')
+      }
+      preview = `Set who may upload into bucket "${action.params.bucketName}" to ${action.params.uploads}`
       break
 
     case 'DELETE_BUCKET':
@@ -3209,7 +3224,7 @@ const GOVERNED_ACTIONS = new Set<AIAction['action']>([
   // only, so the change lock is never held while a model is answering:
   // CREATE_AI_FUNCTION, FIX_AI_FUNCTION, CREATE_CRON_JOB, GENERATE_FUNCTION,
   // GENERATE_DOMAIN_LOGIC.
-  'CREATE_BUCKET', 'SET_BUCKET_PUBLIC', 'SET_BUCKET_POLICY', 'DELETE_BUCKET', 'FIX_STORAGE',
+  'CREATE_BUCKET', 'SET_BUCKET_PUBLIC', 'SET_BUCKET_POLICY', 'SET_BUCKET_UPLOADS', 'DELETE_BUCKET', 'FIX_STORAGE',
   'DELETE_AI_FUNCTION', 'TOGGLE_AI_FUNCTION', 'DELETE_CRON_JOB',
   'ROTATE_WEBHOOK_SECRET', 'SET_ENV_VAR', 'DELETE_ENV_VAR',
   'CREATE_KEY', 'REVOKE_KEY', 'ROTATE_KEY', 'SET_KEY_PERMISSIONS', 'SET_RATE_LIMIT', 'REMOVE_RATE_LIMIT',
@@ -3692,6 +3707,9 @@ async function executeSingleAction(
 
       case 'SET_BUCKET_POLICY':
         return await executeSetBucketPolicy(action.params, projectId)
+
+      case 'SET_BUCKET_UPLOADS':
+        return await executeSetBucketUploads(action.params, projectId)
 
       case 'LIST_BUCKETS':
         return await executeListBuckets(projectId)
@@ -6911,9 +6929,18 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
   const { bucketName, isPublic = false } = params
   if (!bucketName) return { success: false, message: 'Bucket name is required' }
 
+  // Who may upload into it (lib/storage/upload-access.ts): only the app's
+  // server, unless the call asks for signed-in users. A value it does not know
+  // is refused before anything is made, rather than read as either.
+  const uploadAccess = await import('@/lib/storage/upload-access')
+  const requestedUploads: unknown = params.uploads
+  const askedForUploads = requestedUploads !== undefined && requestedUploads !== null
+  if (askedForUploads && !uploadAccess.isUploadRule(requestedUploads)) return unknownUploadsRule(requestedUploads)
+  const uploads = uploadAccess.isUploadRule(requestedUploads) ? requestedUploads : uploadAccess.NEW_BUCKET_UPLOADS
+
   try {
     const { storageService } = await import('@/lib/services/storage')
-    const bucket = await storageService.createBucket(bucketName, projectId, isPublic)
+    const bucket = await storageService.createBucket(bucketName, projectId, isPublic, uploads)
 
     // ── Phase: Atomic create+verify ───────────────────────────────────────────
     // Always read back from DB to confirm the bucket actually exists.
@@ -6921,7 +6948,7 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     const { prisma: prismaVerify } = await import('@/lib/db')
     const verified = await prismaVerify.storageBucket.findFirst({
       where: { name: bucketName, projectId },
-      select: { id: true, name: true, isPublic: true, accessPolicy: true },
+      select: { id: true, name: true, isPublic: true, accessPolicy: true, uploadPolicy: true },
     })
 
     if (!verified) {
@@ -6959,19 +6986,27 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
         ? 'public'
         : 'private'
     const bucketList = allBucketNames.map(b => `  • ${b}`).join('\n')
+    // Who may upload, also read back: an agent building profile photos learns
+    // here that it must ask for signed_in, before the app's first upload fails.
+    const verifiedUploads = uploadAccess.uploadRuleOf(verified.uploadPolicy)
     const message = [
       `Done — created \`${bucketName}\` bucket.`,
       '',
       'Changed:',
       `✓ Storage bucket: \`${bucketName}\``,
       `✓ Visibility: ${visibilityLabel}`,
+      `✓ Uploads: ${verifiedUploads}`,
       '✓ Verified in database',
+      '',
+      uploadAccess.whoMayUpload(bucketName, verifiedUploads),
       '',
       `Current storage (${allBucketNames.length}):`,
       bucketList,
       '',
       'Next:',
-      `Upload files to this bucket via the storage API or signed-upload endpoint.`,
+      verifiedUploads === 'signed_in'
+        ? 'Upload from the app as a signed-in user (the SDK, or the storage API with X-User-Token).'
+        : 'Upload from your server with a service-role key, through the storage API or the signed-upload endpoint.',
     ].join('\n')
 
     return {
@@ -6982,6 +7017,7 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
         bucketName: verified.name,
         isPublic: verified.isPublic,
         accessPolicy: verified.accessPolicy,
+        uploads: verifiedUploads,
         verified: true,
       },
       artifacts: { buckets: [bucketName] },
@@ -6998,19 +7034,21 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
         const { prisma: prismaCheck } = await import('@/lib/db')
         const existing = await prismaCheck.storageBucket.findFirst({
           where: { name: bucketName, projectId },
-          select: { id: true, name: true, isPublic: true, accessPolicy: true },
+          select: { id: true, name: true, isPublic: true, accessPolicy: true, uploadPolicy: true },
         })
         if (existing) {
           const { policyAllowsPublic } = await import('@/lib/storage/access-policy')
           const existingPublic = policyAllowsPublic(existing.accessPolicy)
           const requestedPublic = !!isPublic
           const visibility = (pub: boolean) => (pub ? 'public' : 'private')
+          const existingUploads = uploadAccess.uploadRuleOf(existing.uploadPolicy)
           const data = {
             bucketId: existing.id,
             bucketName: existing.name,
             existed: true,
             isPublic: existingPublic,
             accessPolicy: existing.accessPolicy,
+            uploads: existingUploads,
             verified: true,
           }
           if (requestedPublic !== existingPublic) {
@@ -7025,11 +7063,23 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
               data,
             }
           }
+          // Who may upload is compared only when the call said: one that did
+          // not ask is not told the existing bucket differs from a default.
+          if (askedForUploads && requestedUploads !== existingUploads) {
+            return {
+              success: false,
+              message:
+                `Bucket "${bucketName}" already exists and its uploads are ${existingUploads}; this call asked for ` +
+                `${String(requestedUploads)}. Nothing changed. To change who may upload, call storage { "action": "set_uploads" }.`,
+              error: 'BUCKET_UPLOADS_MISMATCH',
+              data,
+            }
+          }
           return {
             success: true,
             message:
               `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
-              `(policy ${existing.accessPolicy}). Nothing changed.`,
+              `(policy ${existing.accessPolicy}). Nothing changed. ${uploadAccess.whoMayUpload(bucketName, existingUploads)}`,
             data,
           }
         }
@@ -7119,6 +7169,56 @@ async function executeSetBucketPolicy(params: any, projectId: string): Promise<E
   }
 }
 
+/** The answer to an uploads value that is neither rule. */
+function unknownUploadsRule(value: unknown): ExecutionResult {
+  return {
+    success: false,
+    message:
+      `Unknown uploads value "${String(value)}". A bucket takes uploads from signed_in (any signed-in user of the app; ` +
+      "each changes only their own files) or server_only (only the app's server, with a service-role key).",
+    error: 'UNKNOWN_UPLOADS_RULE',
+  }
+}
+
+/**
+ * STORAGE: Set who may upload into a bucket (lib/storage/upload-access.ts):
+ * signed_in or server_only. A change in History like the bucket's other
+ * settings, restored with them (lib/changes/resources/storage.ts).
+ */
+async function executeSetBucketUploads(params: any, projectId: string): Promise<ExecutionResult> {
+  const { bucketName, uploads } = params
+  if (!bucketName) return { success: false, message: 'Bucket name is required' }
+
+  const { isUploadRule, uploadRuleOf } = await import('@/lib/storage/upload-access')
+  if (!isUploadRule(uploads)) return unknownUploadsRule(uploads)
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const bucket = await prisma.storageBucket.findFirst({ where: { name: bucketName, projectId } })
+    if (!bucket) return { success: false, message: `Bucket "${bucketName}" not found. Run LIST_BUCKETS to see the buckets in this project.` }
+
+    // Read back, so the answer reports what uploads will meet, not the request.
+    // history: GOVERNED_ACTIONS (SET_BUCKET_UPLOADS)
+    const updated = await prisma.storageBucket.update({
+      where: { id: bucket.id },
+      data: { uploadPolicy: uploads },
+      select: { uploadPolicy: true },
+    })
+    const now = uploadRuleOf(updated.uploadPolicy)
+    return {
+      success: true,
+      message:
+        now === 'signed_in'
+          ? `Bucket "${bucketName}" uploads are now signed_in: any signed-in user of your app can upload into it, and each changes only their own files.`
+          : `Bucket "${bucketName}" uploads are now server_only: only your app's server can upload into it, with a service-role key. ` +
+            'Uploads from signed-in users are refused from the next request, including ones already under way.',
+      data: { bucketName, uploads: now },
+    }
+  } catch (error: any) {
+    return { success: false, message: `Failed to set who may upload: ${error.message}`, error: error.message }
+  }
+}
+
 /**
  * STORAGE: List Buckets
  */
@@ -7140,7 +7240,7 @@ async function executeListBuckets(projectId: string): Promise<ExecutionResult> {
       // the two disagreed on buckets whose policy was changed elsewhere, and
       // this read-back is how an agent confirms a set_public took effect.
       const enforcedPublic = b.accessPolicy === 'public_read' || b.accessPolicy === 'cdn_cacheable'
-      return `• **${b.name}** — ${b.fileCount} file${b.fileCount !== 1 ? 's' : ''} · ${enforcedPublic ? 'public' : 'private'} (${b.accessPolicy})`
+      return `• **${b.name}** — ${b.fileCount} file${b.fileCount !== 1 ? 's' : ''} · ${enforcedPublic ? 'public' : 'private'} (${b.accessPolicy}) · uploads: ${b.uploads}`
     }).join('\n')
 
     // StorageBucket carries BigInt columns (storageUsed / maxFileSize). Left raw,

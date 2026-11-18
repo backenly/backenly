@@ -7,6 +7,7 @@ import { validateProjectOwnership } from '@/lib/tenant/isolation'
 import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db'
 import { runMutation, mutationHttpStatus } from '@/lib/ai/build-runtime/mutate'
+import { UPLOAD_RULES, isUploadRule, uploadRuleOf } from '@/lib/storage/upload-access'
 
 // GET /api/storage/buckets/[bucketId] — Get bucket info + stats
 export async function GET(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
@@ -92,8 +93,8 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ bu
 
 // PATCH /api/storage/buckets/[bucketId] — Update bucket security settings (GOVERNED)
 //
-// DEVELOPER and above: who may read the bucket's files is project
-// configuration, as the project's other settings are.
+// DEVELOPER and above: who may read the bucket's files, and who may upload
+// into it, are project configuration, as the project's other settings are.
 export async function PATCH(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
   const params = await props.params;
   try {
@@ -117,6 +118,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ buc
         overwriteStrategy,
         isPublic,
         accessPolicy,
+        uploads,
       } = body
 
       const VALID_ACCESS_POLICIES = ['public_read', 'private', 'owner_only', 'cdn_cacheable']
@@ -130,6 +132,13 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ buc
       if (accessPolicy && !VALID_ACCESS_POLICIES.includes(accessPolicy)) {
         return NextResponse.json(
           { error: `Invalid accessPolicy. Must be one of: ${VALID_ACCESS_POLICIES.join(', ')}` },
+          { status: 400 },
+        )
+      }
+      // Who may upload into it (lib/storage/upload-access.ts).
+      if (uploads !== undefined && !isUploadRule(uploads)) {
+        return NextResponse.json(
+          { error: `Invalid uploads. Must be one of: ${UPLOAD_RULES.join(', ')}` },
           { status: 400 },
         )
       }
@@ -158,6 +167,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ buc
               ...(overwriteStrategy  !== undefined && { overwriteStrategy }),
               ...(derivedIsPublic    !== undefined && { isPublic: derivedIsPublic }),
               ...(accessPolicy       !== undefined && { accessPolicy }),
+              ...(uploads            !== undefined && { uploadPolicy: uploads }),
             },
           })
         },
@@ -182,6 +192,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ buc
           blockExecutables: updatedBucket.blockExecutables,
           maxFileSizeBytes: updatedBucket.maxFileSizeBytes.toString(),
           overwriteStrategy:updatedBucket.overwriteStrategy,
+          uploads:          uploadRuleOf(updatedBucket.uploadPolicy),
         },
       })
     })

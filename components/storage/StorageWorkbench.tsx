@@ -34,6 +34,7 @@ import {
   getFiles,
   getStorageStats,
   updateBucketPolicy,
+  updateBucketUploads,
   uploadFile,
   type StorageBucket,
   type StorageFile,
@@ -51,6 +52,7 @@ import { ErrorRow } from '@/components/console/states'
 import { FirstRun } from '@/components/console/FirstRun'
 import { FOCUS_INSET, RULE } from '@/components/console/tokens'
 import { BucketPolicyDialog } from './BucketPolicyDialog'
+import { BucketUploadsDialog } from './BucketUploadsDialog'
 import { BucketsRail } from './BucketsRail'
 import { FileDrawer } from './FileDrawer'
 import { FilesPane } from './FilesPane'
@@ -330,8 +332,9 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
     }
   }
 
-  // ── Who can read a bucket ──────────────────────────────────────────────────
+  // ── Who can read a bucket, and who can upload to it ────────────────────────
   const [policyTarget, setPolicyTarget] = useState<StorageBucket | null>(null)
+  const [uploadsTarget, setUploadsTarget] = useState<StorageBucket | null>(null)
 
   // ── Uploading ──────────────────────────────────────────────────────────────
   const quota = quotaOf(usedBytes ?? 0, limit)
@@ -514,6 +517,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   onDeleteFiles={(list) => setToDelete(list)}
                   onDeleteBucket={() => bucket && setBucketToDelete(bucket)}
                   onEditPolicy={() => bucket && setPolicyTarget(bucket)}
+                  onEditUploads={() => bucket && setUploadsTarget(bucket)}
                   onBack={() => setPane('buckets')}
                   actionError={actionError}
                   onDismissError={() => setActionError(null)}
@@ -619,6 +623,19 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
           onSave={async (policy) => {
             await updateBucketPolicy(policyTarget.id, policy)
             setPolicyTarget(null)
+            await refresh()
+          }}
+        />
+      )}
+
+      {uploadsTarget && (
+        <BucketUploadsDialog
+          bucketName={uploadsTarget.name}
+          current={uploadsTarget.uploads}
+          onClose={() => setUploadsTarget(null)}
+          onSave={async (uploads) => {
+            await updateBucketUploads(uploadsTarget.id, uploads)
+            setUploadsTarget(null)
             await refresh()
           }}
         />

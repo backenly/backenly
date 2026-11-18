@@ -18,6 +18,11 @@
  * paragraph does not. A tool or action added later says what an agent needs to
  * call it and leaves the rest to its docs topic. If it still does not fit,
  * raise the budget here by what the addition costs, where a reviewer sees it.
+ *
+ * Raised so far: storage's set_uploads action and create_bucket's uploads
+ * argument (who may upload into a bucket), 267 bytes on a read-write key and
+ * nothing on a read-only one, measured against main with every earlier
+ * addition in (2026-11-17).
  */
 import { mcpTools } from '@/lib/mcp/protocol/remote-server'
 
@@ -31,16 +36,16 @@ const wire = (readOnly: boolean) => bytes({ tools: tools(readOnly) })
 const model = (readOnly: boolean) =>
   bytes({ tools: tools(readOnly).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
 
-it('fits a read-write key’s tools/list in 30 KB', () => {
-  expect(wire(false)).toBeLessThanOrEqual(30_000)
+it('fits a read-write key’s tools/list in 30.27 KB', () => {
+  expect(wire(false)).toBeLessThanOrEqual(30_267)
 })
 
 it('fits a read-only key’s tools/list in 12.5 KB', () => {
   expect(wire(true)).toBeLessThanOrEqual(12_500)
 })
 
-it('hands the model at most 26.4 KB of tool definitions on a read-write key, and 10.1 KB on a read-only one', () => {
-  expect(model(false)).toBeLessThanOrEqual(26_400)
+it('hands the model at most 26.67 KB of tool definitions on a read-write key, and 10.1 KB on a read-only one', () => {
+  expect(model(false)).toBeLessThanOrEqual(26_667)
   expect(model(true)).toBeLessThanOrEqual(10_100)
 })
 

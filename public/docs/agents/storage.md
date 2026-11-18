@@ -11,10 +11,11 @@ Call as `storage { action: "<action>", … }`.
 
 | Action | What it does | Needs | Read-only key | Approval |
 | --- | --- | --- | --- | --- |
-| `create_bucket` | a new bucket, private unless isPublic | `bucketName` | no | no |
+| `create_bucket` | a new bucket, private unless isPublic; only your server uploads into it unless uploads is signed_in | `bucketName` | no | no |
 | `set_public` | make a bucket public or private (shorthand for the public_read / private policies) | `bucketName`, `isPublic` | no | no |
 | `set_policy` | set the enforced access policy: public_read, cdn_cacheable, private or owner_only | `bucketName`, `policy` | no | no |
-| `list_buckets` | every bucket with its visibility | nothing | yes | no |
+| `set_uploads` | who may upload into a bucket: signed_in (any signed-in user of the app) or server_only (only your server, with a service-role key) | `bucketName`, `uploads` | no | no |
+| `list_buckets` | every bucket with its visibility and who may upload | nothing | yes | no |
 | `list_files` | the files in one bucket | `bucketName` | yes | no |
 | `signed_url` | a time-limited download link for one file | `bucketName`, `path` | yes | no |
 | `delete_file` | remove one file | `bucketName`, `path` | no | waits for a human |

@@ -117,7 +117,8 @@ beforeAll(async () => {
   }
   publicKey = await mint('web app', false)
   serviceKey = await mint('backend', true)
-  await prisma.storageBucket.create({ data: { name: 'photos', projectId, isPublic: true, accessPolicy: 'public_read' } })
+  // A bucket the app's signed-in users upload into (lib/storage/upload-access.ts).
+  await prisma.storageBucket.create({ data: { name: 'photos', projectId, isPublic: true, accessPolicy: 'public_read', uploadPolicy: 'signed_in' } })
 
   await apiUpload('mug.txt', publicKey, shopperToken())
   // The public key alone may not upload any more.

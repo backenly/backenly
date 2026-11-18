@@ -70,7 +70,7 @@ backoff. No WebSocket dependency. Outside a browser, `subscribe` does nothing.
 ## Storage
 
 ```ts
-// `avatars` is a bucket whose policy lets files be public.
+// `avatars` is a bucket whose policy lets files be public, and whose uploads are signed_in.
 const { id } = await backend.storage.upload(file, `${userId}.png`, { bucket: 'avatars', isPublic: true })
 avatar.src = backend.storage.getUrl(id) // the file itself, served to anyone
 
@@ -82,6 +82,13 @@ await backend.storage.delete(id)
 dashboard or ask your agent. Without `bucket`, the file goes to the project's
 private `default` bucket. `isPublic: true` makes a file public when its
 bucket's policy allows public files (`public_read` or `cdn_cacheable`).
+
+An upload from the app is made as the signed-in user, into a bucket whose
+uploads are `signed_in` (the `default` bucket's are). A bucket whose uploads
+are `server_only`, the default for one your agent creates, takes files only
+from your server with a service-role key, and answers the app's upload with
+`UPLOADS_SERVER_ONLY`; your agent or the dashboard (Storage, Upload access)
+changes that.
 
 `getUrl(id)` is the address a file is served at. A public file is served there
 to anyone, so the address works as an `<img src>`. Any other file is served

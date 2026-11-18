@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission, requireStorageWriter } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { incrementStorageUsed } from '@/lib/services/storageQuota'
@@ -51,6 +51,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     const fileRecord = await prisma.storageFile.findFirst({
       where: { id: fileId, projectId: context.projectId },
+      include: { bucket: { select: { name: true, uploadPolicy: true } } },
     })
 
     if (!fileRecord) {
@@ -89,6 +90,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         status: 'complete',
       })
     }
+
+    // Confirming puts the file in its bucket, so the bucket's rule as it is now
+    // decides who may: a bucket changed to server_only since the upload began
+    // takes it only from a service-role key. One already confirmed is answered
+    // above, as it was.
+    const uploadRuleCheck = requireUploadRule(context, fileRecord.bucket)
+    if (uploadRuleCheck) return uploadRuleCheck
 
     // Mark as complete
     await prisma.storageFile.update({

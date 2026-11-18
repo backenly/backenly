@@ -1,13 +1,15 @@
 /**
  * Storage buckets in the change history (lib/changes/resources).
  *
- * A bucket's settings come back exactly. A bucket a change created goes again
- * only while it holds no files: files are what the application wrote, and a
- * restore never removes them. A bucket a change removed took its files with it
- * (lib/services/storage.ts deleteBucket), so only an empty one comes back.
+ * A bucket's settings come back exactly, who may upload into it among them. A
+ * bucket a change created goes again only while it holds no files: files are
+ * what the application wrote, and a restore never removes them. A bucket a
+ * change removed took its files with it (lib/services/storage.ts deleteBucket),
+ * so only an empty one comes back.
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { uploadRuleOf, type UploadRule } from '@/lib/storage/upload-access'
 import type { Irreversible, ResourceAdapter, ResourceItem, ResourceOp, Tx } from './core'
 
 const SETTINGS = ['name', 'isPublic', 'accessPolicy', 'allowedExtensions', 'allowedMimeTypes', 'blockExecutables', 'maxFileSizeBytes', 'overwriteStrategy'] as const
@@ -41,6 +43,12 @@ export const storageAdapter: ResourceAdapter = {
           blockExecutables: b.blockExecutables,
           maxFileSizeBytes: b.maxFileSizeBytes.toString(),
           overwriteStrategy: b.overwriteStrategy,
+          // Who may upload (lib/storage/upload-access.ts), recorded only for a
+          // bucket that takes uploads from the server alone. A bucket that takes
+          // them from signed-in users, as every bucket did before buckets said
+          // this, reads as it always has, so a change recorded before then still
+          // matches it, and restoring one puts that back (uploadsOf below).
+          ...(uploadRuleOf(b.uploadPolicy) === 'server_only' ? { uploadPolicy: 'server_only' } : {}),
         },
         meta: { files: b._count.files + b._count.multipartUploads },
       }
@@ -93,10 +101,20 @@ export const storageAdapter: ResourceAdapter = {
 function fieldsToRow(f: Record<string, unknown>) {
   const row: Record<string, unknown> = {}
   for (const k of SETTINGS) if (k in f) row[k] = k === 'maxFileSizeBytes' ? BigInt(String(f[k])) : f[k]
+  row.uploadPolicy = uploadsOf(f)
   return row as {
     name: string; isPublic: boolean; accessPolicy: string; allowedExtensions: string[]; allowedMimeTypes: string[]
-    blockExecutables: boolean; maxFileSizeBytes: bigint; overwriteStrategy: string
+    blockExecutables: boolean; maxFileSizeBytes: bigint; overwriteStrategy: string; uploadPolicy: UploadRule
   }
+}
+
+/**
+ * Who may upload into a bucket as recorded: what the record says, and for a
+ * record without it (signed-in users, or a change recorded before buckets said
+ * who may upload), signed-in users, which is what that bucket took.
+ */
+function uploadsOf(f: Record<string, unknown>): UploadRule {
+  return 'uploadPolicy' in f ? uploadRuleOf(f.uploadPolicy) : 'signed_in'
 }
 
 function capital(s: string): string {

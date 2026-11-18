@@ -96,16 +96,24 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     title: 'File storage',
     summary: 'Buckets and files. Uploads go from the app (SDK or REST), not through this tool.',
     actions: {
-      create_bucket: { tool: 'create_bucket', gloss: 'a new bucket, private unless isPublic', brief: 'private unless isPublic' },
+      create_bucket: {
+        tool: 'create_bucket',
+        gloss: 'a new bucket, private unless isPublic; only your server uploads into it unless uploads is signed_in',
+        brief: 'private unless isPublic; uploads default to server_only',
+      },
       set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private (shorthand for the public_read / private policies)' },
       set_policy: { tool: 'set_bucket_policy', gloss: 'set the enforced access policy: public_read, cdn_cacheable, private or owner_only' },
-      list_buckets: { tool: 'list_buckets', gloss: 'every bucket with its visibility' },
+      set_uploads: { tool: 'set_bucket_uploads', gloss: 'who may upload into a bucket: signed_in (any signed-in user of the app) or server_only (only your server, with a service-role key)' },
+      list_buckets: { tool: 'list_buckets', gloss: 'every bucket with its visibility and who may upload' },
       list_files: { tool: 'list_files', gloss: 'the files in one bucket' },
       signed_url: { tool: 'generate_signed_url', gloss: 'a time-limited download link for one file' },
       delete_file: { tool: 'delete_file', gloss: 'remove one file' },
       delete_bucket: { tool: 'delete_bucket', gloss: 'remove a bucket and everything in it', brief: 'and everything in it' },
     },
-    argText: { bucketName: 'The bucket.', path: 'The file\'s path in the bucket.' },
+    argText: {
+      bucketName: 'The bucket.', path: 'The file\'s path in the bucket.',
+      uploads: 'signed_in: any signed-in app user. server_only: your server only (service-role key).',
+    },
   },
   {
     name: 'functions',

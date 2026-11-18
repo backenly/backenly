@@ -6,6 +6,8 @@ export interface StorageBucket {
   isPublic: boolean
   /** 'public_read' | 'cdn_cacheable' | 'private' | 'owner_only'. */
   accessPolicy?: string
+  /** Who may upload into it: 'signed_in' | 'server_only' (lib/storage/upload-access.ts). */
+  uploads?: string
   fileCount?: number
   totalSize?: number // BigInt converted to number for JSON
 }
@@ -118,6 +120,19 @@ export async function updateBucketPolicy(
     `/api/storage/buckets/${bucketId}`,
     { method: 'PATCH', body: JSON.stringify({ accessPolicy }) },
   )
+  return res.bucket
+}
+
+/**
+ * Change who may upload into a bucket: 'signed_in' (any signed-in user of the
+ * app) or 'server_only' (only the app's server, with a service-role key). It
+ * applies from the next upload.
+ */
+export async function updateBucketUploads(bucketId: string, uploads: string): Promise<StorageBucket> {
+  const res = await apiRequest<{ bucket: StorageBucket }>(`/api/storage/buckets/${bucketId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ uploads }),
+  })
   return res.bucket
 }
 
