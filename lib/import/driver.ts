@@ -41,6 +41,13 @@ export interface ImportLimits {
   maxFileBytes: number | null
   /** Said in a refusal: "Your plan's database storage is 500 MB". */
   planName: string
+  /**
+   * The plan's whole allowances, when the organization already uses part of
+   * them: maxRowBytes and maxFileBytes are then what is left, and a refusal
+   * says so ("has 120 MB left of its 500 MB").
+   */
+  planRowBytes?: number | null
+  planFileBytes?: number | null
 }
 
 export interface RunContext extends DriverContext {
