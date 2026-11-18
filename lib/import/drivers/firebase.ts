@@ -51,6 +51,7 @@ import { pendingRules, readFirestoreRules } from './firebase-rules'
 import { backenlyDestination, type FirebaseDestination } from './firebase-destination'
 import { throwIfAborted } from '../pg-engine'
 import { fileRefusal, rowRefusal } from '../limits'
+import { ByteBudget, FILE_BYTES_IN_FLIGHT, waitForHeadroom } from '../pressure'
 
 export interface FirebaseLimits {
   /** Documents read per collection for column types. */
@@ -425,6 +426,7 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
       const open: string[] = []
       for await (const page of reader.walk(top)) {
         throwIfAborted(ctx.signal)
+        await waitForHeadroom(ctx.signal)
         for (const doc of page) {
           const loc = locate(doc.name, reader.root)
           if (!loc) continue
@@ -502,6 +504,7 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
       let copied = 0
       for await (const page of listUsers(client, projectId)) {
         throwIfAborted(ctx.signal)
+        await waitForHeadroom(ctx.signal)
         const rows: ImportedUser[] = []
         for (const u of page) {
           const outcome = mapFirebaseUser(u, hash.params)
@@ -557,6 +560,8 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
       const bucket = found.bucket
       ctx.progress({ phase: 'files', files: { ...progress } })
       const bucketId = await dest.prepareFilesBucket(limits.maxFileBytes)
+      // Four downloads at a time, holding at most FILE_BYTES_IN_FLIGHT between them (lib/import/pressure.ts).
+      const fileBytes = new ByteBudget(FILE_BYTES_IN_FLIGHT)
 
       for await (const page of listObjects(client, bucket)) {
         throwIfAborted(ctx.signal)
@@ -575,10 +580,13 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
             refused.push(`${o.name} (an executable file)`)
             return
           }
+          await waitForHeadroom(ctx.signal)
+          const releaseBytes = await fileBytes.acquire(o.size)
           let buffer: Buffer
           try {
             buffer = await downloadObject(client, bucket, o.name, limits.maxFileBytes)
           } catch (err) {
+            releaseBytes()
             // One file gone or refused since it was listed; the rest still move.
             if (err instanceof GoogleApiError) {
               refused.push(`${o.name} (${err.message})`)
@@ -590,9 +598,11 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
           try {
             outcome = await dest.uploadFile(bucketId, { name: o.name, buffer, mimeType: mimeTypeFor(o.name, o.contentType) })
           } catch (err) {
+            releaseBytes()
             // Backenly's own storage failed (not a refusal of this file): no later file would fare better.
             throw new FilesStopped(`Backenly could not store the files: ${err instanceof Error ? err.message.split('\n')[0].slice(0, 200) : 'storage failed'}`)
           }
+          releaseBytes()
           if (outcome.ok) {
             progress.copied++
             progress.copiedBytes += buffer.length
