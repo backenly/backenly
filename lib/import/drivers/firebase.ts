@@ -50,8 +50,8 @@ import { UserTally, countUsers, listUsers, listUsersPage, mapFirebaseUser, readH
 import { downloadObject, findDefaultBucket, listObjects, listObjectsPage, mimeTypeFor, readProjectInfo } from './firebase-storage'
 import { pendingRules, readFirestoreRules } from './firebase-rules'
 import { backenlyDestination, type FirebaseDestination } from './firebase-destination'
-import { batchCost, throwIfAborted } from '../pg-engine'
-import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, RowRoom, fileRefusal, rowRefusal, tableCountRefusal, userCountRefusal } from '../limits'
+import { rowCost, throwIfAborted } from '../pg-engine'
+import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, RowRoom, fileRefusal, rowRefusal, tableCountRefusal, userCountRefusal, writeWithinRoom } from '../limits'
 import { ByteBudget, FILE_BYTES_IN_FLIGHT, waitForHeadroom } from '../pressure'
 
 export interface FirebaseLimits {
@@ -411,9 +411,8 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
       }
       const rows = s.buffer.map((r) => writeRow(s.plan, r))
       s.buffer = []
-      // The estimate from a sample passed the plan's limit; what arrives is counted against its room.
-      await room.take(batchCost(rows))
-      s.copied += await dest.insertRows(s.plan.name, writeColumns(s.plan), rows)
+      // The estimate from a sample passed the plan's limit; what arrives is written only as far as its room lets in.
+      s.copied += await writeWithinRoom(room, rows, rowCost, (some) => dest.insertRows(s.plan.name, writeColumns(s.plan), some))
     }
 
     const take = (s: TableState, doc: FsDocument, loc: DocLocation) => {
@@ -549,8 +548,7 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
         imported += rows.length
         if (imported > MAX_IMPORT_USERS) throw new ImportInputError(userCountRefusal(null))
         // Users are rows of the project's database too: the same room as the tables'.
-        await room.take(batchCost(rows.map((u) => Object.values(u))))
-        copied += await dest.insertUsers(rows)
+        copied += await writeWithinRoom(room, rows, (u) => rowCost(Object.values(u)), (some) => dest.insertUsers(some))
         ctx.progress({ users: { total: Math.max(estimate, tally.total), copied } })
       }
       warnings.push(...tally.warnings(hash.problem))

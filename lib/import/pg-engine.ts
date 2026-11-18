@@ -25,7 +25,7 @@ import type { Pool } from 'pg'
 import type { ImportLimits } from './driver'
 import type { ImportPlan, PlannedTable } from './pg-plan'
 import type { SourceReader } from './net'
-import { ROW_OVERHEAD_BYTES, RowRoom } from './limits'
+import { ROW_OVERHEAD_BYTES, RowRoom, writeWithinRoom } from './limits'
 import { waitForHeadroom, yieldToServer } from './pressure'
 import { SourceWireError } from './source-guard'
 
@@ -188,7 +188,7 @@ export interface CopyContext {
   secret: Buffer
   /** Called after every batch with the table's running total. */
   onRows: (table: string, copied: number) => void
-  /** The plan's room, every batch counted against it before it is written (lib/import/limits.ts). */
+  /** The plan's room: rows are written only as far as it lets them in (lib/import/limits.ts). */
   room: RowRoom
 }
 
@@ -212,9 +212,17 @@ export async function rowRoomFor(projectId: string, tables: () => readonly strin
   })
 }
 
-/** About what a batch of destination rows costs: its values' bytes, and a row's overhead each. */
-export function batchCost(values: readonly unknown[][]): number {
-  return approxBytes(values) + ROW_OVERHEAD_BYTES * values.length
+/**
+ * What one destination row is counted at against the plan's room: each value
+ * at its length but at least 8 bytes (a number held in 8 bytes can be one
+ * character of text), plus 8 for its header and alignment, and
+ * ROW_OVERHEAD_BYTES for the row. lib/import/limits.ts RowRoom says how the
+ * count relates to what PostgreSQL stores.
+ */
+export function rowCost(values: readonly unknown[]): number {
+  let n = ROW_OVERHEAD_BYTES
+  for (const v of values) if (v !== null && v !== undefined) n += Math.max(valueBytes(v), 8) + 8
+  return n
 }
 
 /** One source row → the destination values, in `t.copy` order. Exported for the tests. */
@@ -322,13 +330,14 @@ export async function copyRows(
         )
         if (rows.length === 0) break
         const values = rows.map((r) => rowValues(t, r, ctx.secret))
-        // Counted before it is written: past the plan's room the import stops here.
-        await ctx.room.take(batchCost(values))
-        try {
-          await insertBatch(pool, schema, t, values)
-        } catch (err) {
-          throw destinationError(t.name, err)
-        }
+        // As many rows at a time as the plan's room lets in; past it, the import stops here.
+        await writeWithinRoom(ctx.room, values, rowCost, async (some) => {
+          try {
+            return await insertBatch(pool, schema, t, some)
+          } catch (err) {
+            throw destinationError(t.name, err)
+          }
+        })
         n += rows.length
         copied.set(t.name, n)
         ctx.onRows(t.name, n)

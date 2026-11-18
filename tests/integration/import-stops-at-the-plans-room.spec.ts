@@ -5,14 +5,16 @@
  * The pre-checks compare the size a source reports (pg_table_size, a sample's
  * estimate) with what is left of the organization's database storage. A
  * source can report 0: a partitioned table's parent did, and a server that is
- * not PostgreSQL can answer anything. So the copy counts what it writes,
- * batch by batch, measures the project's tables when the count says the room
- * is full, and stops there in the pre-check's words (lib/import/limits.ts
- * RowRoom, lib/import/pg-engine.ts copyRows).
+ * not PostgreSQL can answer anything. So the copy writes rows only as far as
+ * the room lets them in, measuring the project's tables as it fills, and
+ * stops there in the pre-check's words (lib/import/limits.ts RowRoom,
+ * lib/import/pg-engine.ts copyRows).
  *
- * Here a source reports 0 bytes and then sends rows without end. Real
- * provisioned project, governed table creation, the project's own database;
- * the source is a stand-in reader, since no socket is involved in counting.
+ * Here a source reports 0 bytes and then sends rows without end, rows that
+ * PostgreSQL stores at more than their text (out of line, pages part-used):
+ * the first version of the room counted text alone and let these tables grow
+ * past it. Real provisioned project, governed table creation, the project's
+ * own database; the source is a stand-in reader, since no socket is involved.
  */
 
 jest.mock('@cloud/entitlements', () => {

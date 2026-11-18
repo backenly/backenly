@@ -127,21 +127,36 @@ export function roomRefusal(written: number, limits: ImportLimits | undefined): 
 }
 
 /**
+ * At most how many times its count (pg-engine.ts rowCost) a value can take in
+ * PostgreSQL. A count is the value's text, but at least 8 bytes, plus 8; what
+ * is stored can still be larger: text in a script of three-byte characters is
+ * three times its length, an out-of-line value leaves part of a page unused,
+ * and a jsonb array of one-digit numbers, the largest, holds each as 12 bytes
+ * for 2 characters of text, about six times.
+ */
+export const STORED_PER_COUNTED = 8
+/** Relations grow a page at a time: one insert can add a page each to a table, its TOAST table and that table's index. */
+export const PAGE_SLACK_BYTES = 64 * 1024
+
+/**
  * The room an import's rows have (ImportLimits.maxRowBytes: what is left of
- * the plan's database storage, at most 5 GB), counted as rows are written.
+ * the plan's database storage, at most 5 GB), kept as rows are written.
  *
  * The pre-checks compare the size a source REPORTS, which can be wrong: a
  * partitioned table, an estimate from a sample, a server that answers 0. This
- * counts what arrives. Each batch is counted before it is written, at its
- * values' bytes plus ROW_OVERHEAD_BYTES a row. That count runs ahead of what
- * PostgreSQL stores (a uuid is 36 characters of text and 16 bytes on disk), so
- * when it says a batch would not fit, the tables written are measured the way
- * the pre-check measured the source (pg_table_size), and only a batch that
- * would not fit beside what they really hold is refused: the import stops,
- * saying the room.
+ * keeps to what arrives. Only PostgreSQL knows what rows take once stored, so
+ * the import's tables are measured the way the pre-check measured the source
+ * (pg_table_size), and between measurements a row is let in only while it
+ * would fit even at STORED_PER_COUNTED times its count. Far from the room that
+ * costs a measurement now and then; near it, a batch goes in a few rows at a
+ * time with a measurement between, until not one more row fits. Then the
+ * import stops, saying the room, with the tables holding no more than it.
  */
 export class RowRoom {
-  private counted = 0
+  /** What the import's tables held when last measured. */
+  private held = 0
+  /** Counted since. */
+  private since = 0
 
   constructor(
     readonly limits: ImportLimits | undefined,
@@ -153,19 +168,58 @@ export class RowRoom {
     return this.limits?.maxRowBytes ?? MAX_IMPORT_ROW_BYTES
   }
 
-  /** Count a batch of about `bytes` before it is written; throws ImportInputError when it would not fit. */
-  async take(bytes: number): Promise<void> {
-    const n = Math.max(0, bytes)
-    if (this.counted + n <= this.room) {
-      this.counted += n
-      return
+  /**
+   * How many of these rows, given their counts in order, may be written now
+   * (at least one); throws ImportInputError with the room's refusal when not
+   * even the first fits. The caller writes that many and asks for the rest.
+   */
+  async fit(counts: readonly number[]): Promise<number> {
+    let n = this.fitting(counts)
+    if (n < counts.length) {
+      // A measurement that fails is no evidence of room: the worst case of the count stands.
+      const worst = this.held + STORED_PER_COUNTED * this.since
+      this.held = await this.measure().then(
+        (b) => Math.max(0, Number(b) || 0),
+        () => worst,
+      )
+      this.since = 0
+      n = this.fitting(counts)
     }
-    // A measurement that fails is no evidence of room: the count stands.
-    const held = await this.measure().then(
-      (b) => Math.max(0, Number(b) || 0),
-      () => this.counted,
-    )
-    if (held + n > this.room) throw new ImportInputError(roomRefusal(held, this.limits))
-    this.counted = held + n
+    if (n === 0) throw new ImportInputError(roomRefusal(this.held, this.limits))
+    for (let i = 0; i < n; i++) this.since += Math.max(0, counts[i])
+    return n
   }
+
+  private fitting(counts: readonly number[]): number {
+    const free = this.room - PAGE_SLACK_BYTES - this.held - STORED_PER_COUNTED * this.since
+    let taken = 0
+    let n = 0
+    for (const c of counts) {
+      taken += STORED_PER_COUNTED * Math.max(0, c)
+      if (taken > free) break
+      n++
+    }
+    return n
+  }
+}
+
+/**
+ * Write `rows` through `write`, as many at a time as `room` lets in, until all
+ * are written or the room refuses (its ImportInputError). Returns what `write`
+ * said it wrote.
+ */
+export async function writeWithinRoom<T>(
+  room: RowRoom,
+  rows: readonly T[],
+  count: (row: T) => number,
+  write: (rows: T[]) => Promise<number>,
+): Promise<number> {
+  const counts = rows.map(count)
+  let written = 0
+  for (let i = 0; i < rows.length; ) {
+    const n = await room.fit(counts.slice(i))
+    written += await write(rows.slice(i, i + n))
+    i += n
+  }
+  return written
 }

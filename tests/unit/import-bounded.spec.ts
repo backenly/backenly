@@ -16,19 +16,22 @@
  */
 import { ImportInputError } from '@/lib/import/driver'
 import { ImportGate, withSlot } from '@/lib/import/gate'
-import { BATCH_TARGET_BYTES, approxBytes, batchSizeFor, initialBatchSize, nextBatchSize } from '@/lib/import/pg-engine'
+import { BATCH_TARGET_BYTES, approxBytes, batchSizeFor, initialBatchSize, nextBatchSize, rowCost } from '@/lib/import/pg-engine'
 import { ByteBudget, ImportMemoryError, containerMemoryLimit, memoryIsTight, waitForHeadroom } from '@/lib/import/pressure'
 import {
   MAX_IMPORT_ROW_BYTES,
   MAX_IMPORT_TABLES,
   MAX_IMPORT_USERS,
+  PAGE_SLACK_BYTES,
   RowRoom,
+  STORED_PER_COUNTED,
   fileRefusal,
   limitsLeft,
   roomRefusal,
   rowRefusal,
   tableCountRefusal,
   userCountRefusal,
+  writeWithinRoom,
 } from '@/lib/import/limits'
 
 const MB = 1024 * 1024
@@ -294,42 +297,76 @@ describe('the pre-checks count what the organization already uses', () => {
   })
 })
 
-describe('rows are counted against the room as they are written', () => {
+describe('rows are written only as far as the room lets them in', () => {
+  // 120 MB left of the plan's 500 MB.
   const free = limitsLeft({ planRowBytes: 500 * MB, planFileBytes: null, usedRowBytes: 380 * MB, usedFileBytes: 0, planName: 'Free' })
+  const counted = (c: number) => c
 
-  it('lets batches through while the count fits, without measuring', async () => {
-    const measure = jest.fn(async () => 0)
-    const room = new RowRoom(free, measure)
-    await room.take(60 * MB)
-    await room.take(60 * MB)
-    expect(measure).not.toHaveBeenCalled()
+  /** The import's tables, standing in: each row written adds `storedPerRow` to what measuring them says. */
+  function tables(storedPerRow: number) {
+    let held = 0
+    const writes: number[] = []
+    return {
+      measure: jest.fn(async () => held),
+      write: async (rows: number[]) => {
+        writes.push(rows.length)
+        held += rows.length * storedPerRow
+        return rows.length
+      },
+      held: () => held,
+      writes,
+    }
+  }
+
+  it('lets rows in without measuring while even eight times their count fits', async () => {
+    const t = tables(1024)
+    const room = new RowRoom(free, t.measure)
+    await expect(writeWithinRoom(room, Array.from({ length: 1000 }, () => 1024), counted, t.write)).resolves.toBe(1000)
+    expect(t.measure).not.toHaveBeenCalled()
+    expect(t.writes).toEqual([1000])
   })
 
-  it('measures before refusing, and goes on when the tables hold less than the count said', async () => {
-    // The count runs ahead of what PostgreSQL stores: 120 MB counted, 70 MB on disk.
-    const measure = jest.fn(async () => 70 * MB)
-    const room = new RowRoom(free, measure)
-    await room.take(100 * MB)
-    await room.take(40 * MB)
-    expect(measure).toHaveBeenCalledTimes(1)
-  })
-
-  it('stops at the room, saying it in the pre-check words, whatever the source reported', async () => {
-    const room = new RowRoom(free, async () => 110 * MB)
-    await room.take(100 * MB)
-    const err = await room.take(30 * MB).catch((e) => e)
+  it('measures as the room fills, fills it when rows are stored at about their count, and stops there in the pre-check words', async () => {
+    const t = tables(MB)
+    const room = new RowRoom(free, t.measure)
+    const err = await writeWithinRoom(room, Array.from({ length: 200 }, () => MB), counted, t.write).catch((e) => e)
     expect(err).toBeInstanceOf(ImportInputError)
     expect(err.message).toBe(
-      'Backenly stopped the import after 110 MB of rows: the organization has 120 MB left of the 500 MB of database storage on Free. Free some space or upgrade the organization, then import again.',
+      'Backenly stopped the import after 112 MB of rows: the organization has 120 MB left of the 500 MB of database storage on Free. Free some space or upgrade the organization, then import again.',
     )
+    expect(t.held()).toBeLessThanOrEqual(free.maxRowBytes)
+    // Within eight rows' worst case (and the page slack) of the room.
+    expect(t.held()).toBeGreaterThanOrEqual(free.maxRowBytes - STORED_PER_COUNTED * MB - PAGE_SLACK_BYTES)
   })
 
-  it('refuses on the count when the tables cannot be measured', async () => {
+  it('never lets the tables hold more than the room, even when rows are stored at six times their count', async () => {
+    // A jsonb array of one-digit numbers is stored at about six times its text.
+    const t = tables(600 * 1024)
+    const room = new RowRoom(free, t.measure)
+    await expect(writeWithinRoom(room, Array.from({ length: 1000 }, () => 100 * 1024), counted, t.write)).rejects.toBeInstanceOf(ImportInputError)
+    expect(t.held()).toBeLessThanOrEqual(free.maxRowBytes)
+    expect(t.held()).toBeGreaterThan(free.maxRowBytes - 8 * 600 * 1024)
+  })
+
+  it('takes nothing more on trust when the tables cannot be measured', async () => {
+    const written: number[] = []
     const room = new RowRoom(free, async () => {
       throw new Error('measurement failed')
     })
-    await room.take(119 * MB)
-    await expect(room.take(2 * MB)).rejects.toThrow(/^Backenly stopped the import after 119 MB of rows/)
+    const err = await writeWithinRoom(room, Array.from({ length: 100 }, () => MB), counted, async (rows) => {
+      written.push(rows.length)
+      return rows.length
+    }).catch((e) => e)
+    // What fit at eight times its count went in; then the worst case of that count stands.
+    expect(written).toEqual([14])
+    expect(err.message).toMatch(/^Backenly stopped the import after 112 MB of rows/)
+  })
+
+  it('counts a value at its length but at least 8 bytes, plus 8, and each row at 64 more', () => {
+    expect(rowCost([null, undefined])).toBe(64)
+    // A number PostgreSQL holds in 8 bytes can be one character of text.
+    expect(rowCost(['1'])).toBe(64 + 16)
+    expect(rowCost(['x'.repeat(100), 'abc'])).toBe(64 + 108 + 16)
   })
 
   it('says the plan, or the one-import limit, when nothing else is in use', () => {
