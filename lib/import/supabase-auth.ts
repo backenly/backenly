@@ -23,6 +23,7 @@ import type { Pool } from 'pg'
 import type { SourceReader } from './net'
 import { authUsersQuery, type AuthShape, type AuthUserRow } from './pg-source'
 import { throwIfAborted } from './pg-engine'
+import { waitForHeadroom } from './pressure'
 
 const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
 
@@ -90,6 +91,7 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
   try {
     for (;;) {
       throwIfAborted(ctx.signal)
+      await waitForHeadroom(ctx.signal)
       const { rows } = await source.query<AuthUserRow>(`FETCH FORWARD 500 FROM bkn_import_users`)
       if (rows.length === 0) break
       const params: unknown[] = []

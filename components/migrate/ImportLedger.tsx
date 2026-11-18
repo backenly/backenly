@@ -32,6 +32,21 @@ const PHASE_WORD: Record<ImportPhase, string> = {
   finished: 'Finishing',
 }
 
+/**
+ * A waiting import (lib/import/gate.ts runs one at a time per server): its
+ * place in line, so a still ledger reads as waiting, not stuck.
+ */
+function queuedWords(place: number | null | undefined): string {
+  if (!place) return 'Starting'
+  return place === 1 ? 'Waiting, next in line' : `Waiting, ${ordinal(place)} in line`
+}
+
+function ordinal(n: number): string {
+  const tens = n % 100
+  if (tens >= 11 && tens <= 13) return `${n}th`
+  return `${n}${({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'}`
+}
+
 function JobState({ job }: { job: ImportProgress }) {
   if (job.status === 'done') {
     return (
@@ -46,7 +61,7 @@ function JobState({ job }: { job: ImportProgress }) {
   return (
     <span className="inline-flex items-center gap-2 font-medium text-zinc-100" aria-live="polite">
       <span aria-hidden className="h-[6px] w-[6px] rounded-full bg-violet-300" />
-      {job.status === 'queued' ? 'Starting' : PHASE_WORD[job.phase]}
+      {job.status === 'queued' ? queuedWords(job.queuePosition) : PHASE_WORD[job.phase]}
     </span>
   )
 }
@@ -107,10 +122,13 @@ export function ImportLedger({
           </p>
         </div>
         <div className="ml-auto flex items-center gap-4 pt-[2px] text-[12.5px] leading-[18px]">
-          <span className="tabular-nums text-faint" title="Time since the import started">
-            {clock(elapsedOf(job, now))}
-          </span>
-          {running && <span className="tabular-nums text-zinc-400">{Math.floor(fraction * 100)}%</span>}
+          {/* While it waits in line there is no clock or percentage yet; the state says why. */}
+          {job.status !== 'queued' && (
+            <span className="tabular-nums text-faint" title="Time since the import started">
+              {clock(elapsedOf(job, now))}
+            </span>
+          )}
+          {running && job.status !== 'queued' && <span className="tabular-nums text-zinc-400">{Math.floor(fraction * 100)}%</span>}
           <JobState job={job} />
         </div>
         <span aria-hidden className="absolute inset-x-0 bottom-[-1px] h-px overflow-hidden">
