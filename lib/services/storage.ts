@@ -267,6 +267,94 @@ export class LocalStorageService implements StorageService {
     file: { name: string; buffer: Buffer; mimeType?: string },
     options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
   ) {
+    const fileSize = BigInt(file.buffer.length)
+    return this.executeUpload(
+      bucketId,
+      file,
+      fileSize,
+      options,
+      (fileSize, bucket) => assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes }),
+      async (destinationFilePath) => {
+        await fs.writeFile(destinationFilePath, file.buffer)
+      }
+    )
+  }
+
+  /**
+   * Upload a complete file assembled from uploaded multipart chunks.
+   * Streams parts sequentially into a temporary file on disk, avoiding loading large files into memory.
+   * Enforces the bucket's max file size and MAX_ASSEMBLED_BYTES (bypassing the 100 MB single-upload limit).
+   */
+  async uploadFromChunks(
+    bucketId: string,
+    chunkPaths: string[],
+    file: { name: string; mimeType?: string },
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
+  ) {
+    // Measure actual file size on disk across all uploaded chunks
+    let totalBytes = BigInt(0)
+    for (const chunkPath of chunkPaths) {
+      const st = await fs.stat(chunkPath)
+      totalBytes += BigInt(st.size)
+    }
+
+    const maxAssembledBytes = BigInt(
+      process.env.STORAGE_SIGNED_MAX_BYTES || String(2 * 1024 * 1024 * 1024)
+    )
+
+    return this.executeUpload(
+      bucketId,
+      file,
+      totalBytes,
+      options,
+      // Size check callback: enforces MAX_ASSEMBLED_BYTES and bucket limit, bypassing 100 MB buffered limit
+      (size, bucket) => {
+        if (size > maxAssembledBytes) {
+          const limitGB = (Number(maxAssembledBytes) / (1024 ** 3)).toFixed(1)
+          throw new UploadRejectedError('FILE_TOO_LARGE', `File exceeds ${limitGB} GB limit`)
+        }
+        if (bucket.maxFileSizeBytes && size > bucket.maxFileSizeBytes) {
+          const mb = (b: bigint) => (Number(b) / (1024 * 1024)).toFixed(2)
+          throw new UploadRejectedError(
+            'FILE_TOO_LARGE',
+            `File size (${mb(size)}MB) exceeds bucket's maximum allowed size (${mb(bucket.maxFileSizeBytes)}MB)`
+          )
+        }
+      },
+      // Byte writing callback: streams chunks into temporary file in bucket directory, then renames into place
+      async (destinationFilePath, bucketDir, uniqueName) => {
+        const tempPath = path.join(bucketDir, `.tmp_${uniqueName}`)
+        try {
+          const { createReadStream, createWriteStream } = await import('fs')
+          const { pipeline } = await import('stream/promises')
+          for (const chunkPath of chunkPaths) {
+            await pipeline(
+              createReadStream(chunkPath),
+              createWriteStream(tempPath, { flags: 'a' })
+            )
+          }
+          await fs.rename(tempPath, destinationFilePath)
+        } catch (err) {
+          await fs.unlink(tempPath).catch(() => {})
+          throw err
+        }
+      }
+    )
+  }
+
+  /**
+   * Shared upload execution pipeline for both single-buffer and multipart chunk uploads.
+   * Enforces tenant isolation, bucket upload policies, quota, max files per bucket,
+   * overwrite strategies, and atomic database persistence with access-policy clamping.
+   */
+  private async executeUpload(
+    bucketId: string,
+    file: { name: string; mimeType?: string },
+    fileSize: bigint,
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number },
+    assertCeiling: (size: bigint, bucket: any) => void,
+    writeBytes: (destinationFilePath: string, bucketDir: string, uniqueName: string) => Promise<void>
+  ) {
     if (!options.projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -311,8 +399,7 @@ export class LocalStorageService implements StorageService {
       throw new UploadRejectedError('PROJECT_NOT_FOUND', 'Project not found')
     }
 
-    const fileSize = BigInt(file.buffer.length)
-    assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
+    assertCeiling(fileSize, bucket)
 
     // Check the account's pooled storage against the owner's plan (storageQuota.ts owns it)
     const quota = await getProjectQuota(options.projectId, BigInt(fileSize))
@@ -430,13 +517,14 @@ export class LocalStorageService implements StorageService {
     const ext = path.extname(finalFileName)
     const baseName = path.basename(finalFileName, ext)
     const uniqueName = `${baseName}-${crypto.randomBytes(8).toString('hex')}${ext}`
-    const filePath = path.join(this.getBucketDir(options.projectId, bucket.name), uniqueName)
+    const bucketDir = this.getBucketDir(options.projectId, bucket.name)
+    const filePath = path.join(bucketDir, uniqueName)
 
     // Ensure bucket directory exists
     await this.ensureBucketDir(options.projectId, bucket.name)
 
     // Write file to disk
-    await fs.writeFile(filePath, file.buffer)
+    await writeBytes(filePath, bucketDir, uniqueName)
 
     // Create database record and update project storage usage
     const storageFile = await prisma.$transaction(async (tx) => {
@@ -481,7 +569,7 @@ export class LocalStorageService implements StorageService {
           originalName,
           version,
           path: filePath,
-          size: BigInt(file.buffer.length),
+          size: fileSize,
           mimeType: file.mimeType || null,
           isPublic: isPublicFile,
           projectId: options.projectId, // Required - use validated projectId
@@ -496,7 +584,7 @@ export class LocalStorageService implements StorageService {
         where: { id: options.projectId },
         data: {
           storageUsed: {
-            increment: BigInt(file.buffer.length),
+            increment: fileSize,
           },
         },
       })

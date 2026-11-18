@@ -15,6 +15,7 @@ import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { cacheControlFor, clampIsPublic } from '@/lib/storage/access-policy'
 import { apiUploader, uploaderOf } from '@/lib/storage/uploader'
 import { forgetFileNames, keepFileNames, storedFileName, withFileName } from '@/lib/storage/file-names'
+import { assertFileAllowed, isUploadRejected } from '@/lib/storage/upload-policy'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
 // Maximum total assembled file size (2 GB)
@@ -122,14 +123,24 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     // is told to create it first (lib/storage/upload-access.ts).
     const creatorCheck = requireBucketCreator(context, bucketName)
     if (creatorCheck) return creatorCheck
-    // history: provisioned by the first upload, on the data plane, which never waits for the change lock
     // An upload never opens a bucket: one it creates is private until its owner
     // sets the access policy. The server alone uploads into it, as into any
     // bucket made without saying, except the SDK's `default`.
+    // Buckets this route creates are provisioned with video types (from EXTENSION_MIME)
+    // so .mp4 and other video formats are accepted (#594).
+    const videoExtensions = ['.mp4', '.webm', '.ogv', '.mov', '.avi']
+    const videoMimeTypes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo']
+
+    // history: provisioned by the first upload, on the data plane, which never waits for the change lock
     bucketRecord = await prisma.storageBucket.create({
       data: {
-        name: bucketName, projectId: context.projectId, isPublic: false, maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES),
+        name: bucketName,
+        projectId: context.projectId,
+        isPublic: false,
+        maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES),
         uploadPolicy: uploadsForCreatedBucket(bucketName),
+        allowedExtensions: videoExtensions,
+        allowedMimeTypes: videoMimeTypes,
       },
     })
   }
@@ -204,6 +215,32 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
   }
 
   // Local temp-file fallback
+  const requestedBytes = BigInt(contentLength)
+  if (bucketRecord.maxFileSizeBytes && requestedBytes > bucketRecord.maxFileSizeBytes) {
+    const mb = (b: bigint) => (Number(b) / (1024 * 1024)).toFixed(2)
+    return createErrorResponse(
+      ErrorCodes.PLAN_LIMIT_EXCEEDED,
+      `File size (${mb(requestedBytes)}MB) exceeds bucket's maximum allowed size (${mb(bucketRecord.maxFileSizeBytes)}MB)`,
+      413,
+      { reason: 'FILE_TOO_LARGE' }
+    )
+  }
+
+  try {
+    assertFileAllowed(bucketRecord as any, { name: filename, mimeType: contentType })
+  } catch (err: any) {
+    if (isUploadRejected(err)) {
+      const code =
+        err.status === 404 ? ErrorCodes.NOT_FOUND
+        : err.status === 403 ? ErrorCodes.FORBIDDEN
+        : err.status === 409 ? ErrorCodes.CONFLICT
+        : err.status === 413 ? ErrorCodes.PLAN_LIMIT_EXCEEDED
+        : ErrorCodes.VALIDATION_ERROR
+      return createErrorResponse(code, err.message, err.status, { reason: err.code })
+    }
+    throw err
+  }
+
   const uploadId = crypto.randomUUID()
   const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, '_')
   const chunkDir = path.join(CHUNK_UPLOAD_DIR, uploadId)
@@ -391,36 +428,105 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   if (!chunkDir) {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Invalid uploadId', 400)
   }
-  const parts: Buffer[] = []
+
+  const bucket = await prisma.storageBucket.findUnique({ where: { id: fileRecord.bucketId } })
+  if (!bucket) {
+    return createErrorResponse(ErrorCodes.NOT_FOUND, 'Bucket not found', 404)
+  }
+
+  // Check the real size on disk first using fs.stat across all chunk files.
+  const chunkPaths: string[] = []
+  let realTotalBytes = BigInt(0)
   for (let i = 1; i <= totalParts; i++) {
     const chunkPath = safeChunkPath(uploadId, `part_${String(i).padStart(5, '0')}`)
     if (!chunkPath) {
       return createErrorResponse(ErrorCodes.BAD_REQUEST, `Invalid chunk part ${i}`, 400)
     }
     try {
-      parts.push(await fs.readFile(chunkPath))
+      const st = await fs.stat(chunkPath)
+      realTotalBytes += BigInt(st.size)
+      chunkPaths.push(chunkPath)
     } catch {
       return createErrorResponse(ErrorCodes.BAD_REQUEST, `Missing chunk part ${i}`, 400)
     }
   }
-  const assembled = Buffer.concat(parts)
-  const bucket = await prisma.storageBucket.findUnique({ where: { id: fileRecord.bucketId } })
-  if (!bucket) {
-    return createErrorResponse(ErrorCodes.NOT_FOUND, 'Bucket not found', 404)
+
+  /**
+   * Helper to clean up temporary chunks from disk and remove the pending tracking row
+   * from the database whenever an upload is rejected or fails during complete.
+   */
+  const cleanupRefusal = async () => {
+    fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
+    await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(() => null)
+    await forgetFileNames(projectId, [fileRecord.id]).catch(() => {})
   }
-  const storedFile = await storageService.uploadFile(
-    bucket.id,
-    // The real name: a regional project's tracking row holds only its stand-in.
-    { name: (await withFileName(projectId, fileRecord)).name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
-    // The uploader the initiate step recorded on the tracking row. A row
-    // without one (an upload begun before it was recorded) stays unknown,
-    // which owner_only reads as operator-only: closed rather than broken.
-    { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined, uploader: uploaderOf(fileRecord) ?? undefined }
-  )
+
+  // Check real total size against the 2 GB max assembled limit
+  if (realTotalBytes > BigInt(MAX_ASSEMBLED_BYTES)) {
+    await cleanupRefusal()
+    const limitGB = (MAX_ASSEMBLED_BYTES / (1024 ** 3)).toFixed(1)
+    return createErrorResponse(
+      ErrorCodes.PLAN_LIMIT_EXCEEDED,
+      `File exceeds ${limitGB} GB limit`,
+      413,
+      { reason: 'FILE_TOO_LARGE' }
+    )
+  }
+
+  // Check real total size against the bucket's own limit
+  if (bucket.maxFileSizeBytes && realTotalBytes > bucket.maxFileSizeBytes) {
+    await cleanupRefusal()
+    const mb = (b: bigint) => (Number(b) / (1024 * 1024)).toFixed(2)
+    return createErrorResponse(
+      ErrorCodes.PLAN_LIMIT_EXCEEDED,
+      `File size (${mb(realTotalBytes)}MB) exceeds bucket's maximum allowed size (${mb(bucket.maxFileSizeBytes)}MB)`,
+      413,
+      { reason: 'FILE_TOO_LARGE' }
+    )
+  }
+
+  // Check project quota against the real total bytes
+  try {
+    await assertQuotaAvailable(projectId, realTotalBytes)
+  } catch (err: any) {
+    await cleanupRefusal()
+    if (err instanceof QuotaExceededError) {
+      return createErrorResponse(ErrorCodes.FORBIDDEN, err.message, 413)
+    }
+    throw err
+  }
+  const targetName = (await withFileName(projectId, fileRecord)).name
+  const mimeType = fileRecord.mimeType || 'application/octet-stream'
+
+  let storedFile: { id: string; name: string; path: string; url: string; size: bigint }
+  try {
+    storedFile = await (storageService as any).uploadFromChunks(
+      bucket.id,
+      chunkPaths,
+      { name: targetName, mimeType },
+      { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined, uploader: uploaderOf(fileRecord) ?? undefined }
+    )
+  } catch (error: any) {
+    // After a refusal, remove the chunk directory and the pending row, as the abort handler does.
+    await cleanupRefusal()
+
+    if (isUploadRejected(error)) {
+      const code =
+        error.status === 404 ? ErrorCodes.NOT_FOUND
+        : error.status === 403 ? ErrorCodes.FORBIDDEN
+        : error.status === 409 ? ErrorCodes.CONFLICT
+        : error.status === 413 ? ErrorCodes.PLAN_LIMIT_EXCEEDED
+        : ErrorCodes.VALIDATION_ERROR
+      return createErrorResponse(code, error.message, error.status, { reason: error.code })
+    }
+
+    throw error
+  }
+
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
 
-  // uploadFile wrote the REAL row (correct path, quota counted inside it).
+  // uploadFromChunks wrote the REAL row (correct path, quota counted inside it).
   // The pending tracking row is deleted, not kept: updating it in place left
   // an active second row whose path `${uploadId}/${filename}` no reader can
   // serve, and the extra incrementStorageUsed here counted the same bytes a
@@ -430,7 +536,7 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   )
   await forgetFileNames(projectId, [fileRecord.id]).catch(() => {})
 
-  return createSuccessResponse({ id: storedFile.id, url: storedFile.url, path: storedFile.path, size: assembled.length })
+  return createSuccessResponse({ id: storedFile.id, url: storedFile.url, path: storedFile.path, size: Number(realTotalBytes) })
 }
 
 // ── Route dispatcher ───────────────────────────────────────────────────────────
