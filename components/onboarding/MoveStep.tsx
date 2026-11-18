@@ -64,7 +64,13 @@ export function MoveStep({
       {(staleSince !== null || isRunning(job)) && (
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <p role="status" className="min-w-0 text-[12.5px] leading-[18px] text-faint">
-            {staleSince !== null ? `Could not refresh. Showing progress from ${clockTime(staleSince)}.` : ''}
+            {staleSince !== null
+              ? `Could not refresh. Showing progress from ${clockTime(staleSince)}.`
+              : job.status === 'queued' && job.queuePosition
+                ? `Backenly moves one project in at a time. Yours starts as soon as ${
+                    job.queuePosition === 1 ? 'the one ahead of it finishes' : 'the ones ahead of it finish'
+                  }; you can close this page.`
+                : ''}
           </p>
           {isRunning(job) && (
             <KitButton variant="ghost" onClick={onStop}>

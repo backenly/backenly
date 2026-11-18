@@ -124,9 +124,27 @@ it('switched off in the middle of a burst, starts no run after it, keeps nothing
   // Runs are going: the runner takes four at a time.
   await new Promise((r) => setTimeout(r, 700))
 
-  const offAt = Date.now()
+  // Switching off saves the function's row. On a busy database that takes a
+  // while, and runs keep starting until it is saved. Holding the row for 250 ms
+  // makes every run of this test go through that wait. NO KEY UPDATE is the
+  // lock the switch-off's own update takes, so it waits; a run's record, which
+  // only checks that the function exists, does not.
+  let rowHeld!: () => void
+  const held = new Promise<void>((r) => (rowHeld = r))
+  const holding = prisma.$transaction(async (tx) => {
+    await tx.$queryRawUnsafe(`SELECT 1 FROM "ai_functions" WHERE id = $1 FOR NO KEY UPDATE`, id)
+    rowHeld()
+    await new Promise((r) => setTimeout(r, 250))
+  })
+  await held
   const off = await switchOff(id)
+  await holding
   expect(off.success).toBe(true)
+  // Counted when the switch-off answered: runs still going (their job is
+  // claimed) and runs that had ended (on record). A run goes on record before
+  // its job is released, so counting the going ones first misses none.
+  const going = await count(FUNCTION_JOBS_TABLE, 'function_id = $1 AND claimed_at IS NOT NULL', id)
+  const ended = await prisma.aiFunctionLog.count({ where: { functionId: id } })
   const dropped = off.data.droppedQueuedRuns
   expect(dropped).toBeGreaterThan(0)
   expect(off.message).toContain(`${dropped.toLocaleString('en-US')} queued ${dropped === 1 ? 'run' : 'runs'} from row changes ${dropped === 1 ? 'was' : 'were'} dropped and will not run.`)
@@ -139,11 +157,11 @@ it('switched off in the middle of a burst, starts no run after it, keeps nothing
   await new Promise((r) => setTimeout(r, 300))
 
   expect(await statusOf(id)).toBe('inactive')
-  const runs = await prisma.aiFunctionLog.findMany({ where: { functionId: id } })
-  // A run's record is written when it ends; it started durationMs before that.
-  const startedAfter = runs.filter((r) => r.createdAt.getTime() - (r.durationMs ?? 0) > offAt + 100)
-  expect(startedAfter).toEqual([])
-  expect(runs.length + dropped).toBeLessThanOrEqual(80)
+  // No run started after the switch-off: every run on record had ended or was
+  // going when it answered.
+  const runs = await prisma.aiFunctionLog.count({ where: { functionId: id } })
+  expect(runs).toBeLessThanOrEqual(ended + going)
+  expect(runs + dropped).toBeLessThanOrEqual(80)
   expect(await count(OUTBOX_TABLE)).toBe(0)
 }, 120_000)
 
