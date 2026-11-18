@@ -99,6 +99,8 @@ export interface ImportProgress {
   source: ImportSourceId
   status: ImportJobStatus
   phase: ImportPhase
+  /** While queued: 1 = next to start. Imports run one at a time per server (lib/import/gate.ts). */
+  queuePosition?: number | null
   startedAt: string
   finishedAt: string | null
   tables: ImportProgressTable[]

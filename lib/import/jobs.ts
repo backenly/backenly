@@ -45,6 +45,7 @@ import { initialProgress, mergeProgress, type ProgressPatch } from './progress'
 import { redactedMessage, secretsOf } from './redact'
 import { driverFor, sourceName } from './registry'
 import { ImportAborted } from './pg-engine'
+import { IMPORT_GATE } from './gate'
 
 export const IMPORT_JOB_TYPE = 'import'
 /** While it runs: a status no queue sweep selects. */
@@ -143,6 +144,18 @@ export async function startImport(
   if (region.ok === false) throw new ImportInputError(region.message, 'region')
 
   const account = await creationAccountFor(input.userId, input.orgId, { initialize: true })
+  // One import runs at a time in this process and a few more wait their turn
+  // (lib/import/gate.ts). With the line full, refuse now, before the budget is
+  // spent or anything is created.
+  if (!IMPORT_GATE.hasRoom()) {
+    throw new ImportRefusedError(
+      503,
+      'Backenly is moving other projects in right now. Try again in a few minutes; nothing was created.',
+      'IMPORT_BUSY',
+      {},
+      { 'Retry-After': '120' },
+    )
+  }
   await opts.spendBudget?.()
   const limits = await limitsForAccount(account)
 
@@ -172,6 +185,7 @@ export async function startImport(
     source,
     startedAt: now,
     phase: 'tables',
+    status: 'queued',
   })
   const payload: JobPayload = { orgId: input.orgId, userId: input.userId, source, include: input.include, progress }
   await prisma.backgroundJob.create({
@@ -287,7 +301,8 @@ async function execute(
 ): Promise<void> {
   const { jobId, projectId, payload, driver, connection } = input
   const secrets = secretsOf(connection)
-  const deadline = setTimeout(() => controller.abort(new ImportAborted('timeout')), IMPORT_LIMITS.maxMs)
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  let release: (() => void) | undefined
 
   let dirty = true
   let lastWrite = 0
@@ -335,6 +350,16 @@ async function execute(
 
   const { withChangeAttribution } = await import('@/lib/changes/attribution')
   try {
+    // Wait for this process's import slot (lib/import/gate.ts); the place in
+    // line is on the progress the console polls. The two hours start now.
+    release = await IMPORT_GATE.acquire(jobId, controller.signal, (place) => {
+      state.set({ ...state.get(), status: 'queued', queuePosition: place })
+      dirty = true
+    })
+    // The clock starts with the move: "Took 2 s" means the move, not the wait in line.
+    state.set({ ...state.get(), status: 'running', queuePosition: null, startedAt: new Date().toISOString() })
+    dirty = true
+    deadline = setTimeout(() => controller.abort(new ImportAborted('timeout')), IMPORT_LIMITS.maxMs)
     const result = await withChangeAttribution(
       { source: 'import', actorUserId: payload.userId, apiKeyId: null, groupId: `import:${jobId}` },
       () => driver.run(connection as any, ctx),
@@ -369,7 +394,9 @@ async function execute(
     const aborted = err instanceof ImportAborted ? err : controller.signal.reason instanceof ImportAborted ? controller.signal.reason : null
     const canceled = aborted?.reason === 'canceled'
     const message = canceled
-      ? `Canceled. Nothing in ${sourceName(payload.source)} changed; what arrived stays in the new project, which you can delete.`
+      ? release
+        ? `Canceled. Nothing in ${sourceName(payload.source)} changed; what arrived stays in the new project, which you can delete.`
+        : `Canceled before it started. Nothing in ${sourceName(payload.source)} changed, and the new project is empty; you can delete it.`
       : aborted?.reason === 'timeout'
         ? `The import ran for ${Math.round(IMPORT_LIMITS.maxMs / 3_600_000)} hours and was stopped. Nothing in ${sourceName(payload.source)} changed.`
         : failureMessage(err, secrets)
@@ -391,7 +418,8 @@ async function execute(
     })
   } finally {
     clearInterval(ticker)
-    clearTimeout(deadline)
+    if (deadline) clearTimeout(deadline)
+    release?.()
   }
 }
 
