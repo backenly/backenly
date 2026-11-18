@@ -66,6 +66,9 @@ export async function analyze(
     throw new ImportInputError(`This database has no schema named ${opts.schemas.join(', ')}.`, 'schemas')
   }
   const catalog = await readCatalog(db, present)
+  // The tables that would move, refused past the limit before each is counted: one count can take minutes.
+  const moving = buildPlan(catalog, { source: opts.source, usersMoving: false, schemas: present }).tables.length
+  if (moving > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(moving), 'connectionString')
   await countRows(db, catalog.tables, opts.countAll ? { all: true } : undefined)
 
   let auth: Analysis['auth'] = null
@@ -74,7 +77,6 @@ export async function analyze(
     if (shape.present) auth = { shape, counts: await countAuthUsers(db, shape) }
   }
   const plan = buildPlan(catalog, { source: opts.source, usersMoving: opts.usersMoving && !!auth, schemas: present })
-  if (plan.tables.length > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(plan.tables.length), 'connectionString')
   if (missing.length) plan.warnings.push(`No schema named ${missing.join(', ')} in this database; nothing from ${missing.length === 1 ? 'it' : 'them'} moves.`)
   const rls = new Map(catalog.tables.map((t) => [`${t.schema}.${t.name}`, t.rlsEnabled]))
   const { proposals, warnings } = proposeRules(plan, catalog.policies, rls, opts.source)
