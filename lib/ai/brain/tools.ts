@@ -90,6 +90,7 @@ export type ToolName =
   | 'create_bucket'
   | 'set_bucket_public'
   | 'set_bucket_policy'
+  | 'set_bucket_uploads'
   | 'add_rls'
   | 'set_rls'
   | 'create_trigger'
@@ -603,8 +604,19 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { provider: { type: 'string', enum: [...SERVED_OAUTH_PROVIDERS] } },
     ['provider']),
   fn('create_bucket',
-    'Create a storage bucket for file uploads.',
-    { bucketName: { type: 'string' }, isPublic: { type: 'boolean' } },
+    'Create a storage bucket for file uploads. Only the app\'s server (a service-role key) can upload into it unless ' +
+    'uploads is signed_in: pass that for files the app\'s users upload, such as profile photos or attachments.',
+    {
+      bucketName: { type: 'string' },
+      isPublic: { type: 'boolean' },
+      uploads: {
+        type: 'string',
+        enum: ['signed_in', 'server_only'],
+        description:
+          'Who may upload. signed_in: any signed-in user of the app (each changes only their own files). ' +
+          'server_only: only your server, with a service-role key. Default server_only.',
+      },
+    },
     ['bucketName']),
   fn('add_rls',
     'Add a row-level-security policy to a table. Templates:\n' +
@@ -1354,6 +1366,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       policy: { type: 'string', enum: ['public_read', 'cdn_cacheable', 'private', 'owner_only'] },
     },
     ['bucketName', 'policy']),
+  fn('set_bucket_uploads',
+    'Set who may upload into a bucket. signed_in: any signed-in user of the app may upload, and each changes only ' +
+    'their own files (profile photos, attachments). server_only: only your server, with a service-role key; the ' +
+    'project\'s team can still upload from the console (product photos, downloads). Applies from the next upload. ' +
+    'Who may READ the files is the access policy (set_bucket_policy).',
+    {
+      bucketName: { type: 'string' },
+      uploads: { type: 'string', enum: ['signed_in', 'server_only'] },
+    },
+    ['bucketName', 'uploads']),
   fn('delete_bucket',
     'DESTRUCTIVE. Delete a storage bucket AND every file inside it. Requires explicit user confirmation in the same turn.',
     { bucketName: { type: 'string' } },
@@ -1714,9 +1736,13 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   enable_auth: () => ({ action: 'ENABLE_AUTH', params: {} }),
   // add_oauth_provider is NOT here — it has a dedicated dispatch branch in
   // dispatchTool() that handles the "no credentials yet → ask the user" flow.
-  create_bucket: (a) => ({ action: 'CREATE_BUCKET', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
+  create_bucket: (a) => ({
+    action: 'CREATE_BUCKET',
+    params: { bucketName: a.bucketName, isPublic: !!a.isPublic, ...(a.uploads !== undefined ? { uploads: a.uploads } : {}) },
+  }),
   set_bucket_public: (a) => ({ action: 'SET_BUCKET_PUBLIC', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
   set_bucket_policy: (a) => ({ action: 'SET_BUCKET_POLICY', params: { bucketName: a.bucketName, policy: a.policy } }),
+  set_bucket_uploads: (a) => ({ action: 'SET_BUCKET_UPLOADS', params: { bucketName: a.bucketName, uploads: a.uploads } }),
   // ── set_rls: the four commands arrive as top-level arguments ───────────────
   //
   // Flat `select`/`insert`/`update`/`delete` rather than a nested `commands`
@@ -2418,7 +2444,7 @@ export async function dispatchTool(
         '- Other sections: `tables`, `apis`, `functions`, `rls`, `triggers`, `keys`, `users`, `buckets`, `files`, `cron`, `env`, `integrations`, `apps`, `webhooks`, `deliveries`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `findings`, `incidents`, `autonomy`, `maintenance`, `realtime`.',
         '',
         '## 2. Build',
-        '- **Building an app?** Design its whole data model before writing any of it: every table its features need, with foreign keys, CHECKs and indexes. Send it as ONE `apply_migration`, parents first; it lands as one governed, verified, reversible change, with REST and row-level security on every table. Then `storage { action: "create_bucket" }` for each kind of upload, `auth { action: "enable" }`, and realtime on the tables that update live. A table at a time, or the app described to `backend_chat`, takes many more calls to reach the same backend.',
+        '- **Building an app?** Design its whole data model before writing any of it: every table its features need, with foreign keys, CHECKs and indexes. Send it as ONE `apply_migration`, parents first; it lands as one governed, verified, reversible change, with REST and row-level security on every table. Then `storage { action: "create_bucket" }` for each kind of upload, with `uploads: "signed_in"` where the app\'s users upload (profile photos, attachments), `auth { action: "enable" }`, and realtime on the tables that update live. A table at a time, or the app described to `backend_chat`, takes many more calls to reach the same backend.',
         '- On a project whose production is protected, `apply_migration` without a `branchId` is refused with BRANCH_REQUIRED, and so is a schema change asked of `backend_chat`: build the schema on a branch (below) and merge it.',
         '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX, and CREATE EXTENSION for an extension on Backenly\'s allowlist, such as pg_trgm for fast ILIKE and similarity search or citext (`read_backend_state { section: "schema" }` lists them). An extension is installed for the whole database, so every project on it can use it, and it is never removed. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly. Every table also gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared `id`, `created_at` or `updated_at` is skipped in their favour and reported, so order by `"createdAt"`.',
         '- One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`. Each tool\'s description lists its actions and the arguments they need, e.g. `auth { action: "enable" }`, `storage { action: "create_bucket", bucketName }`, `integrations { action: "connect", integrationId, apiKey }`.',
@@ -2445,7 +2471,7 @@ export async function dispatchTool(
         // is what several other platforms use, and guessing it produced four
         // straight 404s that read as "storage has no runtime". A bucket is a
         // PARAMETER here, never a path segment.
-        '- **Storage — buckets are a parameter, not a path segment.** There is no `/storage/<bucket>/…` route. The real endpoints: `POST /storage/upload` (multipart: `file`, `bucket`, `path`, `isPublic`) · `POST /storage/signed-upload` `{ bucket, path, contentType }` for direct-to-S3 · `POST /storage/confirm-upload` after a signed upload · `POST /storage/upload-multipart` for large files · `GET /storage/files?bucket=&prefix=` · `GET|DELETE /storage/files/<fileId>`. Works on an unpublished project.',
+        '- **Storage — buckets are a parameter, not a path segment.** There is no `/storage/<bucket>/…` route. The real endpoints: `POST /storage/upload` (multipart: `file`, `bucket`, `path`, `isPublic`) · `POST /storage/signed-upload` `{ bucket, path, contentType }` for direct-to-S3 · `POST /storage/confirm-upload` after a signed upload · `POST /storage/upload-multipart` for large files · `GET /storage/files?bucket=&prefix=` · `GET|DELETE /storage/files/<fileId>`. Works on an unpublished project. A signed-in user uploads only into a bucket whose uploads are signed_in (otherwise UPLOADS_SERVER_ONLY); a service-role key uploads into any bucket. Create each bucket before the app uploads into it: an upload creates only the default bucket, or, from your server, the bucket it names.',
         '- Any /api/v1 path with no handler answers with JSON `{ error, code: "ROUTE_NOT_FOUND", availableRoutes }` — if you get one, the response names the routes that do exist. Never retry the same shape.',
         '',
         '## 5. Operations that need a human (and how to get them done)',
@@ -4259,6 +4285,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_evolution_proposals': return 'Reading architecture evolution'
     case 'set_bucket_public': return `Making ${args.bucketName ?? 'bucket'} ${args.isPublic ? 'public' : 'private'}`
     case 'set_bucket_policy': return `Setting ${args.bucketName ?? 'bucket'} access policy to ${args.policy ?? '…'}`
+    case 'set_bucket_uploads': return `Setting who may upload into ${args.bucketName ?? 'bucket'} to ${args.uploads ?? '…'}`
     case 'delete_bucket': return `Deleting bucket ${args.bucketName ?? ''}`.trim()
     case 'delete_file': return `Deleting file ${args.path ?? ''}`.trim()
     case 'connect_frontend': return `Connecting frontend ${args.url ?? ''}`.trim()

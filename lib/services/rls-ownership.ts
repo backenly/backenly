@@ -49,6 +49,9 @@
  *     also OUTRANKS a single direct owner on the child, since the parent's party
  *     set already contains it.
  *  5. Reference/catalog table          → public_read.
+ *     Decided by the name's last word (`product_categories`, `app_settings`)
+ *     or a catalog item's part (`product_images`), and never for a table with
+ *     a column that records people or visits (session, IP, email…).
  *     World-readable is CORRECT for a product catalog. But "RLS disabled" is
  *     not the same thing as "publicly readable": it also leaves INSERT/UPDATE/
  *     DELETE open to any key. public_read is what the user actually meant —
@@ -95,7 +98,11 @@ export const OWNERSHIP_COLUMN_CANDIDATES = [
 /**
  * Tables that are reference data by nature: every user is supposed to read
  * them, nobody is supposed to write them from a client. Matched on the whole
- * name or a leading/trailing segment (`product_categories`, `app_settings`).
+ * name or its LAST word (`product_categories`, `app_settings`), because the
+ * last word of a snake_case name says what one row is. A leading word only
+ * says what the rows are about: `product_views` holds views of products, with
+ * the session and referrer of whoever viewed them, and matching `product` made
+ * it readable with the publishable key. See isReferenceTable.
  *
  * This list decides SEVERITY and the default TEMPLATE, never whether the table
  * is checked at all — a catalog with RLS off still has unrestricted writes and
@@ -109,6 +116,33 @@ const REFERENCE_TABLE_PATTERNS = [
   'faqs', 'features', 'pages', 'posts_categories', 'shipping_zones',
   'tax_rates', 'coupons', 'promotions', 'banners', 'announcements',
 ]
+
+/**
+ * The parts of a catalog item that are as public as the item: the last two
+ * words of `product_images`, `product_variants`, `plan_prices`. Only this exact
+ * pair opens a table by its leading word; `product_views` does not qualify.
+ */
+const CATALOG_ITEM_WORDS = new Set([
+  'product', 'products', 'category', 'categories', 'brand', 'brands',
+  'collection', 'collections', 'catalog', 'catalogs', 'plan', 'plans',
+])
+const CATALOG_PART_WORDS = new Set([
+  'images', 'image', 'photos', 'photo', 'media', 'gallery', 'variants', 'variant',
+  'options', 'option', 'attributes', 'attribute', 'prices', 'price', 'specs',
+  'translations', 'sizes', 'colors', 'colours',
+])
+
+/**
+ * Columns that record a person or a visit. A table holding one is not
+ * reference data whatever its name says, so it is never opened to everyone by
+ * name. Compared case-insensitively with underscores removed, so `session_id`
+ * and `sessionId` are one name; `phone_code` and `email_domain` are not these.
+ */
+const PEOPLE_COLUMNS = new Set([
+  'sessionid', 'session', 'ip', 'ipaddress', 'ipaddr', 'useragent', 'referrer',
+  'referer', 'referrerurl', 'refererurl', 'visitorid', 'anonymousid', 'deviceid',
+  'fingerprint', 'email', 'emailaddress', 'phone', 'phonenumber',
+])
 
 export type InferredTemplate = 'own_rows' | 'own_rows_read' | 'party_rows' | 'related_rows' | 'public_read' | 'admin_only' | 'teams'
 
@@ -390,8 +424,17 @@ export async function loadOwnershipCatalog(
 
 function isReferenceTable(tableName: string): boolean {
   const n = tableName.toLowerCase()
-  return REFERENCE_TABLE_PATTERNS.some(
-    (pat) => n === pat || n.endsWith(`_${pat}`) || n.startsWith(`${pat}_`),
+  if (REFERENCE_TABLE_PATTERNS.some((pat) => n === pat || n.endsWith(`_${pat}`))) return true
+  const words = n.split('_')
+  if (words.length < 2) return false
+  const [item, part] = words.slice(-2)
+  return CATALOG_ITEM_WORDS.has(item) && CATALOG_PART_WORDS.has(part)
+}
+
+/** The columns of `tableName` that record a person or a visit (PEOPLE_COLUMNS). */
+function peopleColumnsOf(catalog: OwnershipCatalog, tableName: string): string[] {
+  return (catalog.columns.get(tableName) ?? []).filter((c) =>
+    PEOPLE_COLUMNS.has(c.toLowerCase().replace(/_/g, '')),
   )
 }
 
@@ -732,16 +775,26 @@ function inferOwnershipFromCatalog(
   }
 
   // (4) Reference data — readable by everyone, writable by nobody but the
-  // service role.
+  // service role. Not when its columns record people or visits: then the name
+  // is a guess that would publish them.
+  let namedLikeReference = ''
   if (isReferenceTable(tableName)) {
-    return {
-      kind: 'public_read',
-      template: 'public_read',
-      basis: 'reference_table',
-      reason:
-        `"${tableName}" is reference data that every client is meant to read. ` +
-        `Reads stay open; writes are restricted to service-role keys.`,
+    const people = peopleColumnsOf(catalog, tableName)
+    if (people.length === 0) {
+      return {
+        kind: 'public_read',
+        template: 'public_read',
+        basis: 'reference_table',
+        reason:
+          `"${tableName}" is reference data that every client is meant to read. ` +
+          `Reads stay open; writes are restricted to service-role keys.`,
+      }
     }
+    const named = people.map((c) => `"${c}"`)
+    namedLikeReference =
+      ` "${tableName}" is named like reference data, but its ` +
+      (named.length === 1 ? `column ${named[0]} records` : `columns ${named.slice(0, -1).join(', ')} and ${named[named.length - 1]} record`) +
+      ` people or their visits, so Backenly does not open it to everyone.`
   }
 
   // (5) Honest failure. Note we do NOT fall back to admin_only or own_rows:
@@ -755,7 +808,7 @@ function inferOwnershipFromCatalog(
       `Backenly cannot tell who owns a row in "${tableName}": no column references ` +
       `${END_USER_TABLE}(id), no column is named like an owner ` +
       `(${OWNERSHIP_COLUMN_CANDIDATES.slice(0, 6).join(', ')}, …), and it does not reference ` +
-      `exactly one user-owned table. Say what the rule is and Backenly will enforce it.`,
+      `exactly one user-owned table.${namedLikeReference} Say what the rule is and Backenly will enforce it.`,
     relatedTables: Array.from(new Set(parentLinks.map((fk) => fk.parentTable))),
   }
 }

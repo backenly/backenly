@@ -147,8 +147,9 @@ beforeAll(async () => {
       keyType: 'public', scope: 'runtime', serviceRole: false, rateLimit: 1000,
     },
   })
-  // The README's bucket: one whose policy lets files be public.
-  await prisma.storageBucket.create({ data: { name: 'avatars', projectId, isPublic: true, accessPolicy: 'public_read' } })
+  // The README's bucket: one whose policy lets files be public, and whose
+  // uploads are signed_in, so the app's users upload into it.
+  await prisma.storageBucket.create({ data: { name: 'avatars', projectId, isPublic: true, accessPolicy: 'public_read', uploadPolicy: 'signed_in' } })
 
   globalThis.fetch = nextFetch
 }, 60_000)

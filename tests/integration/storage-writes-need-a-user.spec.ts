@@ -81,8 +81,9 @@ beforeAll(async () => {
   publishableKey = await mk('publishable', ['read', 'write'], false)
   readOnlyKey = await mk('read only', ['read'], false)
   serviceKey = await mk('server', ['read', 'write'], true)
+  // A bucket the app's signed-in users upload into (lib/storage/upload-access.ts).
   bucketId = (await prisma.storageBucket.create({
-    data: { name: 'uploads', projectId, isPublic: true, accessPolicy: 'public_read' },
+    data: { name: 'uploads', projectId, isPublic: true, accessPolicy: 'public_read', uploadPolicy: 'signed_in' },
     select: { id: true },
   })).id
 }, 120_000)
@@ -209,7 +210,7 @@ describe('who may write to storage', () => {
   it('confirms a signed upload, and hands back its link, only for the end user who started it or a service key', async () => {
     const { POST } = await import('@/app/api/v1/[projectId]/storage/confirm-upload/route')
     const payslips = await prisma.storageBucket.create({
-      data: { name: 'payslips', projectId, isPublic: false, accessPolicy: 'private' },
+      data: { name: 'payslips', projectId, isPublic: false, accessPolicy: 'private', uploadPolicy: 'signed_in' },
       select: { id: true },
     })
     const started = (uploadedBy: string | null) =>

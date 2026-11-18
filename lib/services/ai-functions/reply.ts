@@ -6,15 +6,19 @@
  * app's own key, and so an end user's browser, gets the function's answer
  * without them. They used to go to every caller.
  *
- * A route module (a function written as a Next.js route handler) answers for
- * itself at /fn/{name}: its status, its body and its content type go out as it
- * wrote them. It was wrapped as { success, name, result: { status, body,
- * headers }, logs, durationMs }, so a frontend reading the handler's own
- * `error` found nothing and showed "Request failed (400)".
+ * A route module (an http function) answers for itself at /fn/{name}: its
+ * status, its body and its content type go out as it wrote them, except a type
+ * a browser would show as a page or run as script, which goes out as
+ * text/plain (lib/security/data-answers.ts). It was wrapped as
+ * { success, name, result: { status, body, headers }, logs, durationMs }, so a
+ * frontend reading the handler's own `error` found nothing and showed "Request
+ * failed (400)".
  *
  * A run the function runner turned away is a 503, never the function's 500
  * (runnerRefusal).
  */
+
+import { dataAnswerType } from '@/lib/security/data-answers'
 
 /** A run the function runner turned away, as the HTTP surfaces answer it. */
 export interface RunnerRefusal {
@@ -72,12 +76,17 @@ export function logsFor(logs: string[] | undefined, serviceRole: boolean): { log
   return serviceRole ? { logs: logs ?? [] } : {}
 }
 
-/** The headers of a route module's answer that are passed on: its content type and its caching. */
+/**
+ * The headers of a route module's answer that are passed on: its content type,
+ * as dataAnswerType sends it (lib/security/data-answers.ts), and its caching.
+ */
 export function answerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [name, value] of Object.entries(headers ?? {})) {
     const lower = name.toLowerCase()
-    if ((lower === 'content-type' || lower === 'cache-control') && typeof value === 'string') out[lower] = value
+    if (typeof value !== 'string') continue
+    if (lower === 'content-type') out[lower] = dataAnswerType(value)
+    else if (lower === 'cache-control') out[lower] = value
   }
   return out
 }

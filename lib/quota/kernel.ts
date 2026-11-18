@@ -42,7 +42,7 @@ import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { endUserPseudonym, quotesKeptHere } from '@/lib/data-plane/residency'
 import { accountOfUser, getAccountEntitlements } from '@/lib/entitlements'
-import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { isCheckAccountAddress } from '@/lib/services/check-accounts'
 import { accountOf, accountProjectsWhere } from '@/lib/usage/account'
 import { recordUsage } from '@/lib/usage/ledger'
 import { recordQuotaWarning } from '@/lib/usage/alerts'
@@ -130,19 +130,20 @@ async function accountMau(accountId: string, month: string): Promise<number> {
  * OAuth). Idempotent per (project, end-user, month). NEVER blocks — existing
  * users must always be able to use a live app.
  *
- * `email` is required so the synthetic-account rule lives here and not at each
- * call site. The contract probe signs a fresh `…@backenly.internal` user in
- * every minute; two of the five callers skipped it and three did not, so each
- * probe pass counted as a new monthly active user against the customer's plan
- * cap. Verifier accounts are never people.
+ * Backenly's own check accounts are never people: a request the caller found
+ * to be the platform's signed probe (isPlatformProbe, lib/security/
+ * platform-probe.ts) is not counted. The contract probe signs a fresh account
+ * in every minute; counted, each pass was a new monthly active user against
+ * the customer's plan. Everyone else is counted, whatever their address.
  */
 export async function trackEndUserActive(
   projectId: string,
   endUserId: string,
   email: string | null | undefined,
+  caller: { platformProbe?: boolean } = {},
 ): Promise<void> {
   if (!projectId || !endUserId) return
-  if (isReservedTestEmail(email)) return
+  if (caller.platformProbe === true && isCheckAccountAddress(email)) return
   // The same use is the user's "Last active" on the Auth page, in the
   // project's own users table (lib/services/end-user-auth-table.ts).
   const stamped = import('@/lib/services/end-user-auth-table')
@@ -188,6 +189,7 @@ export function noteEndUserActivity(
   projectId: string,
   endUserId: string,
   email: string | null | undefined,
+  caller: { platformProbe?: boolean } = {},
 ): void {
   if (!projectId || !endUserId) return
   const day = new Date().toISOString().slice(0, 10)
@@ -195,7 +197,7 @@ export function noteEndUserActivity(
   if (activityNoted.get(key) === day) return
   if (activityNoted.size >= ACTIVITY_NOTED_CEILING) activityNoted.clear()
   activityNoted.set(key, day)
-  trackEndUserActive(projectId, endUserId, email).catch(() => {})
+  trackEndUserActive(projectId, endUserId, email, caller).catch(() => {})
 }
 
 /**

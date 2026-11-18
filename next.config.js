@@ -445,6 +445,29 @@ const nextConfig = {
         source: '/:path((?!api/storage/files/[^/]+/download$|backenly-sdk\\.js$|backenly-sdk\\.esm\\.js$).*)',
         headers: [{ key: 'Cross-Origin-Resource-Policy', value: 'same-site' }],
       },
+      // A function's answer and the REST APIs' are data for the app that called
+      // them, never a page of this site (lib/security/data-answers.ts). On
+      // every such path (isDataAnswerPath there: /api/v1/[{projectId}/][db/]fn/…,
+      // /api/v1/[{projectId}/]db…, /api/v2/…, in any case), this policy
+      // replaces the site's: a document made from an answer is sandboxed with
+      // nothing allowed, so it has no script, no style and no access to this
+      // origin. After the site-wide rule, because the later rule's value is the
+      // one sent, and here rather than in the route, because a header this file
+      // sets wins over one a route handler sets (tests/unit/answers-are-data.spec.ts
+      // follows both through Next's own matcher and response code).
+      ...[
+        '/api/v1/fn/:path+',
+        '/api/v1/:projectId/fn/:path+',
+        '/api/v1/db/:path*',
+        '/api/v1/:projectId/db/:path*',
+        '/api/v2/:path*',
+      ].map((source) => ({
+        source,
+        headers: [
+          { key: 'Content-Security-Policy', value: "sandbox; default-src 'none'" },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+        ],
+      })),
     ]
   },
 }

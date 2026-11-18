@@ -18,7 +18,6 @@
  * operator configured. The table deliberately has no row trigger for the same
  * reason.
  */
-import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 
 export interface CreatedEndUser {
   id: unknown
@@ -42,12 +41,20 @@ export function endUserCreatedPayload(user: CreatedEndUser) {
 
 /**
  * Notify the project's `auth.user.created` subscribers and trigger any
- * `on_signup` AI functions. Never throws and never delays the sign-up;
- * reserved test accounts are skipped here, in the one function every
- * creation path calls, so none can forget (#599).
+ * `on_signup` functions. Never throws and never delays the sign-up.
+ *
+ * Skipped only for an account the platform's signed probe created
+ * (`caller.platformProbe`, from isPlatformProbe in lib/security/
+ * platform-probe.ts): its accounts are Backenly's own checks, not users of the
+ * app. Every other new user is announced, whatever their address. The caller
+ * says which, because only the request can show the platform's token.
  */
-export async function emitEndUserCreated(projectId: string, user: CreatedEndUser): Promise<void> {
-  if (isReservedTestEmail(user.email)) return
+export async function emitEndUserCreated(
+  projectId: string,
+  user: CreatedEndUser,
+  caller: { platformProbe?: boolean } = {},
+): Promise<void> {
+  if (caller.platformProbe === true) return
 
   await Promise.allSettled([
     (async () => {

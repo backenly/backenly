@@ -104,6 +104,22 @@ tests/integration/function-row-events-data-plane.spec.ts
 # function's answer (#604). The real runtime, Next routes and function rows.
 tests/integration/function-routes-answer-real-status.spec.ts
 
+# A function's answer typed as HTML, SVG or JavaScript is sent as text/plain,
+# and every answer on a function's path carries nosniff and the sandbox
+# policy, from the runtime and through the web server in front of it (the
+# config's headers by Next's own matcher, middleware.ts, the real forwarding
+# route and Next's response code); JSON, text and CSV answers are sent as
+# before. The real runtime, route, API key and function rows.
+tests/integration/function-answers-are-data.spec.ts
+
+# The REST APIs' answers likewise: a v2 answer PostgREST typed as HTML or SVG is
+# sent as text/plain, /api/v1/db answers stay Backenly's JSON, and every answer
+# on both carries nosniff and the sandbox policy, from the runtime and through
+# the web server in front of it (middleware.ts included); JSON, CSV and
+# geo+json are sent as before, and a cross-origin app reads Content-Range. A
+# PostgREST stand-in; the real runtime, routes, project and key.
+tests/integration/rest-answers-are-data.spec.ts
+
 # Row-event runs past the month's allowance are not queued; a burst larger than
 # what is left leaves one notice, and the first refusal drops the function's
 # queue with one record (production QA re-test, 2026-11-16, #40). Real capture,
@@ -2204,6 +2220,12 @@ tests/integration/architecture-look-now.spec.ts
 # use: a sign-up on either server and a request made with their token stamp it;
 # a verifier account never. Real database, both servers' sign-up.
 tests/integration/end-user-last-active.spec.ts
+# A person whose address is on a .internal domain is an ordinary end user:
+# counted as active, listed under Auth, announced to auth.user.created and
+# on_signup, and signed out for good. Backenly's own check-account addresses are
+# signed up only by its signed probe. Real Next sign-up, logout and Auth list
+# routes and database.
+tests/integration/end-users-on-internal-domains.spec.ts
 
 # GET /auth/me answers the signed-in end user on both servers, from one flow:
 # the token checked as every data request checks it (revoked, suspended,
@@ -2376,6 +2398,14 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# A bucket says who may upload into it: signed_in (any signed-in end user of the
+# app) or server_only (a service-role key, and the project's team from the
+# console). A bucket made on purpose starts server_only unless asked for
+# signed_in; one an upload creates (the SDK's default) and every bucket from
+# before take signed_in. Every end-user upload path follows it, changing it is
+# one History entry, and the console changes it too. Real routes, executor,
+# History and migration SQL; local storage driver.
+tests/integration/bucket-uploads-follow-the-bucket.spec.ts
 # Every API keys response names the key by its kind and never by keyType
 # ("public" for every project key); the list says the window that decides each
 # key's requests. Real key rows through the create, list, read, change and

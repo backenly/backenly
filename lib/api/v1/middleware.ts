@@ -12,6 +12,7 @@ import crypto from 'crypto'
 import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milestones'
 import { recordUsageMetrics } from '@/lib/platform-signals'
 import { noteEndUserActivity } from '@/lib/quota/kernel'
+import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import { PAUSED_CODE, pausedDetails, pausedMessage } from '@/lib/projects/serving-state'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -30,6 +31,7 @@ import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
 import { answersFromCopy, authorizingProject } from '@/lib/auth-projection/read'
+import { mayCreateByUploading, mayUpload, missingBucketRefusal, serverOnlyRefusal } from '@/lib/storage/upload-access'
 
 // Re-exported for existing importers; canonical home is lib/security/internal-origin.ts
 // (framework-free so the Express runtime can share it).
@@ -559,7 +561,8 @@ export async function v1ApiMiddleware(
           endUserRole = (payload as any).role ?? 'user'
           // An authenticated data request is use: count the end user active
           // this month (throttled to one write a day, never blocks).
-          noteEndUserActivity(projectId, endUserId, typeof payload.email === 'string' ? payload.email : null)
+          const email = typeof payload.email === 'string' ? payload.email : null
+          noteEndUserActivity(projectId, endUserId, email, { platformProbe: isPlatformProbe(request, email) })
         } else {
           return {
             context: {} as V1ApiContext,
@@ -712,6 +715,38 @@ export function requireStorageWriter(context: V1ApiContext): NextResponse | null
       'or make the call from your server with a service-role key.',
     401,
   )
+}
+
+/**
+ * Whether the bucket takes this upload (lib/storage/upload-access.ts): a
+ * service-role key may upload into any bucket, a signed-in end user only into
+ * one whose uploads are signed_in. Asked after requireStorageWriter, once the
+ * bucket is known, and again at every later step of an upload, so the
+ * bucket's rule as it is now decides.
+ */
+export function requireUploadRule(
+  context: { apiKey: { serviceRole?: boolean | null } },
+  bucket: { name: string; uploadPolicy?: string | null },
+): NextResponse | null {
+  if (mayUpload(bucket.uploadPolicy, context.apiKey)) return null
+  return createErrorResponse('UPLOADS_SERVER_ONLY', serverOnlyRefusal(bucket.name), 403, {
+    bucket: bucket.name,
+    uploads: 'server_only',
+  })
+}
+
+/**
+ * Whether this caller may create the bucket a signed or multipart upload names
+ * when it does not exist (lib/storage/upload-access.ts): only a service-role
+ * key may. Anyone else is answered 404, told to create the bucket first, and
+ * nothing is made. The form upload's `default` bucket is not asked about here.
+ */
+export function requireBucketCreator(
+  context: { apiKey: { serviceRole?: boolean | null } },
+  bucketName: string,
+): NextResponse | null {
+  if (mayCreateByUploading(context.apiKey)) return null
+  return createErrorResponse(ErrorCodes.NOT_FOUND, missingBucketRefusal(bucketName), 404, { bucket: bucketName })
 }
 
 /**

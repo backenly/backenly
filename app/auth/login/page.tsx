@@ -6,6 +6,7 @@ import { Icon } from '@iconify/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { login, LoginError } from '@/lib/api/auth'
 import { useUserSession } from '@/lib/hooks/useUserSession'
+import { returnPathFrom } from '@/lib/auth/return-path'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
@@ -64,9 +65,8 @@ function LoginForm() {
   // The OAuth callbacks redirect here with ?error=... on every refusal. Only
   // invalid_session was ever explained, so the rest bounced people back to a
   // login form that looked like nothing had happened.
-  const rawRedirect = searchParams.get('redirect') || '/app'
-  const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
-  const redirectUrl = isAuthPath ? '/app' : rawRedirect
+  // A path on this site only (lib/auth/return-path.ts); anything else, /app.
+  const redirectUrl = returnPathFrom(searchParams.get('redirect'))
   const errorParam = searchParams.get('error')
   const { isLoggedIn } = useUserSession({ confirmSignedIn: true })
 

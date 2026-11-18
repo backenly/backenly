@@ -237,7 +237,8 @@ beforeAll(async () => {
     },
   })
   // A public bucket, as a Supabase app keeps its avatars in.
-  await prisma.storageBucket.create({ data: { name: 'avatars', projectId, isPublic: true, accessPolicy: 'public_read' } })
+  // A bucket the app's signed-in users upload into (lib/storage/upload-access.ts).
+  await prisma.storageBucket.create({ data: { name: 'avatars', projectId, isPublic: true, accessPolicy: 'public_read', uploadPolicy: 'signed_in' } })
 
   const { default: app } = await import('@/server/app')
   runtime = http.createServer(app)

@@ -243,6 +243,30 @@ describe('apply_migration on production', () => {
   }, 120_000)
 })
 
+describe('a table whose name only starts with a catalog word (report #12, 2026-11-16)', () => {
+  let created: { status: number; body: any }
+
+  beforeAll(async () => {
+    created = await call('apply_migration', {
+      sql:
+        'CREATE TABLE products (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text, price numeric(10,2)); ' +
+        'CREATE TABLE product_views (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), ' +
+        'product_id uuid REFERENCES products(id), session_id text, referrer text, viewed_at timestamptz DEFAULT now())',
+    })
+  }, 120_000)
+
+  it('the catalog itself is readable by everyone', async () => {
+    expect(created.status).toBe(200)
+    expect(created.body.data.change.status).toBe('healthy')
+    expect((await rules(schema, 'products')).policies).toContain('backenly_public_read_select')
+  })
+
+  it('the table that records who viewed it starts closed', async () => {
+    await expectClosed(schema, 'product_views')
+    expect(created.body.summary).toContain('"product_views" is closed: only service-role keys can read or write it')
+  })
+})
+
 describe('a preview branch, and the merge that brings it to production', () => {
   let branch: { id: string; schemaName: string }
   let applied: { status: number; body: any }

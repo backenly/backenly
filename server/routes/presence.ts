@@ -14,6 +14,8 @@
  */
 
 import { Router, Request, Response } from 'express'
+import { carriesInternalToken } from '@/lib/security/platform-probe'
+import { headerValue } from '../lib/header-value'
 import rateLimit from 'express-rate-limit'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { ensurePresenceTable } from '@/lib/realtime/presence-store'
@@ -56,6 +58,8 @@ async function presenceIdentityError(
   const identity = await resolveEndUserFromToken(
     projectId,
     req.headers['x-user-token'] as string | undefined,
+    null,
+    { carriesProbeToken: carriesInternalToken({ headers: { get: (name: string) => headerValue(req.headers[name.toLowerCase()]) } }) },
   )
   // A blocked user's token still verifies, but blocking promises it stops
   // working: refuse it as the data routes do, never read it as a sign-in.

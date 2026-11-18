@@ -13,6 +13,8 @@
  */
 
 import { Router } from 'express'
+import { carriesInternalToken } from '@/lib/security/platform-probe'
+import { headerValue } from '../lib/header-value'
 import type { Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { isRegionError } from '@/lib/data-plane/regional'
@@ -26,6 +28,7 @@ import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '
 import { handleViaPostgrest } from './postgrest-handler'
 import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
+import { isFunctionAnswerPath, isTableAnswerPath } from '@/lib/security/data-answers'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import {
   SERVICE_ROLE_IN_BROWSER,
@@ -244,7 +247,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       const branch = key.branch
         ? { id: key.branch.id, name: key.branch.name, schemaName: key.branch.schemaName }
         : null
-      const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch)
+      const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch, { carriesProbeToken: carriesInternalToken({ headers: { get: (name: string) => headerValue(req.headers[name.toLowerCase()]) } }) })
       if (endUser === 'blocked') {
         // The promised behavior of block_end_user: a 403 on the next
         // request, not a silent downgrade to the anonymous identity.
@@ -448,8 +451,11 @@ async function handleDynamicRequest(req: Request, res: Response) {
   }
   // Strip a leading `/db/` collection prefix that the SDK uses for CRUD.
   // We only strip when there is a following segment (the table name), so
-  // a hypothetical /api/v1/db endpoint still routes correctly.
-  if (path.length >= 2 && path[0].toLowerCase() === 'db') {
+  // a hypothetical /api/v1/db endpoint still routes correctly. Only a `db`
+  // written as a plain segment, not one percent-decoding made (%64b): those
+  // are the paths every server gives a table's answer its headers on
+  // (isTableAnswerPath, lib/security/data-answers.ts).
+  if (path.length >= 2 && path[0].toLowerCase() === 'db' && isTableAnswerPath(req.baseUrl + req.path)) {
     path = path.slice(1)
   }
 
@@ -460,7 +466,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // Only `manual` triggerType functions are directly callable; auto-fired
   // triggers (on_db_*, on_signup, cron) reject with 405 to make the reason
   // obvious instead of silently 404'ing in the executor lookup.
-  if (path.length >= 2 && path[0].toLowerCase() === 'fn') {
+  //
+  // Only on a function's path as sent, too: `fn` and `db` written as plain
+  // segments, not ones percent-decoding made (%66n, fn%2F{name}). Those are the
+  // paths every server in front of this one gives a function's answer its
+  // headers on (isFunctionAnswerPath, lib/security/data-answers.ts).
+  if (path.length >= 2 && path[0].toLowerCase() === 'fn' && isFunctionAnswerPath(req.baseUrl + req.path)) {
     const fnName = path[1]
     try {
       const fn = await prisma.aiFunction.findFirst({

@@ -27,6 +27,7 @@ import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, Head
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
 import { cacheControlFor, clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
 import { uploaderOf, type UploaderRecord } from '@/lib/storage/uploader'
+import { NEW_BUCKET_UPLOADS, uploadRuleOf, type UploadRule } from '@/lib/storage/upload-access'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -148,11 +149,11 @@ export class S3StorageService implements StorageService {
   }
 
   /** One change in the project's history, whoever asks (lib/changes/resources/storage.ts). */
-  async createBucket(name: string, projectId: string, isPublic: boolean = false) {
-    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic))
+  async createBucket(name: string, projectId: string, isPublic: boolean = false, uploads: UploadRule = NEW_BUCKET_UPLOADS) {
+    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic, uploads))
   }
 
-  private async createBucketNow(name: string, projectId: string, isPublic: boolean) {
+  private async createBucketNow(name: string, projectId: string, isPublic: boolean, uploads: UploadRule) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -175,6 +176,8 @@ export class S3StorageService implements StorageService {
         // console all read accessPolicy; isPublic alone is a label. Deriving
         // it here keeps the two in agreement from birth.
         accessPolicy: isPublic ? 'public_read' : 'private',
+        // Who may upload into it, stated rather than left to the column's default.
+        uploadPolicy: uploads,
       },
     })
 
@@ -186,6 +189,7 @@ export class S3StorageService implements StorageService {
       id: bucket.id,
       name: bucket.name,
       isPublic: bucket.isPublic,
+      uploads: uploadRuleOf(bucket.uploadPolicy),
     }
   }
 
@@ -211,6 +215,8 @@ export class S3StorageService implements StorageService {
       // The enforced visibility. isPublic is a label; readers deciding what to
       // DISPLAY or PROMISE must use this.
       accessPolicy: bucket.accessPolicy,
+      // Who may upload into it (lib/storage/upload-access.ts).
+      uploads: uploadRuleOf(bucket.uploadPolicy),
       fileCount: bucket.files.length,
       totalSize: bucket.files.reduce((sum, file) => sum + file.size, BigInt(0)), // Keep as BigInt
     }))

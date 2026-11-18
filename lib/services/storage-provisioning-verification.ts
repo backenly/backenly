@@ -8,6 +8,7 @@
 
 import { storageService } from './storage'
 import { FALLBACK_POLICY, normalisePolicy } from '@/lib/storage/access-policy'
+import { uploadRuleOf, type UploadRule } from '@/lib/storage/upload-access'
 import { prisma } from '@/lib/db'
 
 export interface ProvisioningResult {
@@ -40,13 +41,15 @@ export interface ProvisioningStatus {
 export async function provisionStorageBucket(
   bucketName: string,
   projectId: string,
-  isPublic: boolean = false
+  isPublic: boolean = false,
+  /** Who may upload into it (lib/storage/upload-access.ts); the service's default when omitted. */
+  uploads?: UploadRule,
 ): Promise<ProvisioningResult> {
   console.log(`[Storage Provisioning] Starting provision for bucket: ${bucketName}`)
   
   try {
     // STEP 1: Create bucket using storage service (creates DB + physical storage)
-    const bucket = await storageService.createBucket(bucketName, projectId, isPublic)
+    const bucket = await storageService.createBucket(bucketName, projectId, isPublic, uploads)
     
     console.log(`[Storage Provisioning] Bucket created in DB: ${bucket.id}`)
     
@@ -372,6 +375,8 @@ export async function listBucketsWithStatus(projectId: string): Promise<Array<{
    * change, the control that governs access.
    */
   accessPolicy: string
+  /** Who may upload into it (lib/storage/upload-access.ts). */
+  uploads: UploadRule
   status: 'ready' | 'pending' | 'error'
   canUpload: boolean
   fileCount: number
@@ -383,20 +388,22 @@ export async function listBucketsWithStatus(projectId: string): Promise<Array<{
   // here in ONE query rather than per bucket. Normalised, so an unrecognised
   // value shows as the `private` it is treated as at serve time instead of
   // rendering something the enforcement path does not honour.
-  const policies = new Map(
+  const rules = new Map(
     (
       await prisma.storageBucket.findMany({
         where: { projectId },
-        select: { id: true, accessPolicy: true },
+        select: { id: true, accessPolicy: true, uploadPolicy: true },
       })
-    ).map(b => [b.id, normalisePolicy(b.accessPolicy)]),
+    ).map(b => [b.id, { access: normalisePolicy(b.accessPolicy), uploads: uploadRuleOf(b.uploadPolicy) }]),
   )
 
   return buckets.map((bucket) => ({
     id: bucket.id,
     name: bucket.name,
     isPublic: bucket.isPublic,
-    accessPolicy: policies.get(bucket.id) ?? FALLBACK_POLICY,
+    accessPolicy: rules.get(bucket.id)?.access ?? FALLBACK_POLICY,
+    // Read the same way: a bucket the read above missed shows the stricter rule.
+    uploads: rules.get(bucket.id)?.uploads ?? uploadRuleOf(undefined),
     status: 'ready' as const,
     canUpload: true,
     fileCount: bucket.fileCount,
