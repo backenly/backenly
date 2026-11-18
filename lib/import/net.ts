@@ -320,7 +320,9 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
 /** End `client`'s connection now, failing its statement in progress with `reason`. */
 function endNow(client: PgClient, reason: unknown): void {
   const stream = (client as unknown as { connection?: { stream?: { destroy(err?: Error): void } } }).connection?.stream
-  stream?.destroy(reason instanceof Error ? reason : new Error('The read was stopped.'))
+  // The signal's own reason (a TimeoutError, an ImportAborted) whatever realm made it: an
+  // `instanceof Error` test fails for a DOMException from another context.
+  stream?.destroy(typeof reason === 'object' && reason !== null ? (reason as Error) : new Error('The read was stopped.'))
 }
 
 /**
