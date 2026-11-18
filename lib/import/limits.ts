@@ -1,9 +1,9 @@
 /**
  * The v1 import limits, said in the Review step when a source is over one:
  *
- *   - rows: at most 5 GB in one import, and never more than the plan's
- *     database storage (Free's is far smaller than 5 GB);
- *   - files: at most the plan's file storage.
+ *   - rows: at most 5 GB in one import, and never more than what is left of
+ *     the organization's database storage (Free's is far smaller than 5 GB);
+ *   - files: at most what is left of its file storage.
  *
  * Sizes are the source's own (pg_table_size for rows, object sizes for
  * files), so they are what the source holds, not a promise about Backenly's
@@ -23,17 +23,44 @@ export function formatBytes(n: number): string {
   return `${n} bytes`
 }
 
-/** The limits of the organization the new project will belong to. */
+/**
+ * The limits of the organization the new project will belong to: what is
+ * LEFT of its plan's database and file storage, since every project in the
+ * organization shares one allowance (lib/usage/pool.ts).
+ */
 export async function limitsFor(billingAccountId: string): Promise<ImportLimits> {
   const { getAccountEntitlements } = await import('@/lib/entitlements')
   const { planDisplayName } = await import('@/lib/entitlements/plan-names')
+  const { accountUsage } = await import('@/lib/usage/pool')
   const ent = await getAccountEntitlements(billingAccountId).catch(() => null)
+  const usage = await accountUsage(billingAccountId).catch(() => null)
   const db = ent?.maxPostgresStorageMb ? ent.maxPostgresStorageMb * MB : null
   const files = ent?.maxFileStorageMb ? ent.maxFileStorageMb * MB : null
-  return {
-    maxRowBytes: db === null ? MAX_IMPORT_ROW_BYTES : Math.min(MAX_IMPORT_ROW_BYTES, db),
-    maxFileBytes: files,
+  return limitsLeft({
+    planRowBytes: db,
+    planFileBytes: files,
+    usedRowBytes: usage ? Number(usage.dbBytes) : 0,
+    usedFileBytes: usage ? Number(usage.fileBytes) : 0,
     planName: ent?.planName ? planDisplayName(ent.planName) : 'your plan',
+  })
+}
+
+/** The plan's allowances less what the organization already uses. Pure, for the tests. */
+export function limitsLeft(input: {
+  planRowBytes: number | null
+  planFileBytes: number | null
+  usedRowBytes: number
+  usedFileBytes: number
+  planName: string
+}): ImportLimits {
+  const rowsLeft = input.planRowBytes === null ? null : Math.max(0, input.planRowBytes - Math.max(0, input.usedRowBytes))
+  const filesLeft = input.planFileBytes === null ? null : Math.max(0, input.planFileBytes - Math.max(0, input.usedFileBytes))
+  return {
+    maxRowBytes: rowsLeft === null ? MAX_IMPORT_ROW_BYTES : Math.min(MAX_IMPORT_ROW_BYTES, rowsLeft),
+    maxFileBytes: filesLeft,
+    planName: input.planName,
+    planRowBytes: input.planRowBytes,
+    planFileBytes: input.planFileBytes,
   }
 }
 
@@ -42,6 +69,10 @@ export function rowRefusal(bytes: number, limits: ImportLimits | undefined): str
   const max = limits?.maxRowBytes ?? MAX_IMPORT_ROW_BYTES
   if (bytes <= max) return null
   if (max < MAX_IMPORT_ROW_BYTES) {
+    const plan = limits?.planRowBytes
+    if (plan && plan > max) {
+      return `This source holds about ${formatBytes(bytes)} of rows, and the organization has ${formatBytes(max)} left of the ${formatBytes(plan)} of database storage on ${limits?.planName ?? 'your plan'}. Free some space or upgrade the organization, then import.`
+    }
     return `This source holds about ${formatBytes(bytes)} of rows, and ${limits?.planName ?? 'your plan'} includes ${formatBytes(max)} of database storage. Upgrade the organization, then import.`
   }
   return `This source holds about ${formatBytes(bytes)} of rows; one import moves up to ${formatBytes(MAX_IMPORT_ROW_BYTES)}. Contact us to move a larger database.`
@@ -51,5 +82,9 @@ export function rowRefusal(bytes: number, limits: ImportLimits | undefined): str
 export function fileRefusal(bytes: number, limits: ImportLimits | undefined): string | null {
   const max = limits?.maxFileBytes
   if (max === null || max === undefined || bytes <= max) return null
+  const plan = limits?.planFileBytes
+  if (plan && plan > max) {
+    return `The files come to about ${formatBytes(bytes)}, and the organization has ${formatBytes(max)} left of the ${formatBytes(plan)} of file storage on ${limits?.planName ?? 'your plan'}. Leave files out, or upgrade the organization, then import.`
+  }
   return `The files come to about ${formatBytes(bytes)}, and ${limits?.planName ?? 'your plan'} includes ${formatBytes(max)} of file storage. Leave files out, or upgrade the organization, then import.`
 }
