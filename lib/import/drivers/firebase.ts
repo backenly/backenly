@@ -35,6 +35,7 @@ import {
   CollectionProfile,
   TableNames,
   convertDocument,
+  documentBytes,
   locate,
   newConvertStats,
   planTable,
@@ -62,6 +63,13 @@ export interface FirebaseLimits {
   previewUserPages: number
   /** Pages of 1,000 files the preview reads before it stops. */
   previewFilePages: number
+  /**
+   * Bytes of documents held, over every collection the preview never met,
+   * while each waits for `sampleSize` documents to plan its table from. Past
+   * it, each is planned from what it holds: a document is up to 1 MiB, so
+   * waiting for 1,000 of each could hold gigabytes in the web process.
+   */
+  heldBytes: number
 }
 
 export const DEFAULT_FIREBASE_LIMITS: FirebaseLimits = {
@@ -69,6 +77,7 @@ export const DEFAULT_FIREBASE_LIMITS: FirebaseLimits = {
   maxFileBytes: Number(MAX_BUFFERED_UPLOAD_BYTES),
   previewUserPages: 10,
   previewFilePages: 10,
+  heldBytes: 32 * 1024 * 1024,
 }
 
 export interface FirebaseDriverOptions {
@@ -412,11 +421,18 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
       s.buffer.push(convertDocument(doc, loc, s.plan, { namespace, root: reader.root, stats }))
     }
 
-    // Collections the preview never met, held until enough documents show their shape.
+    // Collections the preview never met, held until enough documents show their
+    // shape, or until all that is held passes limits.heldBytes: then each is
+    // planned from what it holds, and later documents that do not fit its
+    // columns keep their fields in extra_fields, as for any table.
     const pending = new Map<string, Array<{ doc: FsDocument; loc: DocLocation }>>()
+    const pendingBytes = new Map<string, number>()
+    let heldBytes = 0
     const materialize = async (pattern: string) => {
       const held = pending.get(pattern) ?? []
       pending.delete(pattern)
+      heldBytes -= pendingBytes.get(pattern) ?? 0
+      pendingBytes.delete(pattern)
       const profile = new CollectionProfile()
       for (const h of held) profile.add(h.doc)
       const plan = planFor(names, pattern, profile, null)
@@ -450,7 +466,11 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
             const held = pending.get(loc.pattern) ?? []
             held.push({ doc, loc })
             pending.set(loc.pattern, held)
+            const size = documentBytes(doc)
+            pendingBytes.set(loc.pattern, (pendingBytes.get(loc.pattern) ?? 0) + size)
+            heldBytes += size
             if (held.length >= limits.sampleSize) await materialize(loc.pattern)
+            else if (heldBytes > limits.heldBytes) for (const pattern of TableNames.order(pending.keys())) await materialize(pattern)
             continue
           }
           if (orphan) s.orphans++
