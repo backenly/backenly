@@ -16,6 +16,8 @@
  *     deployment may open private ranges, with BACKENLY_IMPORT_EGRESS_ALLOW_PRIVATE);
  *   - TLS names the host the person typed (`servername`), so a certificate is
  *     checked against that name although the socket was opened to an address;
+ *   - a database is reached on port 5432 only, the one port Backenly Cloud's
+ *     web task opens to the internet for this;
  *   - Supabase is only reached encrypted;
  *   - what the source sends is bounded before pg holds it: one message, and
  *     one statement's answer (lib/import/source-guard.ts);
@@ -24,6 +26,9 @@
  *
  * Nothing here logs, stores or returns a credential. Errors are said in the
  * source's own words, after lib/import/redact.ts has removed what they quoted.
+ * A refused address is named by its kind, never by the address a name
+ * resolved to: inside Backenly's network a name can resolve to an address
+ * that is not anyone's business outside it.
  */
 
 import * as dns from 'node:dns'
@@ -50,6 +55,9 @@ export interface ParsedPgUrl {
 }
 
 const FIELD = 'connectionString' as const
+
+/** The one port a source database is reached on: Backenly Cloud's web task opens no other to the internet for imports. */
+export const SOURCE_PORT = 5432
 
 function refuse(message: string): never {
   throw new ImportInputError(message, FIELD)
@@ -84,8 +92,15 @@ export function parsePostgresUrl(raw: string): ParsedPgUrl {
   if (!host) refuse('The connection string has no host.')
   if (host.startsWith('/') || host.startsWith('%2F') || host.startsWith('%2f')) refuse('Unix-socket connection strings cannot be reached from Backenly. Use the database\'s internet address.')
 
-  const port = url.port ? Number(url.port) : 5432
+  const port = url.port ? Number(url.port) : SOURCE_PORT
   if (!Number.isInteger(port) || port < 1 || port > 65535) refuse('The port in the connection string is not a valid port.')
+  if (port !== SOURCE_PORT) {
+    refuse(
+      isSupabaseHost(host)
+        ? `Backenly connects to databases on port ${SOURCE_PORT} only, and this connection string names port ${port}. In Supabase, press Connect and copy the Session pooler string (port ${SOURCE_PORT}).`
+        : `Backenly connects to databases on port ${SOURCE_PORT} only, and this connection string names port ${port}. Use an address of the database that answers on port ${SOURCE_PORT}.`,
+    )
+  }
 
   let user = ''
   let password = ''
@@ -176,6 +191,7 @@ export async function resolveCheckedAddress(
   if (list.length === 0) throw new ImportInputError(`Couldn't connect: ${name} did not resolve to an address.`, field)
 
   for (const a of list) {
+    // The kind of address, never the address: a name may resolve to one only Backenly's network knows.
     const reason = outboundAddressRefusal(a.address, 'import')
     if (reason) {
       throw new ImportInputError(

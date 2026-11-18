@@ -10,7 +10,8 @@
  *
  * Every request goes through lib/security/outbound-guard.ts safeFetch with the
  * `import` scope: the host is checked at connect time, redirects are checked
- * hop by hop, and the key is dropped on a cross-origin redirect.
+ * hop by hop, the key (Authorization and apikey both) is dropped on a
+ * cross-origin redirect, and a redirect from https:// to http:// is refused.
  *
  * Each bucket keeps its name and its public / private setting. Objects keep
  * their paths as names. One object is held in memory at a time, up to the
@@ -138,6 +139,7 @@ async function call(
       timeoutMs: opts.timeoutMs ?? 30_000,
       maxBytes,
       egressScope: 'import',
+      refuseDowngrade: true,
     })
   } catch (err) {
     if (opts.maxBytes === undefined && /^Response exceeded \d+ bytes/.test((err as Error)?.message ?? '')) {

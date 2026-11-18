@@ -341,13 +341,25 @@ function addressRefusal(address: string, scope: EgressScope): string | null {
 }
 
 /**
+ * A refusal's reason without the address it was about: "private address
+ * (10.1.2.3)" becomes "private address". A name someone typed can resolve,
+ * inside Backenly's network, to an address that is nobody's business outside
+ * it, so what is said back about a resolved name names the kind of address.
+ */
+function kindOnly(reason: string): string {
+  return reason.replace(/ address \([^)]*\)/g, ' address')
+}
+
+/**
  * The same decision, for a caller that opens its own socket rather than going
  * through `safeFetch`: the importer resolves a database host itself and
  * connects to the address checked here (lib/import/net.ts), so there is no
- * second lookup for DNS to answer differently.
+ * second lookup for DNS to answer differently. The reason names the kind of
+ * address, never the address (kindOnly).
  */
 export function outboundAddressRefusal(address: string, scope: EgressScope): string | null {
-  return addressRefusal(address, scope)
+  const reason = addressRefusal(address, scope)
+  return reason === null ? null : kindOnly(reason)
 }
 
 /** Whether `scope`'s private-range hatch is open on this deployment. */
@@ -385,8 +397,9 @@ function makeGuardedLookup(scope: EgressScope) {
       for (const a of list) {
         const reason = addressRefusal(a.address, scope)
         if (reason) {
+          // The kind of address, not the address the name resolved to here.
           return callback(
-            new BlockedOutboundError(`${hostname} resolves to a ${reason}.`) as any,
+            new BlockedOutboundError(`${hostname} resolves to a ${kindOnly(reason)}.`) as any,
             '',
             0,
           )
@@ -417,14 +430,24 @@ export interface SafeFetchOptions {
    * existing call site keeps the exact behaviour it had.
    */
   egressScope?: EgressScope
+  /**
+   * Refuse a redirect from https:// to http://, rather than follow it with
+   * the credential headers dropped: for a caller whose request must stay
+   * encrypted end to end (the importer reading Supabase Storage with its key).
+   */
+  refuseDowngrade?: boolean
 }
 
 const DEFAULT_TIMEOUT_MS = 8_000
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 const DEFAULT_MAX_REDIRECTS = 3
 
-/** Headers that must not survive a redirect to a different origin. */
-const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization']
+/**
+ * Headers that must not survive a redirect to a different origin. `apikey` is
+ * how Supabase (and Kong in front of many APIs) takes a key: a credential as
+ * much as Authorization is.
+ */
+const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization', 'apikey']
 
 function oneRequest(
   url: URL,
@@ -565,6 +588,10 @@ export async function safeFetch(rawUrl: string, options: SafeFetchOptions = {}):
     }
 
     const next = assertAllowedUrl(new URL(location, url).toString(), scope)
+
+    if (options.refuseDowngrade && url.protocol === 'https:' && next.protocol !== 'https:') {
+      throw new BlockedOutboundError('Refusing a redirect from https:// to http://: the request would continue unencrypted.')
+    }
 
     // Cross-origin: drop anything that authenticates the caller. Without this
     // the guard would turn one redirect into a credential disclosure, which is
