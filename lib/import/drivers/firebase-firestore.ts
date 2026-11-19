@@ -20,6 +20,8 @@
 
 import { GoogleApiError, GoogleResponseTooLargeError, encodePath, type GoogleClient } from '../google-http'
 import { CollectionProfile, locate, type FsDocument } from './firebase-schema'
+import { ImportInputError } from '../driver'
+import { MAX_IMPORT_TABLES, tableCountRefusal } from '../limits'
 import { throwIfAborted } from '../pg-engine'
 
 const FIRESTORE = 'https://firestore.googleapis.com/v1'
@@ -48,8 +50,12 @@ export class FirestoreReader {
     return path ? `${this.root}/${path}` : this.root
   }
 
-  /** Collection ids at the top (no parent) or under one document. */
-  async listCollectionIds(parentPath?: string | null): Promise<string[]> {
+  /**
+   * Collection ids at the top (no parent) or under one document. With `max`,
+   * paging stops once more than `max` are known, so a caller that refuses past
+   * a limit does not list the rest first.
+   */
+  async listCollectionIds(parentPath?: string | null, max = Infinity): Promise<string[]> {
     const ids: string[] = []
     let pageToken: string | undefined
     do {
@@ -60,7 +66,7 @@ export class FirestoreReader {
       )
       for (const id of res.collectionIds ?? []) ids.push(id)
       pageToken = res.nextPageToken || undefined
-    } while (pageToken)
+    } while (pageToken && ids.length <= max)
     return ids
   }
 
@@ -232,7 +238,9 @@ export async function discoverCollections(reader: FirestoreReader, opts: Discove
 
   const found = new Map<string, DiscoveredCollection>()
   /** Concrete collection paths to sample from, per pattern. */
-  let level: Array<{ pattern: string; paths: string[] }> = (await reader.listCollectionIds()).map((id) => ({ pattern: id, paths: [id] }))
+  let level: Array<{ pattern: string; paths: string[] }> = (await reader.listCollectionIds(null, MAX_IMPORT_TABLES)).map((id) => ({ pattern: id, paths: [id] }))
+  // Each collection becomes a table: past what one import makes, refuse before sampling them.
+  if (level.length > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(null))
   const topIds = new Set(level.map((l) => l.pattern))
   const groupCounts = new Map<string, Promise<number | null>>()
 
@@ -277,6 +285,7 @@ export async function discoverCollections(reader: FirestoreReader, opts: Discove
       }
     })
     level = [...next.entries()].map(([pattern, paths]) => ({ pattern, paths }))
+    if (found.size + level.length > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(null))
   }
 
   // Subcollection counts, where Firestore's collection group count is theirs alone.

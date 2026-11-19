@@ -7,12 +7,12 @@
  * TLS, Storage through GET and list calls.
  */
 
-import type { ImportConnection, ImportPreview } from '../contract'
+import type { ImportConnection, ImportPreview, ImportPreviewBucket } from '../contract'
 import { ImportInputError, type DriverContext, type ImportDriver, type RunContext } from '../driver'
 import { checkProjectUrl, readSnapshot } from '../net'
 import { fileRefusal } from '../limits'
 import { secretsOf } from '../redact'
-import { inspectStorage, listBuckets, type StorageSource } from '../supabase-storage'
+import { StorageWalkLimitError, inspectStorage, listBuckets, type StorageSource } from '../supabase-storage'
 import { analyze, checkPg, openSource, previewOf, runPg, sourceLabelOf } from './pg-common'
 
 type SupabaseConnection = Extract<ImportConnection, { source: 'supabase' }>
@@ -44,16 +44,28 @@ export const supabaseDriver: ImportDriver<'supabase'> = {
   async inspect(connection, ctx: DriverContext): Promise<ImportPreview> {
     const secrets = secretsOf(connection)
     const storage = await storageOf(connection, secrets)
-    const { conn, parsed } = await openSource(connection.connectionString, secrets)
+    // The preview's deadline ends the connection, and the statement in flight.
+    const { conn, parsed } = await openSource(connection.connectionString, secrets, ctx.signal)
     try {
       const { analysis, label } = await readSnapshot(conn, async (db) => ({
-        analysis: await analyze(db, { source: 'supabase', schemas: SCHEMAS, usersMoving: true, withAuth: true, countAll: false }),
+        analysis: await analyze(db, { source: 'supabase', schemas: SCHEMAS, usersMoving: true, withAuth: true, countAll: false, signal: ctx.signal }),
         label: await sourceLabelOf(db, parsed, 'supabase'),
       }))
-      const buckets = storage ? await inspectStorage(storage, ctx.signal) : null
+      // A Storage listing past what one import reads is said as the refusal: leaving files out moves the rest.
+      let buckets: ImportPreviewBucket[] | null = null
+      let unlisted: string | null = null
+      if (storage) {
+        try {
+          buckets = await inspectStorage(storage, ctx.signal)
+        } catch (err) {
+          if (!(err instanceof StorageWalkLimitError)) throw err
+          unlisted = err.message
+        }
+      }
       const warnings = [SUPABASE_ONLY]
       if (!storage) warnings.push('Files stay in Supabase: add the Project URL and the service_role key to move Storage too.')
       const preview = previewOf(analysis, { source: 'supabase', sourceLabel: label, buckets, warnings, ctx, user: parsed.user })
+      if (!preview.refusal) preview.refusal = unlisted
       if (!preview.refusal && buckets) preview.refusal = fileRefusal(buckets.reduce((s, b) => s + b.bytes, 0), ctx.limits)
       return preview
     } finally {

@@ -22,9 +22,12 @@
 
 import { createHmac } from 'crypto'
 import type { Pool } from 'pg'
+import type { ImportLimits } from './driver'
 import type { ImportPlan, PlannedTable } from './pg-plan'
 import type { SourceReader } from './net'
+import { ROW_OVERHEAD_BYTES, RowRoom, writeWithinRoom } from './limits'
 import { waitForHeadroom, yieldToServer } from './pressure'
+import { SourceWireError } from './source-guard'
 
 const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
 
@@ -39,6 +42,8 @@ export class ImportAborted extends Error {
 export function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return
   const reason = signal.reason
+  // A deadline (AbortSignal.timeout, as on a preview) says itself, so the caller can say "took too long".
+  if ((reason as Error | undefined)?.name === 'TimeoutError') throw reason
   throw reason instanceof ImportAborted ? reason : new ImportAborted('canceled')
 }
 
@@ -128,7 +133,9 @@ export function batchSizeFor(columnCount: number): number {
  * About how much one batch of rows may hold in this process's memory. A FETCH
  * is bounded by rows, never by bytes, so the batch size follows the rows'
  * measured size: a table of wide JSON or binary values is read a few rows at
- * a time (lib/import/pressure.ts says why memory is scarce here).
+ * a time (lib/import/pressure.ts says why memory is scarce here). This is the
+ * aim; the ceiling is lib/import/source-guard.ts, which ends the connection
+ * when one row, or one batch, is larger than the source made it look.
  */
 export const BATCH_TARGET_BYTES = 8 * 1024 * 1024
 
@@ -183,6 +190,42 @@ export interface CopyContext {
   secret: Buffer
   /** Called after every batch with the table's running total. */
   onRows: (table: string, copied: number) => void
+  /** The plan's room: rows are written only as far as it lets them in (lib/import/limits.ts). */
+  room: RowRoom
+}
+
+/**
+ * The room for an import into `projectId`, measured on its own database the
+ * way the plan's usage is (lib/usage/db-storage.ts): pg_total_relation_size of
+ * the import's `tables` in the project's schema, indexes and TOAST included
+ * (a table not created yet measures nothing).
+ */
+export async function rowRoomFor(projectId: string, tables: () => readonly string[], limits: ImportLimits | undefined): Promise<RowRoom> {
+  const { projectPool } = await import('@/lib/data-plane/regional')
+  const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+  const pool = await projectPool(projectId, 'import', { max: 4 })
+  const schema = workspaceSchemaName(projectId)
+  return new RowRoom(limits, async () => {
+    const r = await pool.query<{ bytes: string }>(
+      `SELECT COALESCE(sum(pg_catalog.pg_total_relation_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
+         FROM unnest($2::text[]) AS t`,
+      [schema, [...tables()]],
+    )
+    return Number(r.rows[0]?.bytes ?? 0)
+  })
+}
+
+/**
+ * What one destination row is counted at against the plan's room: each value
+ * at its length but at least 8 bytes (a number held in 8 bytes can be one
+ * character of text), plus 8 for its header and alignment, and
+ * ROW_OVERHEAD_BYTES for the row. lib/import/limits.ts RowRoom says how the
+ * count relates to what PostgreSQL stores.
+ */
+export function rowCost(values: readonly unknown[]): number {
+  let n = ROW_OVERHEAD_BYTES
+  for (const v of values) if (v !== null && v !== undefined) n += Math.max(valueBytes(v), 8) + 8
+  return n
 }
 
 /** One source row → the destination values, in `t.copy` order. Exported for the tests. */
@@ -282,14 +325,22 @@ export async function copyRows(
       for (;;) {
         throwIfAborted(ctx.signal)
         await waitForHeadroom(ctx.signal)
-        const { rows } = await source.queryArrays(`FETCH FORWARD ${batch} FROM ${cursor}`)
+        const rows = await source.queryArrays(`FETCH FORWARD ${batch} FROM ${cursor}`).then(
+          (r) => r.rows,
+          (err) => {
+            throw err instanceof SourceWireError ? new SourceWireError(`Reading ${t.sourceName}: ${err.message}`) : err
+          },
+        )
         if (rows.length === 0) break
         const values = rows.map((r) => rowValues(t, r, ctx.secret))
-        try {
-          await insertBatch(pool, schema, t, values)
-        } catch (err) {
-          throw destinationError(t.name, err)
-        }
+        // As many rows at a time as the plan's room lets in; past it, the import stops here.
+        await writeWithinRoom(ctx.room, values, rowCost, async (some) => {
+          try {
+            return await insertBatch(pool, schema, t, some)
+          } catch (err) {
+            throw destinationError(t.name, err)
+          }
+        })
         n += rows.length
         copied.set(t.name, n)
         ctx.onRows(t.name, n)

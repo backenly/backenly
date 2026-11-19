@@ -10,23 +10,27 @@ import { randomBytes } from 'crypto'
 import type { ImportPreview, ImportPreviewBucket, ImportProgressTable, ImportSourceId } from '../contract'
 import { ImportInputError, type DriverContext, type RunContext, type RunResult } from '../driver'
 import { connectSource, isSupabaseHost, parsePostgresUrl, readSnapshot, supabaseRefOf, type ParsedPgUrl, type SourceConnection, type SourceReader } from '../net'
-import { authShape, countAuthUsers, countRows, existingSchemas, readCatalog, type AuthCounts, type AuthShape } from '../pg-source'
+import { authShape, countAuthUsers, countRows, existingSchemas, readCatalog, schemaBytes, type AuthCounts, type AuthShape } from '../pg-source'
 import { buildPlan, type ImportPlan, type SourceCatalog } from '../pg-plan'
 import { previewRules, proposeRules, recordRulesForApproval, type RuleProposal } from '../rules'
-import { fileRefusal, formatBytes, rowRefusal } from '../limits'
-import { addDeferredKeys, copyRows, createTables, destinationCounts, throwIfAborted } from '../pg-engine'
+import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, fileRefusal, formatBytes, rowRefusal, tableCountRefusal, userCountRefusal } from '../limits'
+import { addDeferredKeys, copyRows, createTables, destinationCounts, rowRoomFor, throwIfAborted } from '../pg-engine'
 import { copyAuthUsers, prepareUsersTable } from '../supabase-auth'
-import { copyFiles, createBuckets, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
+import { StorageWalk, StorageWalkLimitError, copyFiles, createBuckets, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
 
 export interface OpenedSource {
   conn: SourceConnection
   parsed: ParsedPgUrl
 }
 
-/** Parse and connect. A Supabase host is only ever reached encrypted, whichever source was picked. */
-export async function openSource(connectionString: string, secrets: readonly string[]): Promise<OpenedSource> {
+/**
+ * Parse and connect. A Supabase host is only ever reached encrypted, whichever
+ * source was picked. `signal` (the preview's or the check's deadline, the
+ * job's cancel) ends the connection, and the statement in flight, when it fires.
+ */
+export async function openSource(connectionString: string, secrets: readonly string[], signal?: AbortSignal): Promise<OpenedSource> {
   const parsed = parsePostgresUrl(connectionString)
-  const conn = await connectSource(parsed, { requireTls: isSupabaseHost(parsed.host), secrets })
+  const conn = await connectSource(parsed, { requireTls: isSupabaseHost(parsed.host), secrets, signal })
   return { conn, parsed }
 }
 
@@ -58,7 +62,7 @@ export interface Analysis {
 /** Read the catalog, count, plan and translate the rules, inside the caller's snapshot. */
 export async function analyze(
   db: SourceReader,
-  opts: { source: 'supabase' | 'postgres'; schemas: string[]; usersMoving: boolean; withAuth: boolean; countAll: boolean },
+  opts: { source: 'supabase' | 'postgres'; schemas: string[]; usersMoving: boolean; withAuth: boolean; countAll: boolean; signal?: AbortSignal },
 ): Promise<Analysis> {
   const present = await existingSchemas(db, opts.schemas)
   const missing = opts.schemas.filter((s) => !present.includes(s))
@@ -66,7 +70,10 @@ export async function analyze(
     throw new ImportInputError(`This database has no schema named ${opts.schemas.join(', ')}.`, 'schemas')
   }
   const catalog = await readCatalog(db, present)
-  await countRows(db, catalog.tables, opts.countAll ? { all: true } : undefined)
+  // The tables that would move, refused past the limit before each is counted: one count can take minutes.
+  const moving = buildPlan(catalog, { source: opts.source, usersMoving: false, schemas: present }).tables.length
+  if (moving > MAX_IMPORT_TABLES) throw new ImportInputError(tableCountRefusal(moving), 'connectionString')
+  await countRows(db, catalog.tables, { all: opts.countAll, signal: opts.signal })
 
   let auth: Analysis['auth'] = null
   if (opts.withAuth) {
@@ -93,6 +100,11 @@ export function hiddenRowsRefusal(hidden: string[], user: string): string | null
     `Row-level security hides rows of ${list} from the user ${user}, so Backenly would move only part of them. ` +
     `Connect as the tables' owner or a user with BYPASSRLS (on Supabase, the postgres user).`
   )
+}
+
+/** The users that move: with a password, with a provider, or with an email alone. */
+export function movingUsersOf(counts: AuthCounts): number {
+  return counts.withPassword + counts.providerOnly + counts.emailOnly
 }
 
 export function authWarnings(counts: AuthCounts): string[] {
@@ -130,16 +142,20 @@ export function previewOf(
     notes: t.rowsExact ? t.notes : [`About ${t.rows.toLocaleString('en-US')} rows (estimated)`, ...t.notes],
   }))
   const fileBytes = (input.buckets ?? []).reduce((s, b) => s + b.bytes, 0)
+  const users = a.auth ? movingUsersOf(a.auth.counts) : 0
   const refusal =
-    hiddenRowsRefusal(a.hidden, input.user) ?? rowRefusal(a.rowBytes, input.ctx.limits) ?? (input.buckets ? fileRefusal(fileBytes, input.ctx.limits) : null)
-  const users = a.auth
+    hiddenRowsRefusal(a.hidden, input.user) ??
+    rowRefusal(a.rowBytes, input.ctx.limits) ??
+    (users > MAX_IMPORT_USERS ? userCountRefusal(users) : null) ??
+    (input.buckets ? fileRefusal(fileBytes, input.ctx.limits) : null)
+  const usersPreview = a.auth
     ? { total: a.auth.counts.total, withPassword: a.auth.counts.withPassword, providerOnly: a.auth.counts.providerOnly, skipped: a.auth.counts.skipped }
     : null
   return {
     source: input.source,
     sourceLabel: input.sourceLabel,
     tables,
-    users,
+    users: usersPreview,
     buckets: input.buckets,
     rules: previewRules(a.proposals),
     warnings: [...a.plan.warnings, ...a.ruleWarnings, ...(a.auth ? authWarnings(a.auth.counts) : []), ...input.warnings],
@@ -152,18 +168,13 @@ export async function checkPg(
   connectionString: string,
   opts: { secrets: readonly string[]; schemas: string[]; ctx: DriverContext },
 ): Promise<void> {
-  const { conn } = await openSource(connectionString, opts.secrets)
+  const { conn } = await openSource(connectionString, opts.secrets, opts.ctx.signal)
   try {
     await readSnapshot(conn, async (db) => {
       const present = await existingSchemas(db, opts.schemas)
       if (present.length === 0) throw new ImportInputError(`This database has no schema named ${opts.schemas.join(', ')}.`, 'schemas')
-      const r = await db.query<{ bytes: string }>(
-        `SELECT COALESCE(sum(pg_table_size(c.oid)), 0)::bigint::text AS bytes
-           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-          WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1::text[])`,
-        [present],
-      )
-      const refusal = rowRefusal(Number(r.rows[0]?.bytes ?? 0), opts.ctx.limits)
+      // Partitions counted under their tables: a partitioned table alone measures 0.
+      const refusal = rowRefusal(await schemaBytes(db, present), opts.ctx.limits)
       if (refusal) throw new ImportInputError(refusal)
     })
   } finally {
@@ -199,7 +210,8 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
   const ledger = new Map<string, ImportProgressTable>()
   const push = (name: string) => ctx.progress({ tables: [{ ...ledger.get(name)! }] })
 
-  const opened = await openSource(input.connectionString, input.secrets)
+  // A cancel or the job's deadline ends the connection, and the statement in flight, at once.
+  const opened = await openSource(input.connectionString, input.secrets, ctx.signal)
   const { conn } = opened
   let usersCopied: number | undefined
   let analysis: Analysis
@@ -213,14 +225,21 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
           usersMoving: input.users,
           withAuth: input.source === 'supabase' && input.users,
           countAll: true,
+          signal: ctx.signal,
         })
-        const refusal = hiddenRowsRefusal(a.hidden, opened.parsed.user) ?? rowRefusal(a.rowBytes, ctx.limits)
+        const movingUsers = a.auth ? movingUsersOf(a.auth.counts) : 0
+        const refusal =
+          hiddenRowsRefusal(a.hidden, opened.parsed.user) ??
+          rowRefusal(a.rowBytes, ctx.limits) ??
+          (movingUsers > MAX_IMPORT_USERS ? userCountRefusal(movingUsers) : null)
         if (refusal) throw new ImportInputError(refusal, 'connectionString')
         if (a.plan.tables.length === 0 && !a.auth) throw new ImportInputError('There are no tables to move in this database.', 'connectionString')
         warnings.push(...a.plan.warnings, ...a.ruleWarnings, ...(a.auth ? authWarnings(a.auth.counts) : []))
 
         for (const t of a.plan.tables) ledger.set(t.name, { name: t.name, sourceRows: t.rows, copiedRows: 0, verified: false })
-        const movingUsers = a.auth ? a.auth.counts.withPassword + a.auth.counts.providerOnly + a.auth.counts.emailOnly : 0
+        // What the source reported passed the checks above; what it sends is counted as it is written.
+        const written = [...a.plan.tables.map((t) => t.name), ...(a.auth ? ['users'] : [])]
+        const room = await rowRoomFor(ctx.projectId, () => written, ctx.limits)
         ctx.progress({
           phase: 'tables',
           tables: [...ledger.values()],
@@ -238,6 +257,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
         await copyRows(db, ctx.projectId, a.plan, {
           signal: ctx.signal,
           secret,
+          room,
           onRows: (name, n) => {
             const row = ledger.get(name)
             if (!row) return
@@ -250,6 +270,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
           ctx.progress({ phase: 'users' })
           usersCopied = await copyAuthUsers(db, ctx.projectId, a.auth.shape, {
             signal: ctx.signal,
+            room,
             onUsers: (n) => ctx.progress({ users: { total: movingUsers, copied: n } }),
           })
           if (usersCopied < movingUsers) {
@@ -297,24 +318,39 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
     ctx.progress({ phase: 'files' })
     let totalFiles = 0
     let totalBytes = 0
-    for (const b of buckets) {
-      for await (const o of walkObjects(input.storage, b, ctx.signal)) {
-        totalFiles++
-        totalBytes += o.size
+    // One walk over every bucket, within the listing's limits. Past one, the
+    // rows and users stay moved and the files stay in Supabase, said why.
+    let unlisted: string | null = null
+    try {
+      const walk = new StorageWalk()
+      for (const b of buckets) {
+        for await (const o of walkObjects(input.storage, b, ctx.signal, walk)) {
+          totalFiles++
+          totalBytes += o.size
+        }
       }
+    } catch (err) {
+      if (!(err instanceof StorageWalkLimitError)) throw err
+      unlisted = err.message
     }
-    ctx.progress({ files: { total: totalFiles, copied: 0, bytes: totalBytes, copiedBytes: 0 } })
-    const files = await copyFiles(input.storage, ctx.projectId, buckets, targets, {
-      signal: ctx.signal,
-      userId: ctx.userId,
-      onFile: (copied, copiedBytes) => ctx.progress({ files: { total: totalFiles, copied, bytes: totalBytes, copiedBytes } }),
-    })
-    filesCopied = files.copied
-    if (files.skipped.length) {
-      const sample = files.skipped.slice(0, 3).map((s) => `${s.path} (${s.why})`).join(', ')
-      warnings.push(`${plural(files.skipped.length, 'file')} did not move: ${sample}${files.skipped.length > 3 ? ', …' : ''}.`)
+    if (unlisted) {
+      filesCopied = 0
+      warnings.push(`Files did not move: ${unlisted}`)
+    } else {
+      ctx.progress({ files: { total: totalFiles, copied: 0, bytes: totalBytes, copiedBytes: 0 } })
+      const files = await copyFiles(input.storage, ctx.projectId, buckets, targets, {
+        signal: ctx.signal,
+        userId: ctx.userId,
+        onFile: (copied, copiedBytes) => ctx.progress({ files: { total: totalFiles, copied, bytes: totalBytes, copiedBytes } }),
+      })
+      filesCopied = files.copied
+      if (files.skippedCount) {
+        const sample = files.skipped.map((s) => `${s.path} (${s.why})`).join(', ')
+        warnings.push(`${plural(files.skippedCount, 'file')} did not move: ${sample}${files.skippedCount > files.skipped.length ? ', …' : ''}.`)
+      }
+      if (files.stoppedForQuota) warnings.push(`Files stopped at ${formatBytes(files.bytes)}: the plan's file storage is full.`)
+      if (files.stopped) warnings.push(`Files stopped at ${plural(files.copied, 'file')}: ${files.stopped}`)
     }
-    if (files.stoppedForQuota) warnings.push(`Files stopped at ${formatBytes(files.bytes)}: the plan's file storage is full.`)
   }
 
   throwIfAborted(ctx.signal)

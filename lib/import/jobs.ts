@@ -45,7 +45,7 @@ import { initialProgress, mergeProgress, type ProgressPatch } from './progress'
 import { redactedMessage, secretsOf } from './redact'
 import { driverFor, sourceName } from './registry'
 import { ImportAborted } from './pg-engine'
-import { IMPORT_GATE } from './gate'
+import { IMPORT_GATE, LOOK_GATE, withSlot } from './gate'
 
 export const IMPORT_JOB_TYPE = 'import'
 /** While it runs: a status no queue sweep selects. */
@@ -69,8 +69,12 @@ const DEFAULT_LIMITS = {
   heartbeatMs: 10_000,
   /** A job not heard from for this long belongs to a process that stopped. */
   staleMs: 60_000,
-  /** How long the quick check before creating the project may take. */
+  /** How long the quick check before creating the project may take, from when it holds its slot. */
   checkMs: 60_000,
+  /** How long the Review step's read of a source may take, from when it holds its slot. */
+  inspectMs: 5 * 60_000,
+  /** How long a look at a source (the preview, the check) waits for its slot before it is refused. */
+  lookWaitMs: 30_000,
 }
 
 export const IMPORT_LIMITS = { ...DEFAULT_LIMITS }
@@ -105,6 +109,35 @@ export class ImportRefusedError extends Error {
     super(message)
     this.name = 'ImportRefusedError'
   }
+}
+
+/**
+ * Reading a source to preview or check it takes one of this process's look
+ * slots (lib/import/gate.ts LOOK_GATE), so previews cannot pile up beside a
+ * running import, each holding a source's answers in memory. Refused like a
+ * full import line when no slot frees up in time; nothing was read.
+ *
+ * `read` gets a signal that fires `ms` after the slot is held. The drivers
+ * hand it to the source's connection, which it ends, failing the statement in
+ * flight, so a slow source gives the slot back at its deadline rather than
+ * keeping every other organization's previews and starts waiting behind it.
+ */
+export function lookAtSource<T>(read: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  return withSlot(
+    LOOK_GATE,
+    {
+      waitMs: IMPORT_LIMITS.lookWaitMs,
+      busy: () =>
+        new ImportRefusedError(
+          503,
+          'Backenly is reading other sources right now. Try again in a minute; nothing was read or created.',
+          'IMPORT_BUSY',
+          {},
+          { 'Retry-After': '60' },
+        ),
+    },
+    () => read(AbortSignal.timeout(ms)),
+  )
 }
 
 // ── Jobs this process runs ────────────────────────────────────────────────────
@@ -147,7 +180,7 @@ export async function startImport(
   // One import runs at a time in this process and a few more wait their turn
   // (lib/import/gate.ts). With the line full, refuse now, before the budget is
   // spent or anything is created.
-  if (!IMPORT_GATE.hasRoom()) {
+  if (!IMPORT_GATE.hasRoom() || (driver.check && !LOOK_GATE.hasRoom())) {
     throw new ImportRefusedError(
       503,
       'Backenly is moving other projects in right now. Try again in a few minutes; nothing was created.',
@@ -156,12 +189,18 @@ export async function startImport(
       { 'Retry-After': '120' },
     )
   }
-  await opts.spendBudget?.()
   const limits = await limitsForAccount(account)
 
-  if (driver.check) {
-    const signal = AbortSignal.timeout(IMPORT_LIMITS.checkMs)
-    await driver.check(input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits })
+  const check = driver.check
+  if (check) {
+    // The budget is spent once the check holds its slot: a start turned away
+    // because others are being read spends none of the organization's starts.
+    await lookAtSource(async (signal) => {
+      await opts.spendBudget?.()
+      await check.call(driver, input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits })
+    }, IMPORT_LIMITS.checkMs)
+  } else {
+    await opts.spendBudget?.()
   }
 
   // The normal creation path: the organization's owner owns it, its plan counts it, its region holds it.
@@ -214,6 +253,7 @@ export async function startImport(
     driver,
     connection: input.connection,
     limits,
+    refreshLimits: () => limitsForAccount(account),
   })
   return { jobId, projectId: project.id }
 }
@@ -252,9 +292,11 @@ export async function inspectImport(input: { userId: string; orgId: string; conn
   if (!driver) throw new ImportRefusedError(400, `Moving from ${source} is not available.`, 'IMPORT_SOURCE_UNAVAILABLE')
   const account = await creationAccountFor(input.userId, input.orgId, { initialize: false })
   const limits = await limitsForAccount(account)
-  const signal = AbortSignal.timeout(5 * 60_000)
   try {
-    return await driver.inspect(input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits })
+    return await lookAtSource(
+      (signal) => driver.inspect(input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits }),
+      IMPORT_LIMITS.inspectMs,
+    )
   } catch (err) {
     throw sayable(err, input.connection)
   }
@@ -280,6 +322,8 @@ function runInThisProcess(input: {
   driver: ImportDriver
   connection: ImportConnection
   limits: ImportLimits
+  /** The organization's limits again, read when the job leaves the line. */
+  refreshLimits: () => Promise<ImportLimits>
 }): void {
   const controller = new AbortController()
   let progress = input.payload.progress
@@ -295,7 +339,15 @@ function runInThisProcess(input: {
 }
 
 async function execute(
-  input: { jobId: string; projectId: string; payload: JobPayload; driver: ImportDriver; connection: ImportConnection; limits: ImportLimits },
+  input: {
+    jobId: string
+    projectId: string
+    payload: JobPayload
+    driver: ImportDriver
+    connection: ImportConnection
+    limits: ImportLimits
+    refreshLimits: () => Promise<ImportLimits>
+  },
   controller: AbortController,
   state: { get: () => ImportProgress; set: (p: ImportProgress) => void },
 ): Promise<void> {
@@ -356,6 +408,9 @@ async function execute(
       state.set({ ...state.get(), status: 'queued', queuePosition: place })
       dirty = true
     })
+    // What is left of the plan now, not when the job joined the line: an import
+    // admitted after another one in the same organization sees what that one wrote.
+    ctx.limits = await input.refreshLimits().catch(() => input.limits)
     // The clock starts with the move: "Took 2 s" means the move, not the wait in line.
     state.set({ ...state.get(), status: 'running', queuePosition: null, startedAt: new Date().toISOString() })
     dirty = true
@@ -419,7 +474,19 @@ async function execute(
   } finally {
     clearInterval(ticker)
     if (deadline) clearTimeout(deadline)
+    // Record the project's size before giving up the slot, so the next import
+    // admitted in this organization counts these rows in what is left.
+    if (release) await recordProjectSize(projectId)
     release?.()
+  }
+}
+
+async function recordProjectSize(projectId: string): Promise<void> {
+  try {
+    const { snapshotProjectDbStorage } = await import('@/lib/usage/db-storage')
+    await snapshotProjectDbStorage(projectId)
+  } catch {
+    // The hourly measurement records it anyway.
   }
 }
 

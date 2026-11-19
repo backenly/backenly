@@ -113,3 +113,34 @@ export const IMPORT_GATE = new ImportGate(
   () => envInt('BACKENLY_IMPORT_CONCURRENCY', 1),
   () => envInt('BACKENLY_IMPORT_QUEUE', 10),
 )
+
+/**
+ * The gate for LOOKING at a source: the Review step's read (up to five
+ * minutes) and the quick check before a start. Each reads the source the way
+ * an import does and can hold as much while it does, but answers a request
+ * that is waiting, so it cannot queue behind an import for hours. It has
+ * slots of its own beside the import's: BACKENLY_IMPORT_LOOK_CONCURRENCY
+ * (default 1) at once, BACKENLY_IMPORT_LOOK_QUEUE (default 4) waiting.
+ */
+export const LOOK_GATE = new ImportGate(
+  () => envInt('BACKENLY_IMPORT_LOOK_CONCURRENCY', 1),
+  () => envInt('BACKENLY_IMPORT_LOOK_QUEUE', 4),
+)
+
+let looks = 0
+
+/**
+ * Run `fn` holding one of `gate`'s slots. With the line full, or after
+ * `waitMs` in it, throws `busy()` without running `fn`.
+ */
+export async function withSlot<T>(gate: ImportGate, opts: { waitMs: number; busy: () => Error }, fn: () => Promise<T>): Promise<T> {
+  if (!gate.hasRoom()) throw opts.busy()
+  const wait = new AbortController()
+  const timer = setTimeout(() => wait.abort(opts.busy()), Math.max(0, opts.waitMs))
+  const release = await gate.acquire(`look-${++looks}`, wait.signal).finally(() => clearTimeout(timer))
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}

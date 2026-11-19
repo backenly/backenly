@@ -139,6 +139,13 @@ class MemoryProject implements FirebaseDestination {
   async countRows(table: string) {
     return this.tables.get(table)!.rows.length
   }
+  /** What the rows held come to, as the real writer's pg_table_size would say it. */
+  async measureRows() {
+    let bytes = 0
+    for (const t of this.tables.values()) for (const r of t.rows) bytes += JSON.stringify(r).length
+    for (const u of this.users) bytes += JSON.stringify(u).length
+    return bytes
+  }
   async prepareUsers() {
     this.usersPrepared = true
   }
@@ -464,6 +471,61 @@ describe('run: the move', () => {
     expect(err.reason).toBe('canceled')
     expect(project.users).toHaveLength(0)
     expect(project.closed).toBe(true)
+  })
+
+  it('plans a collection found while moving from what it holds once that passes the byte budget, instead of holding on', async () => {
+    const g = demoProject()
+    // Under the last log only, so the preview never meets them: 200 entries of 1 KB, the later half with a field the first half lacks.
+    for (let i = 0; i < 200; i++) {
+      g.put(`logs/l29/entries/e${String(i).padStart(3, '0')}`, {
+        text: { stringValue: 'y'.repeat(1000) },
+        ...(i >= 100 ? { late: { stringValue: 'arrived late' } } : {}),
+      })
+    }
+    const project = new MemoryProject()
+    const { ctx } = runContext(project, { include: { users: false, files: false } })
+    await driverFor(g, project, { heldBytes: 50_000 }).run({ source: 'firebase', serviceAccountJson: SA.json }, ctx)
+    // Planned from about the first 50 KB of entries, so `late` made no column: its values are kept in extra_fields.
+    expect(project.extraAdded).toContain('logs_entries')
+    const entries = project.tables.get('logs_entries')!
+    expect(entries.plan.createColumns.map((c) => c.name)).not.toContain('late')
+    expect(entries.rows).toHaveLength(201)
+    expect(entries.rows.filter((r) => typeof r.extra_fields === 'string' && JSON.parse(r.extra_fields).late === 'arrived late')).toHaveLength(100)
+  })
+
+  it("stops at the plan's room when the documents outgrow what the sample said", async () => {
+    // The sample (the first five documents) is small, so the estimate passes the plan's limit; the rest are not.
+    const g = new FakeGoogle(SA)
+    for (let i = 0; i < 5; i++) g.put(`blobs/a${i}`, { n: { integerValue: String(i) } })
+    for (let i = 0; i < 700; i++) g.put(`blobs/b${String(i).padStart(3, '0')}`, { body: { stringValue: 'x'.repeat(1000) } })
+    const project = new MemoryProject()
+    const limits = { maxRowBytes: 500_000, maxFileBytes: null, planName: 'Free', planRowBytes: 600_000 }
+    const { ctx } = runContext(project, { include: { users: false, files: false }, limits })
+    const err = await driverFor(g, project, { sampleSize: 5 }).run({ source: 'firebase', serviceAccountJson: SA.json }, ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(ImportInputError)
+    expect(err.message).toMatch(
+      /^Backenly stopped the import after \d+ KB of rows: the organization has 488 KB left of the 586 KB of database storage on Free\. Free some space or upgrade the organization, then import again\.$/,
+    )
+    const held = project.tables.get('blobs')!.rows.length
+    expect(held).toBeGreaterThan(0)
+    expect(held).toBeLessThan(705)
+    expect(await project.measureRows()).toBeLessThanOrEqual(limits.maxRowBytes)
+    expect(project.closed).toBe(true)
+  })
+
+  it('refuses a project with more collections than one import makes tables, before reading any of them', async () => {
+    const g = new FakeGoogle(SA)
+    for (let i = 0; i <= 1000; i++) g.put(`c${String(i).padStart(4, '0')}/d`, { n: { integerValue: '1' } })
+    const driver = driverFor(g, new MemoryProject())
+    const said = 'This source has more than 1,000 tables; one import moves up to 1,000. Contact us to move a larger database.'
+    const err = await driver.check!({ source: 'firebase', serviceAccountJson: SA.json }, inspectCtx()).catch((e) => e)
+    expect(err).toBeInstanceOf(ImportInputError)
+    expect(err.message).toBe(said)
+    // Collection ids only: nothing was sampled or counted.
+    expect(g.calls.some((c) => /:runAggregationQuery$/.test(c.url) || /\/documents\/c\d{4}/.test(c.url))).toBe(false)
+    const preview = await driver.inspect({ source: 'firebase', serviceAccountJson: SA.json }, inspectCtx()).catch((e) => e)
+    expect(preview).toBeInstanceOf(ImportInputError)
+    expect(preview.message).toBe(said)
   })
 
   it("fails in plain words when the key can't read Firestore", async () => {

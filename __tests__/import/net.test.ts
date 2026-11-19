@@ -76,6 +76,31 @@ describe('connection strings', () => {
     }
   })
 
+  it('reaches a database on port 5432 only, saying so, and where Supabase has one', () => {
+    expect(parsePostgresUrl('postgresql://u:p@db.example.com:5432/x').port).toBe(5432)
+    const cases: Array<[string, string]> = [
+      [
+        'postgresql://u:p@db.example.com:5433/x',
+        'Backenly connects to databases on port 5432 only, and this connection string names port 5433. Use an address of the database that answers on port 5432.',
+      ],
+      [
+        'postgresql://postgres.abcdefghijklmnop:p@aws-0-eu-central-1.pooler.supabase.com:6543/postgres',
+        'Backenly connects to databases on port 5432 only, and this connection string names port 6543. In Supabase, press Connect and copy the Session pooler string (port 5432).',
+      ],
+    ]
+    for (const [raw, said] of cases) {
+      let caught: unknown = null
+      try {
+        parsePostgresUrl(raw)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).toBeInstanceOf(ImportInputError)
+      expect((caught as ImportInputError).field).toBe('connectionString')
+      expect((caught as Error).message).toBe(said)
+    }
+  })
+
   it('knows Supabase hosts and refs', () => {
     expect(isSupabaseHost('db.abcdefghijklmnop.supabase.co')).toBe(true)
     expect(isSupabaseHost('aws-0-us-east-1.pooler.supabase.com')).toBe(true)
@@ -112,6 +137,13 @@ describe('addresses', () => {
   it('a name that resolves privately is refused (no DNS rebinding through a public-looking name)', async () => {
     const err = await refusal(resolveCheckedAddress('internal.example.com', { lookup: lookupOf('192.168.1.10') }))
     expect(err.message).toMatch(/public internet/)
+  })
+
+  it('names the kind of address a name resolved to, never the address', async () => {
+    const err = await refusal(resolveCheckedAddress('internal.example.com', { lookup: lookupOf('10.20.30.40') }))
+    expect(err.message).toBe('Backenly only connects to sources on the public internet, and internal.example.com is a private address.')
+    const metadata = await refusal(resolveCheckedAddress('meta.example.com', { lookup: lookupOf('169.254.169.254') }))
+    expect(metadata.message).toBe('Backenly only connects to sources on the public internet, and meta.example.com is a link-local (cloud metadata) address.')
   })
 
   it('public addresses are allowed, IPv4 preferred', async () => {

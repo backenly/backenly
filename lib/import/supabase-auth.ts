@@ -20,9 +20,11 @@
  */
 
 import type { Pool } from 'pg'
+import { ImportInputError } from './driver'
+import { MAX_IMPORT_USERS, type RowRoom, userCountRefusal, writeWithinRoom } from './limits'
 import type { SourceReader } from './net'
 import { authUsersQuery, type AuthShape, type AuthUserRow } from './pg-source'
-import { throwIfAborted } from './pg-engine'
+import { rowCost, throwIfAborted } from './pg-engine'
 import { waitForHeadroom } from './pressure'
 
 const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
@@ -52,6 +54,8 @@ export async function prepareUsersTable(projectId: string, opts: { social: boole
 export interface UsersContext {
   signal: AbortSignal
   onUsers: (copied: number) => void
+  /** The same room as the tables' rows: users are rows of the project's database too. */
+  room: RowRoom
 }
 
 /** The users rows to insert, column by column, for whatever shape the users table has now. */
@@ -85,7 +89,32 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
   const cols = userColumns(schema.columns, schema.passwordColumn, schema.createdAtColumn, schema.lastLoginColumn)
   const names = cols.map((c) => q(c.name)).join(', ')
 
+  /** Insert these users' rows; how many arrived. */
+  const insert = async (values: unknown[][]): Promise<number> => {
+    const params: unknown[] = []
+    const tuples = values.map((row) => `(${row.map((v) => {
+      params.push(v)
+      return `$${params.length}`
+    }).join(', ')})`)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(`SET LOCAL TIME ZONE 'UTC'`)
+      await client.query(rlsSessionSql(), rlsSessionParams({ isServiceRole: true }))
+      const res = await client.query(`INSERT INTO ${q(schema.schemaName)}."users" (${names}) VALUES ${tuples.join(', ')} ON CONFLICT DO NOTHING`, params)
+      await client.query('COMMIT')
+      return res.rowCount ?? 0
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {})
+      const code = err?.code ? ` (PostgreSQL error ${err.code})` : ''
+      throw new Error(`Copying users failed${code}.`)
+    } finally {
+      client.release()
+    }
+  }
+
   let copied = 0
+  let read = 0
   ctx.onUsers(0)
   await source.query(`DECLARE bkn_import_users NO SCROLL CURSOR FOR ${authUsersQuery(shape)}`)
   try {
@@ -94,29 +123,13 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
       await waitForHeadroom(ctx.signal)
       const { rows } = await source.query<AuthUserRow>(`FETCH FORWARD 500 FROM bkn_import_users`)
       if (rows.length === 0) break
-      const params: unknown[] = []
-      const tuples = rows.map((u) => `(${cols.map((c) => {
-        params.push(c.value(u))
-        return `$${params.length}`
-      }).join(', ')})`)
-      const client = await pool.connect()
-      let inserted = 0
-      try {
-        await client.query('BEGIN')
-        await client.query(`SET LOCAL TIME ZONE 'UTC'`)
-        await client.query(rlsSessionSql(), rlsSessionParams({ isServiceRole: true }))
-        const res = await client.query(`INSERT INTO ${q(schema.schemaName)}."users" (${names}) VALUES ${tuples.join(', ')} ON CONFLICT DO NOTHING`, params)
-        inserted = res.rowCount ?? 0
-        await client.query('COMMIT')
-      } catch (err: any) {
-        await client.query('ROLLBACK').catch(() => {})
-        const code = err?.code ? ` (PostgreSQL error ${err.code})` : ''
-        throw new Error(`Copying users failed${code}.`)
-      } finally {
-        client.release()
-      }
-      // An address two source users shared (differing in case) arrives once.
-      copied += inserted
+      // The preview counted the users; a source that sends more than one import moves stops here.
+      read += rows.length
+      if (read > MAX_IMPORT_USERS) throw new ImportInputError(userCountRefusal(null))
+      const values = rows.map((u) => cols.map((c) => c.value(u)))
+      // As many at a time as the plan's room lets in. An address two source
+      // users shared (differing in case) arrives once.
+      copied += await writeWithinRoom(ctx.room, values, rowCost, insert)
       ctx.onUsers(copied)
     }
   } finally {

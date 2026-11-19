@@ -16,12 +16,19 @@
  *     deployment may open private ranges, with BACKENLY_IMPORT_EGRESS_ALLOW_PRIVATE);
  *   - TLS names the host the person typed (`servername`), so a certificate is
  *     checked against that name although the socket was opened to an address;
+ *   - a database is reached on port 5432 only, the one port Backenly Cloud's
+ *     web task opens to the internet for this;
  *   - Supabase is only reached encrypted;
+ *   - what the source sends is bounded before pg holds it: one message, and
+ *     one statement's answer (lib/import/source-guard.ts);
  *   - every statement runs inside a READ ONLY transaction, so the source can
  *     only be read even if a statement Backenly sends were wrong.
  *
  * Nothing here logs, stores or returns a credential. Errors are said in the
  * source's own words, after lib/import/redact.ts has removed what they quoted.
+ * A refused address is named by its kind, never by the address a name
+ * resolved to: inside Backenly's network a name can resolve to an address
+ * that is not anyone's business outside it.
  */
 
 import * as dns from 'node:dns'
@@ -30,6 +37,7 @@ import { Client as PgClient, type ClientConfig } from 'pg'
 import { outboundAddressRefusal, privateEgressAllowedFor } from '@/lib/security/outbound-guard'
 import { ImportInputError } from './driver'
 import { redactedMessage } from './redact'
+import { SourceWireError, guardSourceClient } from './source-guard'
 
 // ── Connection strings ────────────────────────────────────────────────────────
 
@@ -47,6 +55,9 @@ export interface ParsedPgUrl {
 }
 
 const FIELD = 'connectionString' as const
+
+/** The one port a source database is reached on: Backenly Cloud's web task opens no other to the internet for imports. */
+export const SOURCE_PORT = 5432
 
 function refuse(message: string): never {
   throw new ImportInputError(message, FIELD)
@@ -81,8 +92,15 @@ export function parsePostgresUrl(raw: string): ParsedPgUrl {
   if (!host) refuse('The connection string has no host.')
   if (host.startsWith('/') || host.startsWith('%2F') || host.startsWith('%2f')) refuse('Unix-socket connection strings cannot be reached from Backenly. Use the database\'s internet address.')
 
-  const port = url.port ? Number(url.port) : 5432
+  const port = url.port ? Number(url.port) : SOURCE_PORT
   if (!Number.isInteger(port) || port < 1 || port > 65535) refuse('The port in the connection string is not a valid port.')
+  if (port !== SOURCE_PORT) {
+    refuse(
+      isSupabaseHost(host)
+        ? `Backenly connects to databases on port ${SOURCE_PORT} only, and this connection string names port ${port}. In Supabase, press Connect and copy the Session pooler string (port ${SOURCE_PORT}).`
+        : `Backenly connects to databases on port ${SOURCE_PORT} only, and this connection string names port ${port}. Use an address of the database that answers on port ${SOURCE_PORT}.`,
+    )
+  }
 
   let user = ''
   let password = ''
@@ -173,6 +191,7 @@ export async function resolveCheckedAddress(
   if (list.length === 0) throw new ImportInputError(`Couldn't connect: ${name} did not resolve to an address.`, field)
 
   for (const a of list) {
+    // The kind of address, never the address: a name may resolve to one only Backenly's network knows.
     const reason = outboundAddressRefusal(a.address, 'import')
     if (reason) {
       throw new ImportInputError(
@@ -194,6 +213,12 @@ export interface SourceConnectOptions {
   secrets: readonly string[]
   connectTimeoutMs?: number
   lookup?: Lookup
+  /**
+   * The caller's deadline or cancel: when it fires the connection is ended at
+   * once, failing whatever statement is waiting with the signal's reason, so a
+   * read never outlives the request or the job it belongs to.
+   */
+  signal?: AbortSignal
 }
 
 export const SOURCE_LIMITS = {
@@ -233,7 +258,10 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
   if (opts.requireTls && (mode === 'disable' || mode === 'allow')) {
     refuse(`Supabase is only reached over an encrypted connection: remove sslmode=${mode} from the connection string.`)
   }
+  const signal = opts.signal
+  signal?.throwIfAborted()
   const { address, family } = await resolveCheckedAddress(parsed.host, { lookup: opts.lookup })
+  signal?.throwIfAborted()
 
   // Which TLS to try, in order.
   const attempts: Array<ClientConfig['ssl'] | false> =
@@ -259,8 +287,12 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
       application_name: 'backenly-import',
       keepAlive: true,
     })
+    // Before connect, so the startup exchange is bounded too.
+    guardSourceClient(client)
     // An error after connect (the source restarting) must not crash the process.
     client.on('error', () => {})
+    const stop = () => endNow(client, signal!.reason)
+    signal?.addEventListener('abort', stop, { once: true })
     try {
       await client.connect()
       return {
@@ -268,17 +300,29 @@ export async function connectSource(parsed: ParsedPgUrl, opts: SourceConnectOpti
         host: parsed.host,
         tls: !!ssl,
         end: async () => {
+          signal?.removeEventListener('abort', stop)
           await client.end().catch(() => {})
         },
       }
     } catch (err) {
+      signal?.removeEventListener('abort', stop)
       lastErr = err
       await client.end().catch(() => {})
+      // The deadline or a cancel, not the source: said as such, not as a connection failure.
+      signal?.throwIfAborted()
       const fallBack = i + 1 < attempts.length && NO_SSL.test(String((err as Error)?.message ?? ''))
       if (!fallBack) break
     }
   }
   throw new ImportInputError(describeSourceError(lastErr, { host: parsed.host, port: parsed.port, family, secrets: opts.secrets }), FIELD)
+}
+
+/** End `client`'s connection now, failing its statement in progress with `reason`. */
+function endNow(client: PgClient, reason: unknown): void {
+  const stream = (client as unknown as { connection?: { stream?: { destroy(err?: Error): void } } }).connection?.stream
+  // The signal's own reason (a TimeoutError, an ImportAborted) whatever realm made it: an
+  // `instanceof Error` test fails for a DOMException from another context.
+  stream?.destroy(typeof reason === 'object' && reason !== null ? (reason as Error) : new Error('The read was stopped.'))
 }
 
 /**
@@ -290,6 +334,8 @@ export function describeSourceError(
   err: unknown,
   ctx: { host: string; port: number; family?: 4 | 6; secrets: readonly string[] },
 ): string {
+  // The limits on what a source sends say themselves (lib/import/source-guard.ts).
+  if (err instanceof SourceWireError) return err.message
   const e = err as { code?: string; message?: string } | null
   const code = e?.code ?? ''
   const where = `${ctx.host}:${ctx.port}`

@@ -7,12 +7,21 @@
  *
  * Sizes are the source's own (pg_table_size for rows, object sizes for
  * files), so they are what the source holds, not a promise about Backenly's
- * on-disk size. Pure apart from `limitsFor`.
+ * on-disk size. A source can get them wrong, so the rows are also counted as
+ * they are written (RowRoom), and an import stops at the room the plan has
+ * left whatever the source said. Tables and users are capped per import too.
+ * Pure apart from `limitsFor`.
  */
 
-import type { ImportLimits } from './driver'
+import { ImportInputError, type ImportLimits } from './driver'
 
 export const MAX_IMPORT_ROW_BYTES = 5 * 1024 ** 3
+/** Tables one import creates: each is DDL and a rule in one governed change. */
+export const MAX_IMPORT_TABLES = 1_000
+/** Users one import moves. */
+export const MAX_IMPORT_USERS = 1_000_000
+/** What a row costs in PostgreSQL beyond its values: the tuple header and Backenly's own columns. */
+export const ROW_OVERHEAD_BYTES = 64
 
 const MB = 1024 * 1024
 
@@ -87,4 +96,146 @@ export function fileRefusal(bytes: number, limits: ImportLimits | undefined): st
     return `The files come to about ${formatBytes(bytes)}, and the organization has ${formatBytes(max)} left of the ${formatBytes(plan)} of file storage on ${limits?.planName ?? 'your plan'}. Leave files out, or upgrade the organization, then import.`
   }
   return `The files come to about ${formatBytes(bytes)}, and ${limits?.planName ?? 'your plan'} includes ${formatBytes(max)} of file storage. Leave files out, or upgrade the organization, then import.`
+}
+
+const count = (n: number) => n.toLocaleString('en-US')
+
+/** Why a source with this many tables (or more than the limit, when unknown) cannot move in one import. */
+export function tableCountRefusal(tables: number | null): string {
+  const what = tables === null ? `more than ${count(MAX_IMPORT_TABLES)}` : count(tables)
+  return `This source has ${what} tables; one import moves up to ${count(MAX_IMPORT_TABLES)}. Contact us to move a larger database.`
+}
+
+/** Why a source with this many users (or more than the limit, when unknown) cannot move in one import. */
+export function userCountRefusal(users: number | null): string {
+  const what = users === null ? `more than ${count(MAX_IMPORT_USERS)}` : count(users)
+  return `This source has ${what} users; one import moves up to ${count(MAX_IMPORT_USERS)}. Contact us to move more.`
+}
+
+/** Why the import stopped at the room it had, in the pre-checks' words. */
+export function roomRefusal(written: number, limits: ImportLimits | undefined): string {
+  const max = limits?.maxRowBytes ?? MAX_IMPORT_ROW_BYTES
+  const stopped = `Backenly stopped the import after ${formatBytes(written)} of rows`
+  if (max < MAX_IMPORT_ROW_BYTES) {
+    const plan = limits?.planRowBytes
+    if (plan && plan > max) {
+      return `${stopped}: the organization has ${formatBytes(max)} left of the ${formatBytes(plan)} of database storage on ${limits?.planName ?? 'your plan'}. Free some space or upgrade the organization, then import again.`
+    }
+    return `${stopped}: ${limits?.planName ?? 'your plan'} includes ${formatBytes(max)} of database storage. Upgrade the organization, then import again.`
+  }
+  return `${stopped}; one import moves up to ${formatBytes(MAX_IMPORT_ROW_BYTES)}. Contact us to move a larger database.`
+}
+
+/** Why the import stopped when what it had written could not be measured: nothing more was taken on trust. */
+export function unmeasuredRefusal(limits: ImportLimits | undefined): string {
+  const max = limits?.maxRowBytes ?? MAX_IMPORT_ROW_BYTES
+  const room = max < MAX_IMPORT_ROW_BYTES ? `the ${formatBytes(max)} the organization has left` : `the ${formatBytes(MAX_IMPORT_ROW_BYTES)} one import moves`
+  return `Backenly stopped the import because it could not measure the rows already written, and without that it cannot keep within ${room}. Start it again in a few minutes.`
+}
+
+/**
+ * At most how many times its count (pg-engine.ts rowCost) a value can take in
+ * PostgreSQL. A count is the value's text, but at least 8 bytes, plus 8; what
+ * is stored can still be larger: text in a script of three-byte characters is
+ * three times its length, an out-of-line value leaves part of a page unused,
+ * and a jsonb array of one-digit numbers, the largest, holds each as 12 bytes
+ * for 2 characters of text, about six times.
+ */
+export const STORED_PER_COUNTED = 8
+/** Relations grow a page at a time: one insert can add a page each to a table, its TOAST table and that table's index. */
+export const PAGE_SLACK_BYTES = 64 * 1024
+
+/**
+ * The room an import's rows have (ImportLimits.maxRowBytes: what is left of
+ * the plan's database storage, at most 5 GB), kept as rows are written.
+ *
+ * The pre-checks compare the size a source REPORTS, which can be wrong: a
+ * partitioned table, an estimate from a sample, a server that answers 0. This
+ * keeps to what arrives. Only PostgreSQL knows what rows take once stored, so
+ * the import's tables are measured the way the plan's usage is
+ * (pg_total_relation_size: rows, TOAST and indexes), and between measurements
+ * a row is let in only while it would fit even at STORED_PER_COUNTED times its
+ * count. Far from the room that costs a measurement now and then; near it, a
+ * batch goes in a few rows at a time with a measurement between, until not
+ * one more row fits. Then the import stops, saying the room, with the tables
+ * holding no more than it. A measurement that fails takes nothing on trust:
+ * the worst case of what was counted since the last one stands, and if that
+ * leaves no room the import stops saying it could not measure.
+ */
+export class RowRoom {
+  /** What the import's tables held when last measured. */
+  private held = 0
+  /** Assumed beyond `held` because a measurement failed: the worst case of what was counted. */
+  private assumed = 0
+  /** Counted since the last measurement. */
+  private since = 0
+
+  constructor(
+    readonly limits: ImportLimits | undefined,
+    /** Bytes the import's tables hold now, as pg_total_relation_size measures them. */
+    private readonly measure: () => Promise<number>,
+  ) {}
+
+  get room(): number {
+    return this.limits?.maxRowBytes ?? MAX_IMPORT_ROW_BYTES
+  }
+
+  /**
+   * How many of these rows, given their counts in order, may be written now
+   * (at least one); throws ImportInputError with the room's refusal when not
+   * even the first fits. The caller writes that many and asks for the rest.
+   */
+  async fit(counts: readonly number[]): Promise<number> {
+    let n = this.fitting(counts)
+    if (n < counts.length) {
+      try {
+        this.held = Math.max(0, Number(await this.measure()) || 0)
+        this.assumed = 0
+      } catch {
+        // No evidence of room: the worst case of what was counted stands.
+        this.assumed += STORED_PER_COUNTED * this.since
+      }
+      this.since = 0
+      n = this.fitting(counts)
+    }
+    if (n === 0) {
+      throw new ImportInputError(this.assumed > 0 ? unmeasuredRefusal(this.limits) : roomRefusal(this.held, this.limits))
+    }
+    for (let i = 0; i < n; i++) this.since += Math.max(0, counts[i])
+    return n
+  }
+
+  private fitting(counts: readonly number[]): number {
+    const free = this.room - PAGE_SLACK_BYTES - this.held - this.assumed - STORED_PER_COUNTED * this.since
+    let taken = 0
+    let n = 0
+    for (const c of counts) {
+      taken += STORED_PER_COUNTED * Math.max(0, c)
+      if (taken > free) break
+      n++
+    }
+    return n
+  }
+}
+
+/**
+ * Write `rows` through `write`, as many at a time as `room` lets in, until all
+ * are written or the room refuses (its ImportInputError). Returns what `write`
+ * said it wrote. The rows' type comes from `rows` alone, so a `count` that
+ * reads rows as readonly does not make them readonly for `write`.
+ */
+export async function writeWithinRoom<T>(
+  room: RowRoom,
+  rows: readonly T[],
+  count: (row: NoInfer<T>) => number,
+  write: (rows: NoInfer<T>[]) => Promise<number>,
+): Promise<number> {
+  const counts = rows.map(count)
+  let written = 0
+  for (let i = 0; i < rows.length; ) {
+    const n = await room.fit(counts.slice(i))
+    written += await write(rows.slice(i, i + n))
+    i += n
+  }
+  return written
 }
