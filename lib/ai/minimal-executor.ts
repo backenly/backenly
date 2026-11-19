@@ -966,7 +966,10 @@ const SAFE_COLUMN_TYPE = new RegExp(
       'NUMERIC(?:\\(\\d{1,4}(?:, ?\\d{1,4})?\\))?', 'DECIMAL(?:\\(\\d{1,4}(?:, ?\\d{1,4})?\\))?', 'MONEY',
       'DATE', 'TIME(?:\\([0-6]\\))?(?: WITH(?:OUT)? TIME ZONE)?', 'TIMETZ(?:\\([0-6]\\))?',
       'TIMESTAMP(?:\\([0-6]\\))?(?: WITH(?:OUT)? TIME ZONE)?', 'TIMESTAMPTZ(?:\\([0-6]\\))?', 'INTERVAL',
-      'UUID', 'JSON', 'JSONB', 'BYTEA', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR', 'VECTOR\\(\\d{1,5}\\)',
+      'UUID', 'JSON', 'JSONB', 'BYTEA', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR', 'TSQUERY', 'XML', 'POINT',
+      'BIT(?:\\(\\d{1,5}\\))?', 'BIT VARYING(?:\\(\\d{1,5}\\))?', 'VARBIT(?:\\(\\d{1,5}\\))?',
+      // Types of the extensions a project may install (lib/services/extension-allowlist.ts).
+      'HSTORE', 'LTREE', 'VECTOR(?:\\(\\d{1,5}\\))?', 'HALFVEC(?:\\(\\d{1,5}\\))?', 'SPARSEVEC(?:\\(\\d{1,6}\\))?',
     ].join('|') +
     ')(?:\\[\\])?$',
 )

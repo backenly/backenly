@@ -32,6 +32,12 @@ describe('column types', () => {
     'JSONB',
     'BYTEA',
     'VECTOR(1536)',
+    'VECTOR',
+    'HALFVEC(768)',
+    'HSTORE',
+    'LTREE',
+    'TSQUERY',
+    'BIT VARYING(8)',
   ])('accepts %s', (type) => {
     expect(isSafeColumnType(type)).toBe(true)
   })
