@@ -347,6 +347,16 @@ export async function register() {
         }
       })
 
+      // The import sandbox (lib/import/sandbox-jobs.ts): close every look and
+      // import whose task stopped reporting or ran past its deadline, stop its
+      // task (again, if a stop did not go through), and forget looks after a
+      // day. Home only: the jobs live in the platform database and their tasks
+      // are launched by the home web task.
+      cron.platform('* * * * *', async () => {
+        const { sweepImportSandbox } = await import('./lib/import/sandbox-jobs')
+        await sweepImportSandbox().catch((err: any) => console.error('[ImportSandbox] Sweep error:', err?.message))
+      })
+
       // Autonomous background health scan once daily — 01:00 UTC
       cron.schedule('0 1 * * *', async () => {
         const { runMonitoredHealthScan } = await import('./lib/ai/background-monitor')

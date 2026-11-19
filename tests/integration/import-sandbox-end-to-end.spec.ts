@@ -26,6 +26,9 @@ jest.mock('@/lib/postgrest/registration', () => {
   }
 })
 
+// The task and the handler speak real Requests and Responses (bodies streamed,
+// gzip, kept-alive answers): the runtime's own classes, not jest.setup.js's stand-ins.
+import '@/tests/helpers/real-web-standard'
 import crypto from 'crypto'
 import { gzipSync } from 'zlib'
 import { Client } from 'pg'

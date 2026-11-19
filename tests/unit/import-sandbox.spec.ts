@@ -33,9 +33,12 @@ describe('where a source is read', () => {
   it('reads the sandbox settings only when every one is there and well formed', () => {
     const cfg = sandboxConfig(SANDBOX_ENV)
     expect(cfg).toMatchObject({ subnets: ['subnet-0a1b2c3d', 'subnet-4e5f6a7b'], securityGroup: 'sg-0123abcd', cpu: '1024', memory: '2048' })
-    for (const missing of Object.keys(SANDBOX_ENV)) {
+    for (const missing of Object.keys(SANDBOX_ENV).filter((k) => k !== 'AWS_REGION')) {
       expect(sandboxConfig({ ...SANDBOX_ENV, [missing]: '' })).toBeNull()
     }
+    // Without AWS_REGION, the region is the one the cluster's ARN names.
+    expect(sandboxConfig({ ...SANDBOX_ENV, AWS_REGION: '' })?.region).toBe('ap-south-1')
+    expect(sandboxConfig({ ...SANDBOX_ENV, AWS_REGION: '', IMPORT_SANDBOX_CLUSTER: 'backenly-staging' })).toBeNull()
     // The task calls back over https only, to an origin, never a path or plain http.
     expect(sandboxConfig({ ...SANDBOX_ENV, IMPORT_SANDBOX_ORIGIN: 'http://staging.backenly.com' })).toBeNull()
     expect(sandboxConfig({ ...SANDBOX_ENV, IMPORT_SANDBOX_ORIGIN: 'https://staging.backenly.com/api' })).toBeNull()
@@ -131,6 +134,24 @@ describe('the arguments a sandbox task may send', () => {
         usersTable: null,
       }),
     ).toBe(false)
+  })
+
+  it("takes a column's type only from the planner's closed list, and an exact type only in a declared spelling", () => {
+    const withColumn = (column: Record<string, unknown>) => ({ tables: [{ name: 'posts', columns: [column] }], title: 'Move in', usersTable: null })
+    expect(opArgsAccepted('pg.createTables', withColumn({ name: 'price', type: 'TEXT', sqlType: 'numeric(19,2)' }))).toBe(true)
+    expect(opArgsAccepted('pg.createTables', withColumn({ name: 'tags', type: 'TEXT', sqlType: 'text[]' }))).toBe(true)
+    for (const type of ['INTEGER', 'TEXT NOT NULL', 'text', 'VARCHAR(10)']) {
+      expect(opArgsAccepted('pg.createTables', withColumn({ name: 'e', type }))).toBe(false)
+    }
+    for (const sqlType of ['TEXT', 'numeric(10,2) not null', 'string']) {
+      expect(opArgsAccepted('pg.createTables', withColumn({ name: 'e', type: 'TEXT', sqlType }))).toBe(false)
+    }
+  })
+
+  it("never fills Backenly's teams tables", () => {
+    for (const table of ['organizations', 'organization_members', 'organization_invitations']) {
+      expect(opArgsAccepted('pg.insertRows', { table, columns: ['id'], rows: [['1']] })).toBe(false)
+    }
   })
 })
 

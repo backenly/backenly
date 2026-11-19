@@ -91,12 +91,12 @@ export interface WorkerPreview {
 /**
  * Size caps for what a task may send, checked by the control plane before
  * parsing. A row batch aims at 8 MB (lib/import/pg-engine.ts BATCH_TARGET_BYTES)
- * and JSON adds quoting, so an op may carry 24 MB once decompressed.
+ * and JSON adds quoting, so an op may carry 16 MB once decompressed.
  */
 export const BODY_LIMITS = {
   json: 1024 * 1024,
-  preview: 4 * 1024 * 1024,
-  op: 24 * 1024 * 1024,
+  preview: 2 * 1024 * 1024,
+  op: 16 * 1024 * 1024,
 } as const
 
 /** Larger JSON bodies are sent gzip-encoded. */

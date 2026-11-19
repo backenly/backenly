@@ -265,8 +265,13 @@ export async function createBuckets(projectId: string, buckets: SupabaseBucket[]
     // from the client under the policies on storage.objects, which are not
     // carried over: so the app keeps working once moved. The owner can make
     // it server_only (lib/storage/upload-access.ts).
-    const id = existing?.id ?? (await storageService.createBucket(b.name, projectId, b.public, 'signed_in')).id
     const maxBytes = Math.min(ceiling, b.fileSizeLimit && b.fileSizeLimit > 0 ? b.fileSizeLimit : ceiling)
+    if (existing) {
+      // A bucket the project had before the import keeps its own rules: the files join it as they are.
+      out.set(b.id, { id: existing.id, maxBytes })
+      continue
+    }
+    const id = (await storageService.createBucket(b.name, projectId, b.public, 'signed_in')).id
     await governedChange(projectId, `Set the rules of bucket ${b.name}`, () =>
       prisma.storageBucket.update({
         where: { id },

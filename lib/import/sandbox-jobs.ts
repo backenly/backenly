@@ -29,7 +29,7 @@ import { randomUUID } from 'crypto'
 import type { BackgroundJob, Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { CloudRegionId } from '@/lib/regions'
-import type { ImportConnection, ImportedFrom, ImportPreview, ImportProgress, ImportSourceId } from './contract'
+import type { ImportConnection, ImportedFrom, ImportPhase, ImportPreview, ImportProgress, ImportSourceId } from './contract'
 import { ImportInputError, type ImportLimits } from './driver'
 import {
   IMPORT_ERRORS,
@@ -129,7 +129,9 @@ const SAID = {
 /** Refuse a new task when the sandbox is full, everywhere or for this organization. */
 export async function assertSandboxRoom(kind: WorkerKind, orgId: string): Promise<void> {
   const type = kind === 'look' ? LOOK_JOB_TYPE : IMPORT_JOB_TYPE
-  const live = { type, status: JOB_STATUS.running, timeoutAt: { gt: new Date() } }
+  // Every job still running counts until it is closed (sweepImportSandbox closes a lapsed one within a minute),
+  // so a task that stops reporting keeps its place, and its organization's, until its task is stopped.
+  const live = { type, status: JOB_STATUS.running }
   const [all, org] = await Promise.all([
     prisma.backgroundJob.count({ where: live }),
     prisma.backgroundJob.count({ where: { ...live, payload: { path: ['orgId'], equals: orgId } } }),
@@ -325,7 +327,7 @@ async function endJob(
   if (!row || row.status !== JOB_STATUS.running) return false
   const payload = { ...(row.payload as Record<string, unknown>) }
   const sandbox = sandboxOf(row)
-  if (sandbox) payload.sandbox = { ...sandbox, sealed: null, tokenHash: null, stage: 'ended' }
+  if (sandbox) payload.sandbox = { ...sandbox, sealed: null, tokenHash: null, stage: 'ended', stopped: !sandbox.taskArn }
   if (end.refusal) payload.refusal = end.refusal
   if (end.progress) payload.progress = end.progress
   if (end.preview) payload.preview = end.preview
@@ -340,8 +342,56 @@ async function endJob(
       ...(end.result ? { result: end.result as unknown as Prisma.InputJsonValue } : {}),
     },
   })
-  if (sandbox?.taskArn) await sandboxLauncher()?.stop(sandbox.taskArn, end.done ? 'import finished' : 'import ended')
+  if (count === 1 && sandbox?.taskArn) await stopTask(jobId, sandbox.taskArn, end.done ? 'import finished' : 'import ended')
   return count === 1
+}
+
+/** Stop a job's task and say so in its row; a stop that failed is tried again by the sweeper. */
+async function stopTask(jobId: string, taskArn: string, reason: string): Promise<void> {
+  const stopped = (await sandboxLauncher()?.stop(taskArn, reason)) === true
+  if (stopped) {
+    await prisma.$executeRaw`UPDATE background_jobs SET payload = jsonb_set(payload, '{sandbox,stopped}', 'true'::jsonb, true) WHERE id = ${jobId}`.catch(() => {})
+  }
+}
+
+/**
+ * Every minute, on the home region's scheduler leader (instrumentation.ts):
+ *   - close every look and import whose task stopped reporting or ran past its
+ *     deadline (closeLapsed), which stops its task;
+ *   - stop again any task of a job that ended in the last three hours whose
+ *     stop did not go through, so no task outlives its job for long;
+ *   - forget looks after a day: a preview names the source's tables.
+ */
+export async function sweepImportSandbox(now = new Date()): Promise<{ closed: number; stopped: number; forgotten: number }> {
+  let closed = 0
+  let stopped = 0
+  const running = await prisma.backgroundJob.findMany({
+    where: { type: { in: [IMPORT_JOB_TYPE, LOOK_JOB_TYPE] }, status: JOB_STATUS.running },
+    take: 500,
+  })
+  for (const row of running) {
+    if (!sandboxOf(row) || !lapsed(row, now)) continue
+    await closeLapsed(row).catch((err) => console.warn('[Import] could not close a lapsed job:', redactedMessage(err, [], 200)))
+    closed++
+  }
+  const ended = await prisma.backgroundJob.findMany({
+    where: {
+      type: { in: [IMPORT_JOB_TYPE, LOOK_JOB_TYPE] },
+      status: { in: [JOB_STATUS.done, JOB_STATUS.broken] },
+      completedAt: { gte: new Date(now.getTime() - 3 * 3_600_000) },
+    },
+    take: 500,
+  })
+  for (const row of ended) {
+    const s = sandboxOf(row) as (SandboxState & { stopped?: boolean }) | null
+    if (!s?.taskArn || s.stopped === true) continue
+    await stopTask(row.id, s.taskArn, 'import ended')
+    stopped++
+  }
+  const { count: forgotten } = await prisma.backgroundJob.deleteMany({
+    where: { type: LOOK_JOB_TYPE, status: { not: JOB_STATUS.running }, createdAt: { lt: new Date(now.getTime() - 24 * 3_600_000) } },
+  })
+  return { closed, stopped, forgotten }
 }
 
 /** Close a row whose task stopped reporting or ran past its deadline; the task is stopped too. */
@@ -394,7 +444,9 @@ export async function cancelSandboxJob(row: BackgroundJob): Promise<void> {
 
 /** Move one key of the sandbox state, only while the row runs (and, if given, only at `stage`). */
 export async function setSandbox(jobId: string, path: string[], value: unknown, whenStage?: SandboxStage): Promise<boolean> {
-  const full = ['sandbox', ...path]
+  // The path is this module's own keys, never input; checked anyway, and sent as one text[] literal.
+  if (!path.every((k) => /^[a-zA-Z]+$/.test(k))) throw new Error(`Not a sandbox key: ${path.join('.')}`)
+  const full = `{sandbox,${path.join(',')}}`
   const n = whenStage
     ? await prisma.$executeRaw`UPDATE background_jobs SET payload = jsonb_set(payload, ${full}::text[], ${JSON.stringify(value)}::jsonb, true), "updatedAt" = now()
          WHERE id = ${jobId} AND status = ${JOB_STATUS.running} AND payload->'sandbox'->>'stage' = ${whenStage}`
@@ -491,6 +543,8 @@ export async function workerChecked(row: BackgroundJob): Promise<string | null> 
   const p = row.payload as unknown as ImportPayload
   if (!(await setSandbox(row.id, ['stage'], 'creating', 'checking'))) return null
   await extendLease(row.id)
+  // Creating a project can take longer than the lease: keep it alive meanwhile.
+  const heartbeat = setInterval(() => void extendLease(row.id).catch(() => {}), 15_000)
   let project: { id: string; name: string; region?: string | null }
   try {
     const { getProjectLifecycle } = await import('@/lib/edition')
@@ -511,6 +565,8 @@ export async function workerChecked(row: BackgroundJob): Promise<string | null> 
     console.error(`[Import] job ${row.id}: the project was not created:`, redactedMessage(err, [], 300))
     await endJob(row.id, { refusal, error: IMPORT_ERRORS.failed })
     throw new ImportRefusedError(409, 'The project was not created.', 'IMPORT_ENDED')
+  } finally {
+    clearInterval(heartbeat)
   }
   const now = new Date()
   const progress: ImportProgress = {
@@ -522,19 +578,30 @@ export async function workerChecked(row: BackgroundJob): Promise<string | null> 
     phase: 'tables',
     startedAt: now.toISOString(),
   }
-  await prisma.$executeRaw`UPDATE background_jobs
+  const recorded = await prisma.$executeRaw`UPDATE background_jobs
        SET "projectId" = ${project.id},
            payload = jsonb_set(jsonb_set(payload, '{progress}', ${JSON.stringify(progress)}::jsonb, true), '{sandbox,stage}', '"running"'::jsonb, true),
            "timeoutAt" = ${new Date(now.getTime() + IMPORT_LIMITS.staleMs)}, "updatedAt" = now()
      WHERE id = ${row.id} AND status = ${JOB_STATUS.running}`
+  if (recorded !== 1) {
+    // The job ended while the project was made (canceled, or closed): the empty project stays, the person's to delete.
+    console.warn(`[Import] job ${row.id} ended while its project ${project.id} was created; nothing moved into it`)
+    throw new ImportRefusedError(409, 'The import ended before it began.', 'IMPORT_ENDED')
+  }
   await auditImport(project.id, p.userId, 'IMPORT_STARTED', { jobId: row.id, source: p.source, sentence: `Started moving in from ${sourceName(p.source)}` })
   const recordProduct = await import('@/lib/platform-signals').then((m) => m.recordProductEvent).catch(() => null)
   recordProduct?.({ type: 'project_created', userId: p.userId, projectId: project.id, metadata: { name: project.name, importedFrom: p.source } })
   return project.id
 }
 
+/** The phases an import moves through (lib/import/contract.ts ImportPhase). */
+const PHASES: readonly ImportPhase[] = ['creating_project', 'tables', 'rows', 'users', 'files', 'verifying', 'finished']
+
 /** The longest progress a task may keep: the import's table cap, each name a PostgreSQL name. */
 const MAX_PROGRESS_TABLES = 1_000
+
+/** When this process last wrote each job's progress (workerProgress keeps to one write a second per job). */
+const progressWritten = new Map<string, number>()
 
 /** Merge a task's progress; answers whether a person canceled the import. */
 export async function workerProgress(row: BackgroundJob, patch: ProgressPatch): Promise<{ cancel: boolean }> {
@@ -547,9 +614,20 @@ export async function workerProgress(row: BackgroundJob, patch: ProgressPatch): 
   if (Array.isArray(clean.tables)) {
     clean.tables = clean.tables.filter((t) => t && typeof t.name === 'string' && t.name.length <= 63).slice(0, MAX_PROGRESS_TABLES)
   } else delete (clean as any).tables
-  if (Array.isArray((clean as any).warnings)) {
-    const secrets = await secretsOfJob(row)
-    ;(clean as any).warnings = ((clean as any).warnings as unknown[]).slice(0, 50).map((w) => redactedMessage(w, secrets, 600))
+  // Warnings arrive once, with the finish (workerFinish); a phase is one of the import's own.
+  delete (clean as any).warnings
+  if (clean.phase !== undefined && !PHASES.includes(clean.phase as ImportPhase)) delete (clean as any).phase
+  const cancel = row.error === IMPORT_ERRORS.cancelRequested
+  // At most one write a second per job in this process, whatever the task sends: the job's row is
+  // rewritten whole each time. A call in between still keeps the lease.
+  const now = Date.now()
+  if (now - (progressWritten.get(row.id) ?? 0) < 900) {
+    await extendLease(row.id)
+    return { cancel }
+  }
+  progressWritten.set(row.id, now)
+  if (progressWritten.size > 500) {
+    for (const [id, at] of progressWritten) if (now - at > 3_600_000) progressWritten.delete(id)
   }
   let progress = mergeProgress(p.progress, clean)
   if (progress.tables.length > MAX_PROGRESS_TABLES) progress = { ...progress, tables: progress.tables.slice(0, MAX_PROGRESS_TABLES) }
@@ -557,14 +635,14 @@ export async function workerProgress(row: BackgroundJob, patch: ProgressPatch): 
        SET payload = jsonb_set(payload, '{progress}', ${JSON.stringify(progress)}::jsonb, true),
            "timeoutAt" = ${new Date(Date.now() + IMPORT_LIMITS.staleMs)}, "updatedAt" = now()
      WHERE id = ${row.id} AND status = ${JOB_STATUS.running}`
-  return { cancel: row.error === IMPORT_ERRORS.cancelRequested }
+  return { cancel }
 }
 
 export async function workerFinish(row: BackgroundJob, raw: { importedFrom: ImportedFrom; warnings: string[] }): Promise<void> {
   const p = row.payload as unknown as ImportPayload
   const projectId = row.projectId!
   const secrets = await secretsOfJob(row)
-  const importedFrom = normalizeImportedFrom(raw.importedFrom, p.source)
+  const importedFrom = { ...normalizeImportedFrom(raw.importedFrom, p.source), source: p.source, at: new Date().toISOString() }
   const warnings = (Array.isArray(raw.warnings) ? raw.warnings : []).slice(0, 50).map((w) => redactedMessage(w, secrets, 600))
   const finished = mergeProgress(p.progress, { phase: 'finished', warnings, rulesPending: importedFrom.rulesPending })
   const progress: ImportProgress = { ...finished, status: 'done', finishedAt: new Date().toISOString(), error: null }

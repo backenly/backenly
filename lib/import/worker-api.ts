@@ -22,8 +22,11 @@
  *     process.
  */
 
-import { gunzipSync } from 'zlib'
+import { promisify } from 'util'
+import { gunzip } from 'zlib'
 import { NextResponse } from 'next/server'
+
+const gunzipAsync = promisify(gunzip)
 import type { BackgroundJob } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
@@ -116,8 +119,9 @@ async function readJson(request: Request, max: number): Promise<unknown> {
   let text: Buffer = raw
   if ((request.headers.get('content-encoding') ?? '').toLowerCase() === 'gzip') {
     try {
-      // Bounded: a small body that inflates past the cap is refused, not inflated.
-      text = gunzipSync(raw, { maxOutputLength: max })
+      // Bounded: a small body that inflates past the cap is refused, not inflated. Off the
+      // event loop: a large body inflates in libuv's pool, not in the request's turn.
+      text = await gunzipAsync(raw, { maxOutputLength: max })
     } catch {
       throw new Refused(413, 'The body is too large or not gzip.')
     }
@@ -136,24 +140,73 @@ async function readJson(request: Request, max: number): Promise<unknown> {
  * idle timeout never ends the request, then the JSON. The status is then
  * always 200; `ok: false` and `status` in the body say a refusal.
  */
-function keepAlive(work: () => Promise<{ status: number; body: Record<string, unknown> }>): Response {
+function keepAlive(work: () => Promise<{ status: number; body: Record<string, unknown> }>, done: () => void = () => {}): Response {
   const encoder = new TextEncoder()
+  let timer: ReturnType<typeof setInterval> | undefined
+  let open = true
+  // A client that went away closes the stream; writing to it then throws, and nothing more is sent.
+  const send = (controller: ReadableStreamDefaultController<Uint8Array>, text: string) => {
+    if (!open) return
+    try {
+      controller.enqueue(encoder.encode(text))
+    } catch {
+      open = false
+    }
+  }
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const timer = setInterval(() => controller.enqueue(encoder.encode(' ')), 15_000)
+      timer = setInterval(() => send(controller, ' '), 15_000)
       try {
         const r = await work()
-        controller.enqueue(encoder.encode(JSON.stringify(r.status < 400 ? { ok: true, ...r.body } : { ok: false, status: r.status, ...r.body })))
+        send(controller, JSON.stringify(r.status < 400 ? { ok: true, ...r.body } : { ok: false, status: r.status, ...r.body }))
       } catch {
-        controller.enqueue(encoder.encode(JSON.stringify({ ok: false, status: 500, error: 'Something went wrong on our side.' })))
+        send(controller, JSON.stringify({ ok: false, status: 500, error: 'Something went wrong on our side.' }))
       } finally {
         clearInterval(timer)
-        controller.close()
+        done()
+        if (open) {
+          open = false
+          try {
+            controller.close()
+          } catch {
+            // Already closed by a client that went away.
+          }
+        }
       }
+    },
+    cancel() {
+      open = false
+      clearInterval(timer)
     },
   })
   return new Response(stream, { status: 200, headers: { 'Content-Type': 'application/json', ...NO_STORE } })
 }
+
+// ── Room in this process ──────────────────────────────────────────────────────
+
+/**
+ * At most this many task ops and files in this process at once, each holding a
+ * body of up to BODY_LIMITS.op (or a file) while it runs: what all the imports
+ * together can make one web process hold. One import sends one at a time (its
+ * write lease); a task that sends more is told to wait (IMPORT_BUSY), before
+ * any of its body is read.
+ */
+const TASK_BODY_SLOTS = 4
+let bodiesInFlight = 0
+
+function takeBodySlot(): (() => void) | null {
+  if (bodiesInFlight >= TASK_BODY_SLOTS) return null
+  bodiesInFlight++
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    bodiesInFlight--
+  }
+}
+
+const busy = () =>
+  answer(503, { error: 'Backenly is busy with other imports; send this again in a moment.', code: 'IMPORT_BUSY' })
 
 // ── The job ───────────────────────────────────────────────────────────────────
 
@@ -181,15 +234,26 @@ async function provenJob(request: Request): Promise<{ row: BackgroundJob } | { r
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/
 const ident = z.string().regex(IDENT)
-/** A table the import may fill: never Backenly's own users table, nor one of its underscore tables. */
-const tableName = ident.refine((n) => n.toLowerCase() !== 'users' && !n.startsWith('_'), 'reserved table')
+/**
+ * The exact types a planned column may declare (lib/ai/minimal-executor.ts
+ * DECLARED_SQL_TYPE, which the executor checks again): the spellings the
+ * planners emit, and their arrays.
+ */
+const DECLARED_SQL_TYPE =
+  /^(?:text|varchar(?:\(\d{1,5}\))?|char(?:\(\d{1,4}\))?|smallint|integer|bigint|boolean|timestamp(?:\([0-6]\))?|timestamptz(?:\([0-6]\))?|date|time(?:\([0-6]\))?|uuid|json|jsonb|numeric(?:\(\d{1,4}(?:,\d{1,4})?\))?|real|double precision|money)(?:\[\])?$/
+/** Backenly's own tables in a project: its users table and the teams tables (lib/services/rls-ownership.ts). */
+const RESERVED_TABLES = new Set(['users', 'organizations', 'organization_members', 'organization_invitations'])
+/** A table the import may fill: never one of Backenly's own, nor one of its underscore tables. */
+const tableName = ident.refine((n) => !RESERVED_TABLES.has(n.toLowerCase()) && !n.startsWith('_'), 'reserved table')
 const declaredFk = z.unknown().refine((v) => isDeclaredForeignKey(v), 'not a declared foreign key')
 
 const pgColumn = z
   .object({
     name: ident,
-    type: z.string().max(40).regex(/^[A-Za-z][A-Za-z0-9 ()]*$/),
-    sqlType: z.string().max(60).optional(),
+    // The planner's own words for a type with no exact spelling (lib/import/pg-plan.ts); no other value is taken.
+    type: z.enum(['TEXT', 'UUID', 'BYTEA', 'INTERVAL', 'TIMETZ']),
+    // An exact type, in the spellings the executor accepts as declared (minimal-executor.ts DECLARED_SQL_TYPE).
+    sqlType: z.string().max(60).regex(DECLARED_SQL_TYPE).optional(),
     notNull: z.boolean().optional(),
     unique: z.boolean().optional(),
     default: z.string().max(500).optional(),
@@ -299,21 +363,6 @@ export function opArgsAccepted(op: DestinationOp, args: unknown): boolean {
   return OP_ARGS[op]?.safeParse(args).success ?? false
 }
 
-/** Ops that change the project: one at a time per job, each measured against the room where it writes rows. */
-const WRITES = new Set<DestinationOp>([
-  'pg.createTables',
-  'pg.insertRows',
-  'pg.insertUsers',
-  'pg.finishSchema',
-  'pg.recordRules',
-  'fb.createTables',
-  'fb.addExtraColumn',
-  'fb.insertRows',
-  'fb.prepareUsers',
-  'fb.insertUsers',
-  'fb.prepareFilesBucket',
-])
-
 const ONCE: Partial<Record<DestinationOp, OnceStep>> = {
   'pg.createTables': 'tables',
   'pg.finishSchema': 'schema',
@@ -350,24 +399,52 @@ async function assertRoom(projectId: string, payload: ImportPayload, cost: numbe
 }
 
 /**
- * Run `fn` holding the job's write lease: one write at a time per job,
- * whichever web task serves it. A lease in the job's row rather than a lock
- * held on a connection, so a slow write pins no connection of the platform's
- * pool; a lease left by a task that died lapses on its own.
+ * Take the job's lease: one op or file at a time per job, whichever web task
+ * serves it, from before its body is read until its answer is sent. A lease in
+ * the job's row rather than a lock held on a connection, so a slow op pins no
+ * connection of the platform's pool; one left by a web task that died lapses
+ * on its own.
  */
-async function oneAtATime<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+async function takeJobLease(jobId: string): Promise<boolean> {
   const until = new Date(Date.now() + 15 * 60_000).toISOString()
   const took = await prisma.$executeRaw`UPDATE background_jobs
        SET payload = jsonb_set(payload, '{sandbox,writing}', to_jsonb(${until}::text), true), "updatedAt" = now()
      WHERE id = ${jobId} AND status = ${JOB_STATUS.running}
        AND (payload->'sandbox'->>'writing' IS NULL OR (payload->'sandbox'->>'writing')::timestamptz < now())`
-  if (took !== 1) throw new Refused(409, 'Another write of this import is still running.', 'IMPORT_BUSY')
-  try {
-    return await fn()
-  } finally {
-    await prisma.$executeRaw`UPDATE background_jobs SET payload = payload #- '{sandbox,writing}', "updatedAt" = now() WHERE id = ${jobId}`.catch(() => {})
-  }
+  return took === 1
 }
+
+async function releaseJobLease(jobId: string): Promise<void> {
+  await prisma.$executeRaw`UPDATE background_jobs SET payload = payload #- '{sandbox,writing}', "updatedAt" = now() WHERE id = ${jobId}`.catch(() => {})
+}
+
+/**
+ * What an access rule does, in Backenly's words, from its action alone. The
+ * person approving reads this, so it never comes from the task: a source's own
+ * description of a rule could say anything.
+ */
+function ruleSummary(action: { template: string; userIdColumn?: string } | null): string {
+  if (!action) return 'Not translated; the table stays closed to all but the server key'
+  if (action.template === 'own_rows') return `Signed-in users read and change only their own rows (matched on ${action.userIdColumn ?? 'user_id'})`
+  if (action.template === 'public_read') return 'Anyone can read the rows; only the server key changes them'
+  return 'A custom rule translated from the source: read its expressions before approving'
+}
+
+/** Ordinary tables in the project's own schema now. */
+async function tableCount(projectId: string): Promise<number> {
+  const { projectPool } = await import('@/lib/data-plane/regional')
+  const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+  const pool = await projectPool(projectId, 'import', { max: 4 })
+  const r = await pool.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relkind = 'r'`,
+    [workspaceSchemaName(projectId)],
+  )
+  return Number(r.rows[0]?.n ?? 0)
+}
+
+/** Tables a new project holds before an import adds any (users, the teams tables and the like), with room to spare. */
+const TABLES_BESIDES_THE_IMPORT = 50
 
 async function runOp(row: BackgroundJob, op: DestinationOp, args: any): Promise<Record<string, unknown>> {
   const payload = row.payload as unknown as ImportPayload
@@ -413,10 +490,23 @@ async function runOp(row: BackgroundJob, op: DestinationOp, args: any): Promise<
       const r = await pg().finishSchema(args)
       return { warnings: r.warnings, targets: r.targets ? Object.fromEntries(r.targets) : null }
     }
-    case 'pg.recordRules':
-      return { pending: await pg().recordRules(args.proposals, { sourceLabel: args.sourceLabel }) }
+    case 'pg.recordRules': {
+      // Only rules for tables this import made, each described by what its action does.
+      const proposals = []
+      for (const p of args.proposals as Array<Record<string, any>>) {
+        if (!(await tableColumns(projectId, p.table))) continue
+        proposals.push({ ...p, summary: ruleSummary(p.action) })
+      }
+      const label = String(args.sourceLabel).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 100)
+      return { pending: await pg().recordRules(proposals as any, { sourceLabel: label }) }
+    }
 
     case 'fb.createTables':
+      // A Firestore import plans tables as collections turn up, so each call is
+      // counted against the import's table cap by what the project now holds.
+      if ((await tableCount(projectId)) + (args.plans as unknown[]).length > MAX_IMPORT_TABLES + TABLES_BESIDES_THE_IMPORT) {
+        throw new Refused(409, `One import moves up to ${MAX_IMPORT_TABLES.toLocaleString('en-US')} tables.`)
+      }
       return { unindexed: await (await fb()).createTables(args.plans, args.title) }
     case 'fb.addExtraColumn':
       if (!(await tableColumns(projectId, args.table))) throw new Refused(404, `There is no table ${args.table}.`)
@@ -479,7 +569,7 @@ async function handleOp(row: BackgroundJob, body: any): Promise<{ status: number
         runOp(row, op, parsed.data),
       )
     }
-    const result = WRITES.has(op) ? await oneAtATime(row.id, run) : await run()
+    const result = await run()
     await extendLease(row.id)
     return { status: 200, body: { result } }
   } catch (err) {
@@ -501,7 +591,10 @@ async function handleFile(row: BackgroundJob, request: Request): Promise<NextRes
   const mimeType = (request.headers.get(HEADER_FILE_TYPE) ?? '').slice(0, 200) || undefined
   const name = /^[A-Za-z0-9_-]{1,2800}$/.test(nameB64) ? Buffer.from(nameB64, 'base64url').toString('utf8') : ''
   if (!bucketId || bucketId.length > 64 || !name || name.length > 1024 || name.includes('\u0000')) return answer(400, { error: 'The file was not named.' })
-  const buffer = await readBody(request, MAX_BUFFERED_UPLOAD_FILE_BYTES)
+  // Its length first: a file is read only up to what it said it was, and never past the cap.
+  const declared = Number(request.headers.get('content-length') ?? 'NaN')
+  if (!Number.isFinite(declared) || declared < 0) return answer(411, { error: 'Send the file with its length.' })
+  const buffer = await readBody(request, Math.min(declared, MAX_BUFFERED_UPLOAD_FILE_BYTES))
   const { uploadImportFile } = await import('./drivers/firebase-destination')
   const outcome = await uploadImportFile({ projectId: row.projectId, userId: payload.userId }, bucketId, { name, buffer, mimeType: mimeType ?? null })
   await extendLease(row.id)
@@ -558,11 +651,45 @@ export async function handleWorkerCall(action: string, request: Request): Promis
         return answer(200, await workerProgress(row, body?.patch && typeof body.patch === 'object' ? body.patch : {}))
       }
       case 'op': {
-        const body = await readJson(request, BODY_LIMITS.op)
-        return keepAlive(() => handleOp(row, body))
+        if (s.kind !== 'import' || s.stage !== 'running' || !row.projectId) {
+          return answer(409, { error: 'This job has no project to write.', code: 'IMPORT_NOT_RUNNING' })
+        }
+        const release = takeBodySlot()
+        if (!release) return busy()
+        if (!(await takeJobLease(row.id))) {
+          release()
+          return busy()
+        }
+        let body: unknown
+        try {
+          body = await readJson(request, BODY_LIMITS.op)
+        } catch (err) {
+          release()
+          await releaseJobLease(row.id)
+          throw err
+        }
+        return keepAlive(
+          () => handleOp(row, body),
+          () => {
+            release()
+            void releaseJobLease(row.id)
+          },
+        )
       }
-      case 'file':
-        return await handleFile(row, request)
+      case 'file': {
+        const release = takeBodySlot()
+        if (!release) return busy()
+        if (!(await takeJobLease(row.id))) {
+          release()
+          return busy()
+        }
+        try {
+          return await handleFile(row, request)
+        } finally {
+          release()
+          await releaseJobLease(row.id)
+        }
+      }
       case 'finish': {
         if (s.kind !== 'import' || s.stage !== 'running' || !row.projectId) return ended()
         const body = (await readJson(request, BODY_LIMITS.json)) as any

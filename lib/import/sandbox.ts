@@ -61,7 +61,8 @@ export function sandboxConfig(env: Env = process.env): SandboxConfig | null {
     executionRoleArn: v('IMPORT_SANDBOX_EXECUTION_ROLE_ARN'),
     logGroup: v('IMPORT_SANDBOX_LOG_GROUP'),
     origin: v('IMPORT_SANDBOX_ORIGIN'),
-    region: v('AWS_REGION') || v('AWS_DEFAULT_REGION'),
+    // The task's own region, else the one the cluster's ARN names (arn:aws:ecs:<region>:<account>:cluster/<name>).
+    region: v('AWS_REGION') || v('AWS_DEFAULT_REGION') || (/^arn:aws[a-z-]*:ecs:([a-z0-9-]+):\d{12}:cluster\//.exec(v('IMPORT_SANDBOX_CLUSTER'))?.[1] ?? ''),
     cpu: v('IMPORT_SANDBOX_CPU') || '1024',
     memory: v('IMPORT_SANDBOX_MEMORY') || '2048',
   }
@@ -129,8 +130,8 @@ export interface LaunchInput {
 export interface SandboxLauncher {
   /** Start the job's task; its ARN, when it has one. Throws when no task could be started. */
   launch(input: LaunchInput): Promise<{ taskArn: string | null }>
-  /** Stop the job's task, if it still runs. Never throws. */
-  stop(taskArn: string, reason: string): Promise<void>
+  /** Stop the job's task, if it still runs. Never throws; true when ECS took the stop. */
+  stop(taskArn: string, reason: string): Promise<boolean>
 }
 
 let testLauncher: SandboxLauncher | null = null
@@ -186,8 +187,17 @@ function sameDefinition(td: any, want: OwnImage, cfg: SandboxConfig): boolean {
   const c = td?.containerDefinitions?.[0]
   return (
     !!c &&
+    td.containerDefinitions.length === 1 &&
     td.status === 'ACTIVE' &&
     !td.taskRoleArn &&
+    td.networkMode === 'awsvpc' &&
+    !c.secrets?.length &&
+    c.user === 'node' &&
+    c.readonlyRootFilesystem === true &&
+    JSON.stringify(c.entryPoint ?? []) === JSON.stringify(['node']) &&
+    JSON.stringify((c.environment ?? []).map((e: any) => e.name).sort()) === JSON.stringify(['NODE_ENV', 'NODE_OPTIONS']) &&
+    JSON.stringify(c.linuxParameters?.capabilities?.drop ?? []) === JSON.stringify(['ALL']) &&
+    !c.linuxParameters?.capabilities?.add?.length &&
     td.executionRoleArn === cfg.executionRoleArn &&
     String(td.cpu) === cfg.cpu &&
     String(td.memory) === cfg.memory &&
@@ -300,8 +310,10 @@ export function ecsLauncher(cfg: SandboxConfig): SandboxLauncher {
       try {
         const { StopTaskCommand } = await import('@aws-sdk/client-ecs')
         await (await client()).send(new StopTaskCommand({ cluster: cfg.cluster, task: taskArn, reason: reason.slice(0, 255) }))
+        return true
       } catch (err) {
         console.warn('[Import] could not stop a sandbox task:', (err as Error)?.name ?? 'error')
+        return false
       }
     },
   }

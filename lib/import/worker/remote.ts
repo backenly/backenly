@@ -35,6 +35,8 @@ export class ControlPlaneError extends Error {
 
 /** Calls that change nothing, or that the control plane applies only once, and so may be sent again. */
 const RETRIED_ACTIONS = new Set<WorkerAction>(['spec', 'checked', 'next', 'progress'])
+/** The control plane's word for "send it again shortly": it refused before reading anything (worker-api.ts). */
+const BUSY = 'IMPORT_BUSY'
 const RETRIED_OPS = new Set<DestinationOp>(['pg.measure', 'pg.countRows', 'fb.countRows', 'fb.measureRows', 'fb.countImportedUsers'])
 
 export interface ControlPlaneOptions {
@@ -61,6 +63,9 @@ export class ControlPlane {
       authorization: `Bearer ${this.opts.token}`,
       [HEADER_JOB]: this.opts.jobId,
       ...(this.opts.taskArn ? { [HEADER_TASK]: this.opts.taskArn } : {}),
+      // Uncompressed answers: a long op's keep-alive spaces (worker-api.ts) must reach the load balancer as they
+      // are written, which a compressor holding them back would stop, ending the request at its idle timeout.
+      'accept-encoding': 'identity',
       ...extra,
     }
   }
@@ -69,38 +74,64 @@ export class ControlPlane {
   async call<T = Record<string, unknown>>(action: WorkerAction, body: unknown = {}, opts: { timeoutMs?: number; retry?: boolean } = {}): Promise<T> {
     const payload = gzipSync(Buffer.from(JSON.stringify(body ?? {})))
     const attempts = (opts.retry ?? RETRIED_ACTIONS.has(action)) ? 4 : 1
-    let lastError: unknown
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 1_000 * 2 ** (attempt - 1)))
+    return this.whenNotBusy(async () => {
+      let lastError: unknown
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 1_000 * 2 ** (attempt - 1)))
+        try {
+          return await this.send<T>(action, payload, { 'content-type': 'application/json', 'content-encoding': 'gzip' }, opts.timeoutMs ?? 60_000)
+        } catch (err) {
+          lastError = err
+          // Only a call that never reached a decision is sent again (busy has its own wait, below).
+          if (err instanceof ControlPlaneError && (err.code === BUSY || (err.status > 0 && err.status < 500))) throw err
+        }
+      }
+      throw lastError
+    })
+  }
+
+  /**
+   * Send again while the control plane answers IMPORT_BUSY: it says so before
+   * reading anything (worker-api.ts), so nothing happened and sending again is safe.
+   */
+  private async whenNotBusy<T>(send: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
       try {
-        return await this.send<T>(action, payload, { 'content-type': 'application/json', 'content-encoding': 'gzip' }, opts.timeoutMs ?? 60_000)
+        return await send()
       } catch (err) {
-        lastError = err
-        // Only a call that never reached a decision is sent again.
-        if (err instanceof ControlPlaneError && err.status > 0 && err.status < 500) throw err
+        if (!(err instanceof ControlPlaneError && err.code === BUSY) || attempt >= 60) throw err
+        await new Promise((r) => setTimeout(r, Math.min(5_000, 500 * (attempt + 1))))
       }
     }
-    throw lastError
   }
+
+  /** Files go one at a time: the control plane takes one write of a job at a time anyway. */
+  private uploads: Promise<unknown> = Promise.resolve()
 
   /** A destination op; long ones keep the connection alive with spaces until they answer (worker-api.ts). */
   op<T = unknown>(op: DestinationOp, args: unknown): Promise<T> {
     return this.call<{ result: T }>('op', { op, args }, { timeoutMs: 15 * 60_000, retry: RETRIED_OPS.has(op) }).then((r) => r.result)
   }
 
-  async upload(bucketId: string, file: FileUpload): Promise<UploadOutcome> {
-    const r = await this.send<{ outcome: UploadOutcome }>(
-      'file',
-      file.buffer,
-      {
-        'content-type': 'application/octet-stream',
-        [HEADER_BUCKET]: bucketId,
-        [HEADER_FILE_NAME]: Buffer.from(file.name, 'utf8').toString('base64url'),
-        ...(file.mimeType ? { [HEADER_FILE_TYPE]: file.mimeType.slice(0, 200) } : {}),
-      },
-      10 * 60_000,
-    )
-    return r.outcome
+  upload(bucketId: string, file: FileUpload): Promise<UploadOutcome> {
+    const run = () =>
+      this.whenNotBusy(() =>
+        this.send<{ outcome: UploadOutcome }>(
+          'file',
+          file.buffer,
+          {
+            'content-type': 'application/octet-stream',
+            'content-length': String(file.buffer.length),
+            [HEADER_BUCKET]: bucketId,
+            [HEADER_FILE_NAME]: Buffer.from(file.name, 'utf8').toString('base64url'),
+            ...(file.mimeType ? { [HEADER_FILE_TYPE]: file.mimeType.slice(0, 200) } : {}),
+          },
+          10 * 60_000,
+        ),
+      ).then((r) => r.outcome)
+    const next = this.uploads.then(run, run)
+    this.uploads = next.catch(() => {})
+    return next
   }
 
   private async send<T>(action: WorkerAction, body: Buffer, headers: Record<string, string>, timeoutMs: number): Promise<T> {
