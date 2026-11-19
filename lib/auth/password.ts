@@ -52,9 +52,28 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 /**
+ * The dearest bcrypt cost a stored hash is checked at. Backenly makes its own
+ * at BCRYPT_ROUNDS (12), and bcrypt hashes moved in from other systems use 10
+ * or so. Each step of cost doubles a check's time, and a check holds one of
+ * the HASH_SLOTS every sign-in in this process shares, whatever the project:
+ * a stored hash at cost 31 would hold one for hours. So a hash dearer than this
+ * is not checked at all; the check answers no, and the user sets a new password
+ * with "Forgot password".
+ */
+export const MAX_VERIFIED_BCRYPT_COST = 14
+
+/** The cost a bcrypt hash declares, or null when it is not a bcrypt hash. */
+export function bcryptCost(hash: string): number | null {
+  const m = /^\$2[abxy]\$(\d{2})\$/.exec(hash)
+  return m ? Number(m[1]) : null
+}
+
+/**
  * Verify a password against a hash.
  */
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  const cost = typeof hash === 'string' ? bcryptCost(hash) : null
+  if (cost !== null && cost > MAX_VERIFIED_BCRYPT_COST) return false
   return inSlot(() => bcrypt.compare(password, hash))
 }
 
