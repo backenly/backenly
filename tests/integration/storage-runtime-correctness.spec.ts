@@ -86,11 +86,11 @@ beforeAll(async () => {
 }, 120_000)
 
 afterAll(async () => {
-  await prisma.storageFile.deleteMany({ where: { projectId } }).catch(() => {})
-  await prisma.storageBucket.deleteMany({ where: { projectId } }).catch(() => {})
-  await prisma.apiKey.deleteMany({ where: { projectId } }).catch(() => {})
-  await prisma.project.deleteMany({ where: { id: projectId } }).catch(() => {})
-  await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
+  await prisma.storageFile.deleteMany({ where: { projectId } }).catch(() => { })
+  await prisma.storageBucket.deleteMany({ where: { projectId } }).catch(() => { })
+  await prisma.apiKey.deleteMany({ where: { projectId } }).catch(() => { })
+  await prisma.project.deleteMany({ where: { id: projectId } }).catch(() => { })
+  await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => { })
 }, 60_000)
 
 describe('STO-08: the S3 driver clamps isPublic to the bucket policy', () => {
@@ -281,15 +281,15 @@ describe('STO-13: a file follows its bucket unless the upload says otherwise', (
   }, 60_000)
 
   it('a multipart upload takes the bucket’s policy, and a private bucket clamps it', async () => {
-    const open = await jsonPost('upload-multipart', { filename: 'clip.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
+    const open = await jsonPost('upload-multipart', { filename: 'clip.txt', contentType: 'text/plain', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
     expect(open.status).toBe(200)
-    const closed = await jsonPost('upload-multipart', { filename: 'clip2.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
+    const closed = await jsonPost('upload-multipart', { filename: 'clip2.txt', contentType: 'text/plain', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
     expect(closed.status).toBe(200)
     const rows = await prisma.storageFile.findMany({
-      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.mp4', 'clip2.mp4'] } },
+      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.txt', 'clip2.txt'] } },
       select: { name: true, isPublic: true },
     })
-    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.mp4': true, 'clip2.mp4': false })
+    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.txt': true, 'clip2.txt': false })
   }, 60_000)
 
   it('a signed upload takes the bucket’s policy, and a private bucket clamps it', async () => {
@@ -360,8 +360,8 @@ describe('STO-14: file count limits answer HTTP 413, never 500 (#592)', () => {
         where: { id: projectId },
         data: { maxFilesPerBucket: 1000 },
       })
-      await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => {})
-      await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => {})
+      await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => { })
+      await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => { })
     }
   }, 60_000)
 
@@ -388,8 +388,8 @@ describe('STO-14: file count limits answer HTTP 413, never 500 (#592)', () => {
         countSpy.mockRestore()
       }
     } finally {
-      await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => {})
-      await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => {})
+      await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => { })
+      await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => { })
     }
   }, 60_000)
 })
@@ -535,8 +535,8 @@ describe('STO-15: local multipart uploads over 100 MB and error handling (#594)'
       })
       expect(pendingRow).toBeNull()
     } finally {
-      await prisma.storageFile.deleteMany({ where: { bucketId: tinyBucket.id } }).catch(() => {})
-      await prisma.storageBucket.delete({ where: { id: tinyBucket.id } }).catch(() => {})
+      await prisma.storageFile.deleteMany({ where: { bucketId: tinyBucket.id } }).catch(() => { })
+      await prisma.storageBucket.delete({ where: { id: tinyBucket.id } }).catch(() => { })
     }
   }, 60_000)
 })
