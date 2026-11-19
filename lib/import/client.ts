@@ -116,13 +116,56 @@ function isPreview(value: unknown): value is ImportPreview {
   return !!p && typeof p.source === 'string' && Array.isArray(p.tables) && Array.isArray(p.rules) && Array.isArray(p.warnings)
 }
 
-export function inspectImport(request: ImportInspectRequest): Promise<ImportResult<ImportPreview>> {
-  return call('/api/import/inspect', post(request), (b) => (isPreview(b?.preview) ? b.preview : null))
+/** How often, and for how long, a read in the import sandbox is asked after. */
+const POLL_MS = 2_000
+/** A sandbox task takes up to a minute or two to start; the read itself has five minutes (lib/import/jobs.ts). */
+const POLL_LIMIT_MS = 10 * 60_000
+const TOOK_TOO_LONG = 'Backenly took too long to read the source. Try again in a few minutes.'
+
+/**
+ * Ask `path` every two seconds until `read` finds the answer in it (or the
+ * server refuses): for a source read in the import sandbox (lib/import/sandbox.ts),
+ * which answers `{ state: 'reading' | 'checking' }` until it is done.
+ */
+async function poll<T>(path: string, read: (body: Body) => T | null): Promise<ImportResult<T>> {
+  const until = Date.now() + POLL_LIMIT_MS
+  for (;;) {
+    await new Promise((r) => setTimeout(r, POLL_MS))
+    const r = await call<T | 'waiting'>(path, undefined, (b) => {
+      if (b?.state === 'reading' || b?.state === 'checking') return 'waiting'
+      return read(b)
+    })
+    if (!r.ok) {
+      // A dropped connection while waiting is not an answer: ask again.
+      if (r.refusal.status === 0 && Date.now() < until) continue
+      return { ok: false, refusal: r.refusal }
+    }
+    if (r.data !== 'waiting') return { ok: true, data: r.data as T }
+    if (Date.now() >= until) return { ok: false, refusal: { status: 504, error: TOOK_TOO_LONG } }
+  }
 }
 
-export function startImport(request: ImportStartRequest): Promise<ImportResult<{ jobId: string; projectId: string }>> {
-  return call('/api/import', post(request), (b) =>
-    typeof b?.jobId === 'string' && typeof b?.projectId === 'string' ? { jobId: b.jobId, projectId: b.projectId } : null,
+export async function inspectImport(request: ImportInspectRequest): Promise<ImportResult<ImportPreview>> {
+  const first = await call<{ preview: ImportPreview } | { lookId: string }>('/api/import/inspect', post(request), (b) =>
+    isPreview(b?.preview) ? { preview: b.preview } : typeof b?.lookId === 'string' ? { lookId: b.lookId } : null,
+  )
+  if (!first.ok) return { ok: false, refusal: first.refusal }
+  if ('preview' in first.data) return { ok: true, data: first.data.preview }
+  return poll(`/api/import/inspect/${encodeURIComponent(first.data.lookId)}`, (b) => (isPreview(b?.preview) ? b.preview : null))
+}
+
+export async function startImport(request: ImportStartRequest): Promise<ImportResult<{ jobId: string; projectId: string }>> {
+  const first = await call<{ jobId: string; projectId: string | null }>('/api/import', post(request), (b) =>
+    typeof b?.jobId === 'string' && (typeof b?.projectId === 'string' || b?.projectId === null)
+      ? { jobId: b.jobId, projectId: (b.projectId as string | null) ?? null }
+      : null,
+  )
+  if (!first.ok) return { ok: false, refusal: first.refusal }
+  const { jobId, projectId } = first.data
+  if (projectId) return { ok: true, data: { jobId, projectId } }
+  // The source is being checked in the import sandbox; the project exists once it passes.
+  return poll(`/api/import/${encodeURIComponent(jobId)}/start`, (b) =>
+    typeof b?.projectId === 'string' ? { jobId, projectId: b.projectId } : null,
   )
 }
 

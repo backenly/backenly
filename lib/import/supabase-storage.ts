@@ -29,6 +29,7 @@
  */
 
 import type { ImportPreviewBucket } from './contract'
+import type { FileUpload, UploadOutcome } from './drivers/firebase-destination'
 import { ImportInputError } from './driver'
 import { redactedMessage } from './redact'
 import { throwIfAborted } from './pg-engine'
@@ -306,8 +307,9 @@ const SKIP_WORDS: Record<string, string> = {
 
 export interface FilesContext {
   signal: AbortSignal
-  userId: string
   onFile: (copied: number, copiedBytes: number) => void
+  /** Store one file in one of the import's buckets (PgDestination.uploadFile). */
+  upload: (bucketId: string, file: FileUpload) => Promise<UploadOutcome>
 }
 
 export interface FilesResult {
@@ -328,16 +330,10 @@ const SKIPPED_NAMED = 3
 /** Download each object and store it in its bucket. */
 export async function copyFiles(
   src: StorageSource,
-  projectId: string,
   buckets: SupabaseBucket[],
   targets: Map<string, { id: string; maxBytes: number }>,
   ctx: FilesContext,
 ): Promise<FilesResult> {
-  const { storageService } = await import('@/lib/services/storage')
-  const { isUploadRejected } = await import('@/lib/storage/upload-policy')
-  const { consoleUploader } = await import('@/lib/storage/uploader')
-  // uploadedBy is an end user's field; the person moving files in is recorded as the console's uploader.
-  const uploader = consoleUploader(ctx.userId)
   const result: FilesResult = { copied: 0, bytes: 0, skipped: [], skippedCount: 0, stoppedForQuota: false }
   const skip = (path: string, why: string) => {
     result.skippedCount++
@@ -373,22 +369,18 @@ export async function copyFiles(
       }
       const buffer = Buffer.from(await res.arrayBuffer())
       const mimeType = o.mimeType ?? res.headers.get('content-type')?.split(';')[0]?.trim() ?? undefined
-      try {
-        await storageService.uploadFile(
-          target.id,
-          { name: o.path, buffer, mimeType: mimeType || undefined },
-          { projectId, uploader },
-        )
-      } catch (err) {
-        if (isUploadRejected(err)) {
-          if ((err as any).code === 'STORAGE_QUOTA_EXCEEDED') {
-            result.stoppedForQuota = true
-            return result
-          }
-          skip(label, SKIP_WORDS[(err as any).code as string] ?? 'refused by the upload checks')
-          continue
+      const outcome = await ctx.upload(target.id, { name: o.path, buffer, mimeType: mimeType || null })
+      if (!outcome.ok) {
+        if (outcome.code === 'STORAGE_QUOTA_EXCEEDED') {
+          result.stoppedForQuota = true
+          return result
         }
-        throw err
+        if (outcome.stop) {
+          result.stopped = outcome.message ?? 'the bucket could not take more files'
+          return result
+        }
+        skip(label, SKIP_WORDS[outcome.code ?? ''] ?? 'refused by the upload checks')
+        continue
       }
       result.copied++
       result.bytes += buffer.length

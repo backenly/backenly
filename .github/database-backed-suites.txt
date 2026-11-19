@@ -2500,3 +2500,10 @@ tests/integration/import-source-reads-real-postgres.spec.ts
 # than the room. Real provisioned project, governed table creation and the
 # project's own database; the source is a stand-in reader.
 tests/integration/import-stops-at-the-plans-room.spec.ts
+# The import sandbox end to end: the sandbox task's own code reads a real
+# PostgreSQL source (a look, then a whole move into a provisioned project), and
+# every call it makes goes to the control plane's real handler, which runs each
+# write; then what a task may not do: speak with the wrong token or from the
+# wrong task, write Backenly's own tables or a table the project lacks, write
+# past the plan's room, or anything once its job ended.
+tests/integration/import-sandbox-end-to-end.spec.ts

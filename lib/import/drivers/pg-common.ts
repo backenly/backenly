@@ -12,11 +12,11 @@ import { ImportInputError, type DriverContext, type RunContext, type RunResult }
 import { connectSource, isSupabaseHost, parsePostgresUrl, readSnapshot, supabaseRefOf, type ParsedPgUrl, type SourceConnection, type SourceReader } from '../net'
 import { authShape, countAuthUsers, countRows, existingSchemas, readCatalog, schemaBytes, type AuthCounts, type AuthShape } from '../pg-source'
 import { buildPlan, type ImportPlan, type SourceCatalog } from '../pg-plan'
-import { previewRules, proposeRules, recordRulesForApproval, type RuleProposal } from '../rules'
-import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, fileRefusal, formatBytes, rowRefusal, tableCountRefusal, userCountRefusal } from '../limits'
-import { addDeferredKeys, copyRows, createTables, destinationCounts, rowRoomFor, throwIfAborted } from '../pg-engine'
-import { copyAuthUsers, prepareUsersTable } from '../supabase-auth'
-import { StorageWalk, StorageWalkLimitError, copyFiles, createBuckets, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
+import { previewRules, proposeRules, type RuleProposal } from '../rules'
+import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, RowRoom, fileRefusal, formatBytes, rowRefusal, tableCountRefusal, userCountRefusal } from '../limits'
+import { copyRows, throwIfAborted } from '../pg-engine'
+import { copyAuthUsers } from '../supabase-auth'
+import { StorageWalk, StorageWalkLimitError, copyFiles, walkObjects, type StorageSource, type SupabaseBucket } from '../supabase-storage'
 
 export interface OpenedSource {
   conn: SourceConnection
@@ -205,6 +205,8 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 export async function runPg(input: RunPgInput): Promise<RunResult> {
   const { ctx } = input
+  // Everything this import writes goes here (lib/import/destination.ts).
+  const dest = ctx.destinations.pg()
   const secret = randomBytes(32)
   const warnings: string[] = []
   const ledger = new Map<string, ImportProgressTable>()
@@ -238,8 +240,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
 
         for (const t of a.plan.tables) ledger.set(t.name, { name: t.name, sourceRows: t.rows, copiedRows: 0, verified: false })
         // What the source reported passed the checks above; what it sends is counted as it is written.
-        const written = [...a.plan.tables.map((t) => t.name), ...(a.auth ? ['users'] : [])]
-        const room = await rowRoomFor(ctx.projectId, () => written, ctx.limits)
+        const room = new RowRoom(ctx.limits, () => dest.measure())
         ctx.progress({
           phase: 'tables',
           tables: [...ledger.values()],
@@ -247,17 +248,21 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
         })
 
         // The opening change: every table (and the users table), closed to all but the server key.
-        await createTables(ctx.projectId, a.plan, {
-          title: `Move in from ${input.label}: ${plural(a.plan.tables.length, 'table')}`,
-          signal: ctx.signal,
-          extra: a.auth ? () => prepareUsersTable(ctx.projectId, { social: a.auth!.counts.providerOnly > 0 }) : undefined,
-        })
+        throwIfAborted(ctx.signal)
+        await dest.createTables(
+          a.plan.tables.map((t) => ({ name: t.name, columns: t.columns })),
+          {
+            title: `Move in from ${input.label}: ${plural(a.plan.tables.length, 'table')}`,
+            usersTable: a.auth ? { social: a.auth.counts.providerOnly > 0 } : null,
+          },
+        )
 
         ctx.progress({ phase: 'rows' })
-        await copyRows(db, ctx.projectId, a.plan, {
+        await copyRows(db, a.plan, {
           signal: ctx.signal,
           secret,
           room,
+          write: (t, rows) => dest.insertRows(t.name, t.copy.map((c) => c.column), rows),
           onRows: (name, n) => {
             const row = ledger.get(name)
             if (!row) return
@@ -268,9 +273,10 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
 
         if (a.auth) {
           ctx.progress({ phase: 'users' })
-          usersCopied = await copyAuthUsers(db, ctx.projectId, a.auth.shape, {
+          usersCopied = await copyAuthUsers(db, a.auth.shape, {
             signal: ctx.signal,
             room,
+            write: (users) => dest.insertUsers(users),
             onUsers: (n) => ctx.progress({ users: { total: movingUsers, copied: n } }),
           })
           if (usersCopied < movingUsers) {
@@ -279,11 +285,11 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
         }
 
         ctx.progress({ phase: 'verifying' })
-        const dest = await destinationCounts(ctx.projectId, a.plan.tables.map((t) => t.name))
+        const arrived = await dest.countRows(a.plan.tables.map((t) => t.name))
         const short: string[] = []
         for (const t of a.plan.tables) {
           const row = ledger.get(t.name)!
-          const n = dest.get(t.name) ?? 0
+          const n = arrived.get(t.name) ?? 0
           row.copiedRows = n
           row.verified = n === t.rows
           push(t.name)
@@ -304,12 +310,17 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
   const buckets = input.storage && input.buckets ? input.buckets : null
   let targets: Map<string, { id: string; maxBytes: number }> | null = null
   if (deferred > 0 || (buckets && buckets.length > 0)) {
-    const { withGovernedChange } = await import('@/lib/changes/ledger')
+    throwIfAborted(ctx.signal)
     const what = [deferred ? plural(deferred, 'foreign key') : null, buckets?.length ? plural(buckets.length, 'bucket') : null].filter(Boolean).join(' and ')
-    await withGovernedChange({ projectId: ctx.projectId, title: `Move in from ${input.label}: ${what}` }, async () => {
-      if (deferred) warnings.push(...(await addDeferredKeys(ctx.projectId, analysis.plan, ctx.signal)))
-      if (buckets?.length) targets = await createBuckets(ctx.projectId, buckets)
+    const finished = await dest.finishSchema({
+      title: `Move in from ${input.label}: ${what}`,
+      keys: analysis.plan.tables
+        .filter((t) => t.deferredForeignKeys.length > 0)
+        .map((t) => ({ name: t.name, deferredForeignKeys: t.deferredForeignKeys.map((k) => ({ column: k.column, references: k.references })) })),
+      buckets: buckets?.length ? buckets : null,
     })
+    warnings.push(...finished.warnings)
+    targets = finished.targets
   }
 
   // Files: data, outside any change. Counted first, so the ledger can say "of".
@@ -338,9 +349,9 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
       warnings.push(`Files did not move: ${unlisted}`)
     } else {
       ctx.progress({ files: { total: totalFiles, copied: 0, bytes: totalBytes, copiedBytes: 0 } })
-      const files = await copyFiles(input.storage, ctx.projectId, buckets, targets, {
+      const files = await copyFiles(input.storage, buckets, targets, {
         signal: ctx.signal,
-        userId: ctx.userId,
+        upload: (bucketId, file) => dest.uploadFile(bucketId, file),
         onFile: (copied, copiedBytes) => ctx.progress({ files: { total: totalFiles, copied, bytes: totalBytes, copiedBytes } }),
       })
       filesCopied = files.copied
@@ -354,7 +365,7 @@ export async function runPg(input: RunPgInput): Promise<RunResult> {
   }
 
   throwIfAborted(ctx.signal)
-  const rulesPending = await recordRulesForApproval(ctx.projectId, analysis.proposals, { sourceLabel: input.label, jobId: ctx.jobId ?? '' })
+  const rulesPending = await dest.recordRules(analysis.proposals, { sourceLabel: input.label })
   ctx.progress({ rulesPending, phase: 'finished' })
 
   const rows = [...ledger.values()].reduce((s, t) => s + t.copiedRows, 0)

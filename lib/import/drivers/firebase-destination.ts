@@ -172,6 +172,42 @@ function writeFailed(table: string, err: unknown): Error {
   return new Error(`Copying rows into ${table} failed: ${what[code] ?? (code ? `PostgreSQL error ${code}` : 'the write failed')}.`)
 }
 
+/**
+ * Store one moved file in one of the project's own buckets, through the same
+ * checks every upload passes (lib/storage/upload-policy.ts). A bucket of any
+ * other project is refused before anything is read from it: the bucket id may
+ * come from the import's sandbox (lib/import/worker-api.ts).
+ */
+export async function uploadImportFile(
+  input: { projectId: string; userId: string },
+  bucketId: string,
+  file: FileUpload,
+): Promise<UploadOutcome> {
+  const { prisma } = await import('@/lib/db/prisma')
+  const bucket =
+    typeof bucketId === 'string' && bucketId.length <= 64
+      ? await prisma.storageBucket.findFirst({ where: { id: bucketId, projectId: input.projectId }, select: { id: true } })
+      : null
+  if (!bucket) return { ok: false, code: 'BUCKET_NOT_FOUND', message: 'The bucket is not one of this project’s.', stop: true }
+  const { storageService } = await import('@/lib/services/storage')
+  const { isUploadRejected } = await import('@/lib/storage/upload-policy')
+  const { consoleUploader } = await import('@/lib/storage/uploader')
+  try {
+    // Sent by the person running the import, from the console: no end user uploaded it.
+    await storageService.uploadFile(
+      bucket.id,
+      { name: file.name, buffer: file.buffer, ...(file.mimeType ? { mimeType: file.mimeType } : {}) },
+      { projectId: input.projectId, uploader: consoleUploader(input.userId) },
+    )
+    return { ok: true }
+  } catch (err) {
+    if (isUploadRejected(err)) {
+      return { ok: false, code: err.code, message: err.message, stop: err.code === 'STORAGE_QUOTA_EXCEEDED' || err.code === 'BUCKET_NOT_FOUND' }
+    }
+    throw err
+  }
+}
+
 export function backenlyDestination(input: { projectId: string; userId: string }): FirebaseDestination {
   const { projectId, userId } = input
   // The project's own schema; schemaIdent refuses it unless the id is a uuid.
@@ -374,24 +410,8 @@ export function backenlyDestination(input: { projectId: string; userId: string }
       return id
     },
 
-    async uploadFile(bucketId, file) {
-      const { storageService } = await import('@/lib/services/storage')
-      const { isUploadRejected } = await import('@/lib/storage/upload-policy')
-      const { consoleUploader } = await import('@/lib/storage/uploader')
-      try {
-        // Sent by the person running the import, from the console: no end user uploaded it.
-        await storageService.uploadFile(
-          bucketId,
-          { name: file.name, buffer: file.buffer, ...(file.mimeType ? { mimeType: file.mimeType } : {}) },
-          { projectId, uploader: consoleUploader(userId) },
-        )
-        return { ok: true }
-      } catch (err) {
-        if (isUploadRejected(err)) {
-          return { ok: false, code: err.code, message: err.message, stop: err.code === 'STORAGE_QUOTA_EXCEEDED' || err.code === 'BUCKET_NOT_FOUND' }
-        }
-        throw err
-      }
+    uploadFile(bucketId, file) {
+      return uploadImportFile({ projectId, userId }, bucketId, file)
     },
 
     async close() {

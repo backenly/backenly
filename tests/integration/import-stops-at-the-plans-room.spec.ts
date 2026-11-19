@@ -37,9 +37,10 @@ import { prisma } from '@/lib/db/prisma'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { ImportInputError } from '@/lib/import/driver'
-import { limitsLeft } from '@/lib/import/limits'
+import { RowRoom, limitsLeft } from '@/lib/import/limits'
+import { localPgDestination } from '@/lib/import/local-destination'
 import type { SourceReader } from '@/lib/import/net'
-import { copyRows, createTables, rowRoomFor } from '@/lib/import/pg-engine'
+import { copyRows } from '@/lib/import/pg-engine'
 import { buildPlan, type CatalogColumn, type SourceCatalog } from '@/lib/import/pg-plan'
 
 const MB = 1024 * 1024
@@ -116,7 +117,9 @@ it('stops at the room when a source that reported 0 bytes keeps sending rows', a
   }
   const plan = buildPlan(catalog, { source: 'postgres', usersMoving: false, schemas: ['public'] })
   const t = plan.tables[0]
-  await createTables(projectId, plan, { title: 'Move in from Postgres: 1 table', signal: new AbortController().signal })
+  // The destination the control plane writes through, for a sandbox task or an import run in one process.
+  const dest = localPgDestination({ projectId, userId: ownerId })
+  await dest.createTables(plan.tables.map((x) => ({ name: x.name, columns: x.columns })), { title: 'Move in from Postgres: 1 table', usersTable: null })
 
   // Rows of 10 KB that do not compress (as stored, about what they are as text), for as long as they are asked for.
   const idAt = t.copy.find((c) => c.column === 'id')!.from
@@ -133,11 +136,12 @@ it('stops at the room when a source that reported 0 bytes keeps sending rows', a
 
   // 4 MB left of the plan's 6 MB.
   const limits = limitsLeft({ planRowBytes: 6 * MB, planFileBytes: null, usedRowBytes: 2 * MB, usedFileBytes: 0, planName: 'Free' })
-  const room = await rowRoomFor(projectId, () => [t.name], limits)
-  const err = await copyRows(source, projectId, plan, {
+  const room = new RowRoom(limits, () => dest.measure())
+  const err = await copyRows(source, plan, {
     signal: new AbortController().signal,
     secret: crypto.randomBytes(32),
     room,
+    write: (table, rows) => dest.insertRows(table.name, table.copy.map((c) => c.column), rows),
     onRows: () => {},
   }).catch((e) => e)
 

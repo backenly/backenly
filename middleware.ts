@@ -172,6 +172,8 @@ const publicApiRoutes = [
   // feature-request routes authenticate. With startsWith matching, a future
   // route under either prefix would have silently skipped auth, so the dead
   // allowances are removed rather than kept.
+  '/api/import/worker/',            // Import sandbox tasks (lib/import/worker-api.ts): no session; every call
+                                    // proves its one job with that job's token, and Cloud only (cloudOnly)
   '/api/startups/',                 // Startup program (Cloud overlay): applying is anonymous, gated by
                                     // Turnstile, rate limits and an emailed code; the status and claim
                                     // routes authenticate the session themselves

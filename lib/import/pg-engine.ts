@@ -22,7 +22,7 @@
 
 import { createHmac } from 'crypto'
 import type { Pool } from 'pg'
-import type { ImportLimits } from './driver'
+import type { KeysToAdd, TableToCreate } from './destination'
 import type { ImportPlan, PlannedTable } from './pg-plan'
 import type { SourceReader } from './net'
 import { ROW_OVERHEAD_BYTES, RowRoom, writeWithinRoom } from './limits'
@@ -62,7 +62,7 @@ export function derivedUuid(secret: Buffer, table: string, value: string): strin
 }
 
 /** The executor's CREATE_TABLE parameters for one planned table. */
-export function createTableParams(t: PlannedTable): Record<string, unknown> {
+export function createTableParams(t: Pick<PlannedTable, 'name' | 'columns'>): Record<string, unknown> {
   return {
     tableName: t.name,
     asWritten: true,
@@ -94,11 +94,11 @@ export interface CreateTablesContext {
  * governed change. Throws (and the ledger puts the project back) when any
  * table cannot be created as planned.
  */
-export async function createTables(projectId: string, plan: ImportPlan, ctx: CreateTablesContext): Promise<void> {
+export async function createTables(projectId: string, tables: readonly TableToCreate[], ctx: CreateTablesContext): Promise<void> {
   const { withGovernedChange } = await import('@/lib/changes/ledger')
   const { executeAction } = await import('@/lib/ai/minimal-executor')
   await withGovernedChange({ projectId, title: ctx.title }, async () => {
-    for (const t of plan.tables) {
+    for (const t of tables) {
       throwIfAborted(ctx.signal)
       const made = await executeAction({ action: 'CREATE_TABLE', params: createTableParams(t) } as any, projectId, undefined, 0, undefined, false)
       if (!made.success) throw new Error(`Backenly could not create ${t.name}: ${firstLine(made.message ?? made.error)}`)
@@ -186,6 +186,8 @@ function valueBytes(value: unknown): number {
 
 export interface CopyContext {
   signal: AbortSignal
+  /** Write one batch of `t`'s rows into the project (PgDestination.insertRows); how many arrived. */
+  write: (t: PlannedTable, rows: Array<Array<string | null>>) => Promise<number>
   /** The secret derivedUuid keys with, held for this import only. */
   secret: Buffer
   /** Called after every batch with the table's running total. */
@@ -195,24 +197,25 @@ export interface CopyContext {
 }
 
 /**
- * The room for an import into `projectId`, measured on its own database the
- * way the plan's usage is (lib/usage/db-storage.ts): pg_total_relation_size of
- * the import's `tables` in the project's schema, indexes and TOAST included
- * (a table not created yet measures nothing).
+ * Bytes the project's tables hold now, measured the way the plan's usage is
+ * (lib/usage/db-storage.ts): pg_total_relation_size of every table in the
+ * project's schema, indexes and TOAST included. An import fills a NEW project,
+ * so this is what the import wrote, plus the few empty tables every project
+ * starts with. The room's measure wherever an import's rows are written
+ * (lib/import/limits.ts RowRoom, lib/import/worker-api.ts).
  */
-export async function rowRoomFor(projectId: string, tables: () => readonly string[], limits: ImportLimits | undefined): Promise<RowRoom> {
+export async function measureProjectRows(projectId: string): Promise<number> {
   const { projectPool } = await import('@/lib/data-plane/regional')
   const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
   const pool = await projectPool(projectId, 'import', { max: 4 })
-  const schema = workspaceSchemaName(projectId)
-  return new RowRoom(limits, async () => {
-    const r = await pool.query<{ bytes: string }>(
-      `SELECT COALESCE(sum(pg_catalog.pg_total_relation_size(to_regclass(format('%I.%I', $1::text, t)))), 0)::bigint::text AS bytes
-         FROM unnest($2::text[]) AS t`,
-      [schema, [...tables()]],
-    )
-    return Number(r.rows[0]?.bytes ?? 0)
-  })
+  const r = await pool.query<{ bytes: string }>(
+    `SELECT COALESCE(sum(pg_catalog.pg_total_relation_size(c.oid)), 0)::bigint::text AS bytes
+       FROM pg_catalog.pg_class c
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relkind IN ('r', 'm')`,
+    [workspaceSchemaName(projectId)],
+  )
+  return Number(r.rows[0]?.bytes ?? 0)
 }
 
 /**
@@ -229,7 +232,7 @@ export function rowCost(values: readonly unknown[]): number {
 }
 
 /** One source row → the destination values, in `t.copy` order. Exported for the tests. */
-export function rowValues(t: PlannedTable, row: unknown[], secret: Buffer): unknown[] {
+export function rowValues(t: PlannedTable, row: unknown[], secret: Buffer): Array<string | null> {
   return t.copy.map((target) => {
     const v = row[target.from]
     if (v === null || v === undefined) return null
@@ -238,14 +241,19 @@ export function rowValues(t: PlannedTable, row: unknown[], secret: Buffer): unkn
   })
 }
 
-async function insertBatch(pool: Pool, schema: string, t: PlannedTable, rows: unknown[][]): Promise<number> {
+/**
+ * Insert one batch into `schema`.`table` as the service role, every value a
+ * parameter and every name quoted. Exported for the local destination.
+ */
+export async function insertBatch(pool: Pool, schema: string, table: string, columns: readonly string[], rows: readonly unknown[][]): Promise<number> {
   const { rlsSessionSql, rlsSessionParams } = await import('@/lib/services/rls-session')
-  const cols = t.copy.map((c) => q(c.column)).join(', ')
-  const width = t.copy.length
+  const cols = columns.map((c) => q(c)).join(', ')
+  const width = columns.length
   const tuples: string[] = []
   const params: unknown[] = []
   for (const r of rows) {
     const ph: string[] = []
+    if (r.length !== width) throw new Error(`A row of ${table} had ${r.length} values for ${width} columns.`)
     for (let i = 0; i < width; i++) {
       params.push(r[i])
       ph.push(`$${params.length}`)
@@ -261,7 +269,7 @@ async function insertBatch(pool: Pool, schema: string, t: PlannedTable, rows: un
     await client.query(`SET LOCAL TIME ZONE 'UTC'`)
     // The table is closed to everyone but the service role (createTables); the copy is the service role.
     await client.query(rlsSessionSql(), rlsSessionParams({ isServiceRole: true }))
-    const res = await client.query(`INSERT INTO ${q(schema)}.${q(t.name)} (${cols}) VALUES ${tuples.join(', ')} ON CONFLICT DO NOTHING`, params)
+    const res = await client.query(`INSERT INTO ${q(schema)}.${q(table)} (${cols}) VALUES ${tuples.join(', ')} ON CONFLICT DO NOTHING`, params)
     await client.query('COMMIT')
     return res.rowCount ?? 0
   } catch (err) {
@@ -295,19 +303,11 @@ export function destinationError(table: string, err: unknown): Error {
 
 /**
  * Copy every table's rows, parents first. `source` is the snapshot every
- * table is read from; the destination is the project's own database, in its
- * region. Returns the rows each table received.
+ * table is read from; each batch goes to `ctx.write` (the destination: the
+ * project's own database, in its region, written by the control plane).
+ * Returns the rows each table received.
  */
-export async function copyRows(
-  source: SourceReader,
-  projectId: string,
-  plan: ImportPlan,
-  ctx: CopyContext,
-): Promise<Map<string, number>> {
-  const { projectPool } = await import('@/lib/data-plane/regional')
-  const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
-  const pool = await projectPool(projectId, 'import', { max: 4 })
-  const schema = workspaceSchemaName(projectId)
+export async function copyRows(source: SourceReader, plan: ImportPlan, ctx: CopyContext): Promise<Map<string, number>> {
   const copied = new Map<string, number>()
 
   for (const [i, t] of plan.tables.entries()) {
@@ -334,13 +334,7 @@ export async function copyRows(
         if (rows.length === 0) break
         const values = rows.map((r) => rowValues(t, r, ctx.secret))
         // As many rows at a time as the plan's room lets in; past it, the import stops here.
-        await writeWithinRoom(ctx.room, values, rowCost, async (some) => {
-          try {
-            return await insertBatch(pool, schema, t, some)
-          } catch (err) {
-            throw destinationError(t.name, err)
-          }
-        })
+        await writeWithinRoom(ctx.room, values, rowCost, (some) => ctx.write(t, some))
         n += rows.length
         copied.set(t.name, n)
         ctx.onRows(t.name, n)
@@ -361,10 +355,10 @@ export async function copyRows(
  * import's closing governed change. A key that cannot be added (an orphan row
  * in the source, a skipped user) is said, not fatal.
  */
-export async function addDeferredKeys(projectId: string, plan: ImportPlan, signal: AbortSignal): Promise<string[]> {
+export async function addDeferredKeys(projectId: string, keys: readonly KeysToAdd[], signal: AbortSignal): Promise<string[]> {
   const { executeAction } = await import('@/lib/ai/minimal-executor')
   const warnings: string[] = []
-  for (const t of plan.tables) {
+  for (const t of keys) {
     for (const fk of t.deferredForeignKeys) {
       throwIfAborted(signal)
       const r = await executeAction(
