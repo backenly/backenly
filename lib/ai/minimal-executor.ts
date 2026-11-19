@@ -945,9 +945,86 @@ function declaredSqlType(col: unknown): string | null {
 }
 
 /**
- * Validate and normalize column type with guards
+ * Every column type the executor will write into DDL, after normalization.
+ *
+ * A column's type lands verbatim in CREATE TABLE, ALTER TABLE ... ADD COLUMN and
+ * ALTER COLUMN ... TYPE: it cannot be a parameter. Whatever a caller named (an
+ * agent's create_table, add_column or alter_column, a migration, an import)
+ * reaches here, so it is held to this closed grammar of PostgreSQL's own type
+ * names and refused otherwise, like an unsafe DEFAULT (normalizeDefaultExpression)
+ * and an unsafe declared type (DECLARED_SQL_TYPE). Never a pattern that only
+ * looks at the start: anything after a type name could be a clause.
+ */
+const SAFE_COLUMN_TYPE = new RegExp(
+  '^(?:' +
+    [
+      'TEXT', 'CITEXT',
+      'VARCHAR(?:\\(\\d{1,5}\\))?', 'CHARACTER VARYING(?:\\(\\d{1,5}\\))?', 'CHAR(?:\\(\\d{1,4}\\))?', 'CHARACTER(?:\\(\\d{1,4}\\))?',
+      'SMALLINT', 'INTEGER', 'INT', 'INT2', 'INT4', 'INT8', 'BIGINT', 'SMALLSERIAL', 'SERIAL', 'BIGSERIAL', 'SERIAL2', 'SERIAL4', 'SERIAL8',
+      'BOOLEAN', 'BOOL',
+      'REAL', 'FLOAT4', 'FLOAT8', 'FLOAT', 'DOUBLE PRECISION', 'DOUBLE',
+      'NUMERIC(?:\\(\\d{1,4}(?:, ?\\d{1,4})?\\))?', 'DECIMAL(?:\\(\\d{1,4}(?:, ?\\d{1,4})?\\))?', 'MONEY',
+      'DATE', 'TIME(?:\\([0-6]\\))?(?: WITH(?:OUT)? TIME ZONE)?', 'TIMETZ(?:\\([0-6]\\))?',
+      'TIMESTAMP(?:\\([0-6]\\))?(?: WITH(?:OUT)? TIME ZONE)?', 'TIMESTAMPTZ(?:\\([0-6]\\))?', 'INTERVAL',
+      'UUID', 'JSON', 'JSONB', 'BYTEA', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR', 'TSQUERY', 'XML', 'POINT',
+      'BIT(?:\\(\\d{1,5}\\))?', 'BIT VARYING(?:\\(\\d{1,5}\\))?', 'VARBIT(?:\\(\\d{1,5}\\))?',
+      // Types of the extensions a project may install (lib/services/extension-allowlist.ts).
+      'HSTORE', 'LTREE', 'VECTOR(?:\\(\\d{1,5}\\))?', 'HALFVEC(?:\\(\\d{1,5}\\))?', 'SPARSEVEC(?:\\(\\d{1,6}\\))?',
+    ].join('|') +
+    ')(?:\\[\\])?$',
+)
+
+/** A column definition the executor will not write into DDL: its name or its type is not one it accepts. */
+export class UnsafeColumnDefinitionError extends Error {
+  readonly code = 'UNSAFE_COLUMN_DEFINITION'
+  constructor(message: string) {
+    super(message)
+    this.name = 'UnsafeColumnDefinitionError'
+  }
+}
+
+/** Whether `type`, as normalized, is one the executor writes into DDL (SAFE_COLUMN_TYPE). Exported for the tests. */
+export function isSafeColumnType(type: string): boolean {
+  return SAFE_COLUMN_TYPE.test(type)
+}
+
+/**
+ * A table or column name the executor puts into DDL: a plain PostgreSQL
+ * identifier (lib/db/sql-expression.ts SAFE_IDENT), or an
+ * UnsafeColumnDefinitionError. Names are quoted where they are written, but a
+ * quote inside one would end the quoting, so only plain names get that far.
+ */
+export function assertSafeSqlName(name: unknown, what: string): string {
+  if (typeof name !== 'string' || !SAFE_SQL_NAME.test(name)) {
+    throw new UnsafeColumnDefinitionError(
+      `The ${what} name ${JSON.stringify(String(name ?? '')).slice(0, 80)} is not one Backenly accepts: use letters, digits and underscores, starting with a letter or underscore, at most 63 characters.`,
+    )
+  }
+  return name
+}
+
+/** lib/db/sql-expression.ts SAFE_IDENT, held here so the check needs no import at the call. */
+const SAFE_SQL_NAME = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/
+
+/**
+ * A column's type as the executor writes it: normalized (inferColumnType), then
+ * held to SAFE_COLUMN_TYPE. Throws UnsafeColumnDefinitionError for any other.
  */
 function normalizeColumnType(type: string | undefined, columnName: string): string {
+  const normalized = inferColumnType(type, columnName)
+  if (!SAFE_COLUMN_TYPE.test(normalized)) {
+    throw new UnsafeColumnDefinitionError(
+      `The type given for column ${JSON.stringify(String(columnName)).slice(0, 80)} is not a PostgreSQL type Backenly accepts. ` +
+        'Use a plain type such as text, integer, bigint, boolean, numeric(10,2), timestamptz, uuid or jsonb (or an array of one, e.g. text[]).',
+    )
+  }
+  return normalized
+}
+
+/**
+ * Validate and normalize column type with guards
+ */
+function inferColumnType(type: string | undefined, columnName: string): string {
   const lower = columnName.toLowerCase()
 
   const typeMap: Record<string, string> = {
@@ -4288,6 +4365,17 @@ async function executeCreateTable(
     }
   }
 
+  // Every name this statement writes is a plain identifier, and every type one
+  // of PostgreSQL's own (normalizeColumnType), before anything is planned or
+  // written: a quote in a name, or a clause after a type, would become DDL.
+  try {
+    assertSafeSqlName(tableName, 'table')
+    for (const c of safeColumns) assertSafeSqlName((c as { name?: unknown }).name, 'column')
+  } catch (err) {
+    if (err instanceof UnsafeColumnDefinitionError) return { success: false, message: err.message, error: err.code }
+    throw err
+  }
+
   // ── Intent ledger ─────────────────────────────────────────────────────────
   // Record what was REQUESTED before executing, so a column that comes out the
   // wrong shape is attributable. Without this the catalog is the only record,
@@ -6398,6 +6486,9 @@ async function addColumnToTable(
   // From SQL (apply_migration): the column as written, nothing from its name.
   asWritten = false,
 ): Promise<void> {
+  // Both names are written into ALTER TABLE: plain identifiers only (assertSafeSqlName).
+  assertSafeSqlName(tableName, 'table')
+  assertSafeSqlName(column?.name, 'column')
   const db = await projectDb(projectId)
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
