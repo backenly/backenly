@@ -281,15 +281,15 @@ describe('STO-13: a file follows its bucket unless the upload says otherwise', (
   }, 60_000)
 
   it('a multipart upload takes the bucket’s policy, and a private bucket clamps it', async () => {
-    const open = await jsonPost('upload-multipart', { filename: 'clip.txt', contentType: 'text/plain', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
+    const open = await jsonPost('upload-multipart', { filename: 'clip.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
     expect(open.status).toBe(200)
-    const closed = await jsonPost('upload-multipart', { filename: 'clip2.txt', contentType: 'text/plain', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
+    const closed = await jsonPost('upload-multipart', { filename: 'clip2.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
     expect(closed.status).toBe(200)
     const rows = await prisma.storageFile.findMany({
-      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.txt', 'clip2.txt'] } },
+      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.mp4', 'clip2.mp4'] } },
       select: { name: true, isPublic: true },
     })
-    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.txt': true, 'clip2.txt': false })
+    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.mp4': true, 'clip2.mp4': false })
   }, 60_000)
 
   it('a signed upload takes the bucket’s policy, and a private bucket clamps it', async () => {

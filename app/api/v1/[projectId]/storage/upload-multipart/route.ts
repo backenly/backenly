@@ -126,8 +126,10 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     // An upload never opens a bucket: one it creates is private until its owner
     // sets the access policy. The server alone uploads into it, as into any
     // bucket made without saying, except the SDK's `default`.
-    // Buckets this route creates are provisioned with video types (from EXTENSION_MIME)
-    // so .mp4 and other video formats are accepted (#594).
+    // Buckets this route creates are provisioned with video types (from EXTENSION_MIME in upload-policy.ts)
+    // alongside default types, so .mp4 as well as existing types are accepted (#594).
+    const defaultExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.txt', '.csv']
+    const defaultMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf', 'text/plain', 'text/csv']
     const videoExtensions = ['.mp4', '.webm', '.ogv', '.mov', '.avi']
     const videoMimeTypes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo']
 
@@ -139,8 +141,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
         isPublic: false,
         maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES),
         uploadPolicy: uploadsForCreatedBucket(bucketName),
-        allowedExtensions: videoExtensions,
-        allowedMimeTypes: videoMimeTypes,
+        allowedExtensions: Array.from(new Set([...defaultExtensions, ...videoExtensions])),
+        allowedMimeTypes: Array.from(new Set([...defaultMimeTypes, ...videoMimeTypes])),
       },
     })
   }
