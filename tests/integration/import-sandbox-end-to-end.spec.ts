@@ -39,7 +39,7 @@ import { IMPORT_JOB_TYPE, JOB_STATUS } from '@/lib/import/jobs'
 import { limitsLeft } from '@/lib/import/limits'
 import { initialProgress } from '@/lib/import/progress'
 import { newJobToken, sealConnection } from '@/lib/import/sandbox'
-import { LOOK_JOB_TYPE, readLook, type SandboxStage } from '@/lib/import/sandbox-jobs'
+import { LOOK_JOB_TYPE, readImportStart, readLook, type SandboxStage } from '@/lib/import/sandbox-jobs'
 import { handleWorkerCall } from '@/lib/import/worker-api'
 import { runWorker } from '@/lib/import/worker/main'
 import { HEADER_JOB, HEADER_TASK } from '@/lib/import/worker/protocol'
@@ -197,6 +197,9 @@ it('moves a source into the project through the sandbox, every write run by the 
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { importedFrom: true } })
   expect(project?.importedFrom).toMatchObject({ source: 'postgres', tables: 2, rows: 252 })
 
+  // Its start is answered to the person who started it, and to nobody else.
+  expect(await readImportStart(run.jobId, ownerId)).toEqual({ state: 'started', projectId })
+  expect(await readImportStart(run.jobId, strangerId)).toBeNull()
   // The job ended: its token proves nothing any more.
   expect((await call(run, 'progress', { patch: {} })).status).toBe(404)
 }, 300_000)

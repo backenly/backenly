@@ -153,8 +153,11 @@ function classify(file: string): RouteRecord {
     : /verifyToken\s*\(/.test(src) ? 'verifyToken'
     // A scheduled or machine caller proves itself with a shared secret rather
     // than a session. Checked last, so a route that also has a real guard is
-    // classified by the stronger one.
-    : /(CRON_SECRET|isCronRequest\s*\(|INTERNAL_API_TOKEN|AI_EXECUTION_TOKEN|x-internal-token|verifySignature|constructEvent)/.test(src)
+    // classified by the stronger one. handleWorkerCall (lib/import/worker-api.ts)
+    // is an import sandbox task's caller: it proves its one job with that job's
+    // token (stored as its SHA-256, wiped when the job ends) before anything
+    // runs, and the job names the only project it may write.
+    : /(CRON_SECRET|isCronRequest\s*\(|INTERNAL_API_TOKEN|AI_EXECUTION_TOKEN|x-internal-token|verifySignature|constructEvent|handleWorkerCall\s*\()/.test(src)
       ? 'sharedSecret'
     : 'none'
 
@@ -201,6 +204,11 @@ function classify(file: string): RouteRecord {
     // call them. createTicket authorizes its optional projectId input by
     // calling canAccessProject before the row is written.
     'createTicket', 'getTicket', 'addCustomerReply', 'resolveTicket', 'reopenTicket', 'retryAiAnswer',
+    // lib/import/sandbox-jobs.ts: a look or an import's start is answered only
+    // to the person who asked for it (the row's userId against the caller's;
+    // null, so 404, for anyone else). Pinned two-sided against a real database
+    // in tests/integration/import-sandbox-end-to-end.spec.ts.
+    'readLook', 'readImportStart',
   ].filter(h => new RegExp(`\\b${h}\\s*\\(`).test(src))
 
   const pathParams = Array.from(route.matchAll(/\[([^\]]+)\]/g)).map(m => m[1])
