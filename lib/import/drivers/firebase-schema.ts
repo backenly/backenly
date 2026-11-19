@@ -290,6 +290,11 @@ function approxBytes(doc: FsDocument): number {
   }
 }
 
+/** About how many bytes a document's fields hold (their JSON), as a profile counts them. */
+export function documentBytes(doc: FsDocument): number {
+  return approxBytes(doc)
+}
+
 const JSON_KINDS = new Set<ValueKind>(['map', 'array', 'geopoint'])
 
 /** A column type from the kinds a field held. */

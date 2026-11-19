@@ -10,6 +10,8 @@
  * `character varying(50)[]` and `post_status`.
  */
 
+import { ImportInputError } from './driver'
+import { MAX_IMPORT_TABLES, tableCountRefusal } from './limits'
 import type { CatalogColumn, CatalogForeignKey, CatalogPolicy, CatalogTable, SourceCatalog } from './pg-plan'
 import type { SourceReader } from './net'
 
@@ -17,6 +19,14 @@ const q = (ident: string) => `"${ident.replace(/"/g, '""')}"`
 
 /** Over this many estimated rows a table is not counted exactly in the preview. */
 export const EXACT_COUNT_LIMIT = 5_000_000
+
+/**
+ * The most tables the catalog is read for: twice what one import moves, so a
+ * schema of Supabase's own tables or empty ones beside the app's still plans,
+ * while a source of a hundred thousand tables is refused before its columns,
+ * keys and policies are read.
+ */
+const CATALOG_TABLES = MAX_IMPORT_TABLES * 2
 
 export async function readCatalog(db: SourceReader, schemas: string[]): Promise<SourceCatalog> {
   const tablesRes = await db.query<{
@@ -41,10 +51,14 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
        JOIN pg_catalog.pg_roles r ON r.rolname = current_user
       WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1::text[])
-      ORDER BY n.nspname, c.relname`,
-    [schemas],
+      ORDER BY n.nspname, c.relname
+      LIMIT $2`,
+    [schemas, CATALOG_TABLES],
   )
+  if (tablesRes.rows.length >= CATALOG_TABLES) throw new ImportInputError(tableCountRefusal(null), 'connectionString')
   const oids = tablesRes.rows.map((r) => r.oid)
+  // A partitioned table holds nothing itself (pg_table_size says 0): its rows are its partitions'.
+  const partitioned = await partitionBytes(db, tablesRes.rows.filter((r) => r.partitioned).map((r) => r.oid))
   const tables = new Map<number, CatalogTable>()
   for (const r of tablesRes.rows) {
     tables.set(r.oid, {
@@ -57,7 +71,7 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
       rlsEnabled: r.rls,
       rowsHidden: r.hidden,
       partitioned: r.partitioned,
-      bytes: Number(r.bytes) || 0,
+      bytes: r.partitioned ? partitioned.get(r.oid) ?? 0 : Number(r.bytes) || 0,
       rows: Number(r.estimate) || 0,
       rowsExact: false,
     })
@@ -237,12 +251,56 @@ export async function readCatalog(db: SourceReader, schemas: string[]): Promise<
 }
 
 /**
+ * The bytes under each partitioned table: pg_table_size of every partition and
+ * sub-partition, summed, since the partitioned table itself has no storage and
+ * measures 0. Through pg_inherits, which every PostgreSQL with partitioning has
+ * (pg_partition_tree is 12 and later only).
+ */
+export async function partitionBytes(db: SourceReader, oids: number[]): Promise<Map<number, number>> {
+  if (oids.length === 0) return new Map()
+  const r = await db.query<{ oid: number; bytes: string }>(
+    `WITH RECURSIVE tree(root, rel) AS (
+       SELECT p, p FROM unnest($1::oid[]) AS p
+       UNION
+       SELECT t.root, i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent = t.rel
+     )
+     SELECT root::int AS oid, COALESCE(sum(pg_catalog.pg_table_size(rel)), 0)::bigint::text AS bytes
+       FROM tree
+      GROUP BY root`,
+    [oids],
+  )
+  return new Map(r.rows.map((x) => [Number(x.oid), Number(x.bytes) || 0]))
+}
+
+/**
+ * The bytes the tables of `schemas` hold, as the plan's limits measure a source
+ * (pg_table_size: rows and TOAST, no indexes), partitions counted under their
+ * table wherever they live, and each table once.
+ */
+export async function schemaBytes(db: SourceReader, schemas: string[]): Promise<number> {
+  const r = await db.query<{ bytes: string }>(
+    `WITH RECURSIVE tree(rel) AS (
+       SELECT c.oid
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1::text[])
+       UNION
+       SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent = t.rel
+     )
+     SELECT COALESCE(sum(pg_catalog.pg_table_size(rel)), 0)::bigint::text AS bytes FROM tree`,
+    [schemas],
+  )
+  return Number(r.rows[0]?.bytes ?? 0) || 0
+}
+
+/**
  * Exact row counts, for the preview and for verification. A table estimated
  * over EXACT_COUNT_LIMIT keeps its estimate (said "about" in the preview); one
  * whose count runs out of time does too.
  */
-export async function countRows(db: SourceReader, tables: CatalogTable[], opts: { all?: boolean } = {}): Promise<void> {
+export async function countRows(db: SourceReader, tables: CatalogTable[], opts: { all?: boolean; signal?: AbortSignal } = {}): Promise<void> {
   for (const t of tables) {
+    // A count can take minutes: the preview's deadline or the job's cancel is heard between them.
+    opts.signal?.throwIfAborted()
     if (!opts.all && t.rows > EXACT_COUNT_LIMIT) continue
     // A savepoint, so a count that runs out of time leaves the snapshot usable.
     await db.query('SAVEPOINT backenly_count')
@@ -252,7 +310,11 @@ export async function countRows(db: SourceReader, tables: CatalogTable[], opts: 
       t.rowsExact = true
       await db.query('RELEASE SAVEPOINT backenly_count')
     } catch (err: any) {
-      await db.query('ROLLBACK TO SAVEPOINT backenly_count')
+      // Ended by the deadline, a cancel or the connection's end: that is the reason, not the savepoint.
+      opts.signal?.throwIfAborted()
+      await db.query('ROLLBACK TO SAVEPOINT backenly_count').catch(() => {
+        throw err
+      })
       // 57014: statement timeout. The estimate stands, said "about".
       if (err?.code !== '57014') throw err
     }

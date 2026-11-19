@@ -35,10 +35,11 @@ export const postgresDriver: ImportDriver<'postgres'> = {
   async inspect(connection, ctx: DriverContext): Promise<ImportPreview> {
     const secrets = secretsOf(connection)
     const schemas = schemasOf(connection)
-    const { conn, parsed } = await openSource(connection.connectionString, secrets)
+    // The preview's deadline ends the connection, and the statement in flight.
+    const { conn, parsed } = await openSource(connection.connectionString, secrets, ctx.signal)
     try {
       const { analysis, label } = await readSnapshot(conn, async (db) => ({
-        analysis: await analyze(db, { source: 'postgres', schemas, usersMoving: false, withAuth: false, countAll: false }),
+        analysis: await analyze(db, { source: 'postgres', schemas, usersMoving: false, withAuth: false, countAll: false, signal: ctx.signal }),
         label: await sourceLabelOf(db, parsed, 'postgres'),
       }))
       return previewOf(analysis, { source: 'postgres', sourceLabel: label, buckets: null, warnings: [NOT_MOVED], ctx, user: parsed.user })

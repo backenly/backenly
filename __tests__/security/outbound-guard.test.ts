@@ -16,14 +16,19 @@
  * work. A guard that blocks everything is not a working guard.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs'
 import * as http from 'node:http'
+import * as https from 'node:https'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   assertAllowedUrl,
   blockedAddressReason,
   safeFetch,
   BlockedOutboundError,
 } from '@/lib/security/outbound-guard'
+import { makeCertificates } from '../../tests/helpers/tls-postgres-stand-in'
 
 /**
  * Public sample addresses, assembled from octets rather than written literally.
@@ -194,6 +199,17 @@ describe('safeFetch — connect-time validation', () => {
     await expect(safeFetch(`http://localhost:${port}/ok`)).rejects.toThrow(/loopback/)
   })
 
+  /**
+   * What a name resolved to stays here. Inside Backenly's network a name can
+   * resolve to an address only that network knows, so the refusal says the
+   * kind of address and not the address.
+   */
+  it('names the kind of address a refused name resolved to, never the address', async () => {
+    const err = await safeFetch(`http://localhost:${port}/ok`).catch((e) => e)
+    expect(err).toBeInstanceOf(BlockedOutboundError)
+    expect(err.message).toBe('localhost resolves to a loopback address.')
+  })
+
   it('the server is genuinely reachable without the guard', async () => {
     // Guards the test above from passing vacuously: if the server were down,
     // "rejects" would be true for an unrelated reason.
@@ -245,6 +261,7 @@ describe('safeFetch — redirects', () => {
   let server: http.Server
   let port: number
   let seenAuthOnHop2: string | undefined
+  let seenApikeyOnHop2: string | string[] | undefined
   let hop2Hit = false
 
   beforeAll(async () => {
@@ -262,6 +279,7 @@ describe('safeFetch — redirects', () => {
       if (req.url === '/hop2') {
         hop2Hit = true
         seenAuthOnHop2 = req.headers.authorization
+        seenApikeyOnHop2 = req.headers.apikey
         res.writeHead(200)
         res.end('done')
         return
@@ -330,6 +348,68 @@ describe('safeFetch — redirects', () => {
       expect(seenAuthOnHop2).toBeUndefined()
     } finally {
       await new Promise<void>(r => server2.close(() => r()))
+    }
+  })
+
+  // Supabase takes its key as `apikey` beside Authorization; the importer sends both.
+  it('strips apikey on a cross-origin redirect too', async () => {
+    const server2 = http.createServer((req, res) => {
+      res.writeHead(302, { Location: `http://127.0.0.1:${port}/hop2` })
+      res.end()
+    })
+    await new Promise<void>(r => server2.listen(0, '127.0.0.1', r))
+    const port2 = (server2.address() as AddressInfo).port
+    try {
+      hop2Hit = false
+      seenApikeyOnHop2 = undefined
+      seenAuthOnHop2 = undefined
+      await allowPrivate(() =>
+        safeFetch(`http://localhost:${port2}/start`, {
+          headers: { Authorization: 'Bearer not-a-real-key', apikey: 'not-a-real-key' },
+        }),
+      )
+      expect(hop2Hit).toBe(true)
+      expect(seenApikeyOnHop2).toBeUndefined()
+      expect(seenAuthOnHop2).toBeUndefined()
+    } finally {
+      await new Promise<void>(r => server2.close(() => r()))
+    }
+  })
+
+  /**
+   * From https:// to http://, what the request carries would travel in the
+   * clear. A caller that asks (the importer) gets a refusal instead, before
+   * anything is sent to the second hop. A throwaway CA signs the https hop.
+   */
+  it('refuses a redirect from https to http when the caller asks it to', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bkn-downgrade-'))
+    const certs = makeCertificates(dir, 'localhost')
+    const secure = https.createServer({ key: certs.key, cert: certs.cert }, (_req, res) => {
+      res.writeHead(302, { Location: `http://127.0.0.1:${port}/hop2` })
+      res.end()
+    })
+    await new Promise<void>(r => secure.listen(0, '127.0.0.1', r))
+    const securePort = (secure.address() as AddressInfo).port
+    const trusted = https.globalAgent.options.ca
+    https.globalAgent.options.ca = certs.ca
+    try {
+      hop2Hit = false
+      const err = await allowPrivate(() =>
+        safeFetch(`https://localhost:${securePort}/start`, { refuseDowngrade: true, headers: { apikey: 'not-a-real-key' } }),
+      ).catch((e) => e)
+      expect(err).toBeInstanceOf(BlockedOutboundError)
+      expect(err.message).toMatch(/^Refusing a redirect from https:\/\/ to http:\/\//)
+      expect(hop2Hit).toBe(false)
+
+      // Every other caller keeps following it, with the credentials dropped.
+      const followed = await allowPrivate(() => safeFetch(`https://localhost:${securePort}/start`, { headers: { apikey: 'not-a-real-key' } }))
+      expect(followed.status).toBe(200)
+      expect(hop2Hit).toBe(true)
+      expect(seenApikeyOnHop2).toBeUndefined()
+    } finally {
+      https.globalAgent.options.ca = trusted
+      await new Promise<void>(r => secure.close(() => r()))
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
