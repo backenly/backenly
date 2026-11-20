@@ -49,7 +49,7 @@ export async function accountUsage(billingAccountId: string, at: Date = new Date
   // One query at a time: this runs inside request gates and a sweep, and five
   // at once would take five pooled connections for a reading that is cached.
   const mauRows = await prisma.$queryRaw<Array<{ n: number }>>`
-      SELECT count(*)::int AS n
+      SELECT count(DISTINCT a."endUserId")::int AS n
       FROM "project_active_users" a
       JOIN "projects" p ON p."id" = a."projectId"
       WHERE COALESCE(p."organizationId", p."userId") = ${billingAccountId} AND a."month" = ${period}`
