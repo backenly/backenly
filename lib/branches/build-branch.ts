@@ -351,11 +351,17 @@ export class BuildBranch {
     return { error: lastError }
   }
 
-  /** Whether `table` exists on this turn's branch and not on production. */
+  /**
+   * Whether `table` exists on this turn's branch and not on production. Both
+   * schemas are in the database holding the project's data, in its region, so
+   * the catalog is read there, never on the platform client.
+   */
   async onlyOnBranch(table: string): Promise<boolean> {
     const branch = this.branch ?? (await this.earlierBranch())
     if (!branch || !table) return false
-    const rows = await prisma.$queryRaw<Array<{ schema: string }>>`
+    const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+    const db = await workspaceRawClient(this.projectId)
+    const rows = await db.$queryRaw<Array<{ schema: string }>>`
       SELECT table_schema AS schema FROM information_schema.tables
        WHERE table_name = ${table} AND table_schema IN (${branch.schemaName}, ${`workspace_${this.projectId}`})`
     return rows.some((r) => r.schema === branch.schemaName) && !rows.some((r) => r.schema !== branch.schemaName)

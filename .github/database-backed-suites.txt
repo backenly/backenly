@@ -2513,3 +2513,10 @@ tests/integration/import-sandbox-end-to-end.spec.ts
 # removes the row and never drops a database the row's column names. The
 # catalog and rows are the property, so it needs a real Postgres.
 tests/integration/workspace-routes-create-no-database.spec.ts
+# A build's preview branch is looked for in the database holding the project's
+# data: for a project in another region (a second database stands in for it)
+# onlyOnBranch reads that region's catalog, says no for a table only a home
+# decoy has, and is refused without the region's connection rather than
+# answered from home; a home project reads the home database as before. Both
+# databases and their catalogs are the property, so it needs a real Postgres.
+tests/integration/build-branch-regional.spec.ts
