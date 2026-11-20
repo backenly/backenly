@@ -43,6 +43,7 @@ import { Panel, Section } from '@/components/autonomy/rows'
 import { measuredAgo } from '@/components/usage/measured-ago'
 import { fetchSpendLimit, limitLabel, type SpendLimitState } from '@/components/usage/spend-limit'
 import {
+  CurrencyCode,
   fmtAgo,
   fmtBytes,
   fmtCents,
@@ -50,7 +51,9 @@ import {
   fmtCycleLastDay,
   fmtDay,
   getJson,
+  getPreferredCurrency,
   scoped,
+  setPreferredCurrency,
 } from '@/components/usage/format'
 
 // ─── What the routes return ──────────────────────────────────────────────────
@@ -537,6 +540,7 @@ type Load = { state: 'loading' } | { state: 'error' } | { state: 'ready'; data: 
 export function UsageView({ orgId }: { orgId?: string | null }) {
   const router = useRouter()
   const hrefs = useOrgHrefs()
+  const [currency, setCurrency] = useState<CurrencyCode>(() => getPreferredCurrency())
   const [load, setLoad] = useState<Load>({ state: 'loading' })
   const [attempt, setAttempt] = useState(0)
   const now = useNow(15_000)
@@ -628,6 +632,31 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
             'Pooled across every project on your account.'
           )
         ) : undefined
+      }
+      actions={
+        <div className="flex items-center gap-2">
+          <label htmlFor="currency-select" className="text-[12px] text-faint">
+            Currency:
+          </label>
+          <select
+            id="currency-select"
+            value={currency}
+            onChange={(e) => {
+              const next = e.target.value as CurrencyCode
+              setPreferredCurrency(next)
+              setCurrency(next)
+            }}
+            className="rounded-[4px] border border-white/[0.1] bg-black/40 px-2 py-1 text-[12px] text-zinc-200 outline-none hover:border-white/20 focus:border-zinc-400"
+          >
+            <option value="USD">USD ($)</option>
+            <option value="INR">INR (₹)</option>
+            <option value="EUR">EUR (€)</option>
+            <option value="GBP">GBP (£)</option>
+            <option value="CAD">CAD (CA$)</option>
+            <option value="AUD">AUD (A$)</option>
+            <option value="JPY">JPY (¥)</option>
+          </select>
+        </div>
       }
     />
   )
