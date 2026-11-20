@@ -313,6 +313,16 @@ describe('what a task may not do', () => {
     }
   })
 
+  it('keeps every progress patch, the last one above all, however close together they come', async () => {
+    const j = await job('import', { stage: 'running', handed: true })
+    const table = (copiedRows: number, verified: boolean) => ({ name: 'authors', sourceRows: 12, copiedRows, verified })
+    expect((await call(j, 'progress', { patch: { phase: 'rows', tables: [table(5, false)] } })).status).toBe(200)
+    expect((await call(j, 'progress', { patch: { phase: 'verifying', tables: [table(12, true)] } })).status).toBe(200)
+    const progress = ((await prisma.backgroundJob.findUnique({ where: { id: j.jobId } }))!.payload as any).progress
+    expect(progress.phase).toBe('verifying')
+    expect(progress.tables).toEqual([expect.objectContaining({ name: 'authors', copiedRows: 12, verified: true })])
+  })
+
   it('does nothing at all once its job has ended', async () => {
     const j = await job('import', { stage: 'running', handed: true })
     expect((await call(j, 'fail', { message: 'stopped' })).status).toBe(200)

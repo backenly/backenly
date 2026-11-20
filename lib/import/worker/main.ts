@@ -90,9 +90,10 @@ export function mergePatches(a: ProgressPatch, b: ProgressPatch): ProgressPatch 
  * moves, and one every ten seconds while it waits, so the job's lease stays
  * fresh (lib/import/jobs.ts). The answer says whether a person canceled it.
  */
-class ProgressSender {
+export class ProgressSender {
   private pending: ProgressPatch | null = null
   private sending = false
+  private inFlight: Promise<void> = Promise.resolve()
   private lastSent = 0
   private readonly timer: ReturnType<typeof setInterval>
 
@@ -107,26 +108,37 @@ class ProgressSender {
     this.pending = this.pending ? mergePatches(this.pending, patch) : patch
   }
 
+  /**
+   * Send what is pending. A forced flush (the last word before the finish)
+   * waits for a send already in flight and then sends what came after it, so
+   * the final state (every table counted and verified) always reaches Backenly.
+   */
   async flush(force: boolean): Promise<void> {
-    if (this.sending) return
+    while (this.sending) {
+      if (!force) return
+      await this.inFlight
+    }
     const now = Date.now()
     if (!force && !this.pending && now - this.lastSent < 10_000) return
     const patch = this.pending ?? {}
     this.pending = null
     this.sending = true
     this.lastSent = now
-    try {
-      const r = await this.api.call<{ cancel?: boolean }>('progress', { patch })
-      if (r.cancel && !this.controller.signal.aborted) this.controller.abort(new ImportAborted('canceled'))
-    } catch (err) {
-      this.pending = this.pending ? mergePatches(patch, this.pending) : patch
-      // The job ended at Backenly (canceled, timed out, closed): nothing more to do here.
-      if (err instanceof ControlPlaneError && err.code === 'IMPORT_ENDED' && !this.controller.signal.aborted) {
-        this.controller.abort(new ImportAborted('stopped'))
+    this.inFlight = (async () => {
+      try {
+        const r = await this.api.call<{ cancel?: boolean }>('progress', { patch })
+        if (r.cancel && !this.controller.signal.aborted) this.controller.abort(new ImportAborted('canceled'))
+      } catch (err) {
+        this.pending = this.pending ? mergePatches(patch, this.pending) : patch
+        // The job ended at Backenly (canceled, timed out, closed): nothing more to do here.
+        if (err instanceof ControlPlaneError && err.code === 'IMPORT_ENDED' && !this.controller.signal.aborted) {
+          this.controller.abort(new ImportAborted('stopped'))
+        }
+      } finally {
+        this.sending = false
       }
-    } finally {
-      this.sending = false
-    }
+    })()
+    await this.inFlight
   }
 
   stop(): void {
