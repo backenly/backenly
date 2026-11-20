@@ -358,7 +358,8 @@ export async function authShape(db: SourceReader): Promise<AuthShape> {
 
 /** Social providers: an identity that is not a password or a phone. */
 const SOCIAL = `i.provider NOT IN ('email', 'phone')`
-export const BCRYPT_HASH = '^\\$2[aby]\\$[0-9]{2}\\$.{53}$'
+/** A bcrypt hash at a cost sign-in checks (lib/auth/password.ts MAX_VERIFIED_BCRYPT_COST): a dearer one arrives as no password. */
+export const BCRYPT_HASH = '^\\$2[aby]\\$(0[4-9]|1[0-4])\\$.{53}$'
 
 function liveUsersWhere(shape: AuthShape): string {
   const parts = ['TRUE']
