@@ -13952,6 +13952,7 @@ async function executeFixAuth(params: any, projectId: string): Promise<Execution
         for (const cfg of oauthConfigs) {
           if (!cfg.redirectUri) {
             const canonicalUri = `${baseOrigin}/api/v1/${projectId}/auth/${cfg.provider.toLowerCase()}/callback`
+            // history: GOVERNED_ACTIONS (FIX_AUTH)
             await prisma.workspaceOAuthConfig.update({
               where: { id: cfg.id },
               data: { redirectUri: canonicalUri },
