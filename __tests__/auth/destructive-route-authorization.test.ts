@@ -18,6 +18,9 @@
  * an entitlement check is about billing, not access, and reading like a
  * permission check is what let it stand in for one.
  *
+ * provision-database has since been retired: it answers 404 to everyone and
+ * does nothing (tests/integration/workspace-routes-create-no-database.spec.ts).
+ *
  * Tested at the guard, because that is where the decision now lives and a
  * route-level test would pass against a guard that was still willing. Two-sided
  * throughout: every denial is paired with the matching permission, since this
@@ -118,8 +121,8 @@ describe('administer is stricter than access', () => {
 
 describe('the workspace database routes', () => {
   test('resolve to a project the caller must be able to administer', async () => {
-    // provision-database and setup-database take a WORKSPACE id, so the
-    // authorization hop is workspace -> project -> caller. This asserts the
+    // setup-database takes a WORKSPACE id, so the authorization hop is
+    // workspace -> project -> caller. This asserts the
     // hop lands somewhere real.
     const ws = await prisma.workspace.findUnique({
       where: { id: foreignWorkspaceId },
@@ -159,7 +162,7 @@ describe('the victim tenant is unchanged by a denied request', () => {
     expect(after).toEqual(before)
   })
 
-  test('a refused workspace provision leaves the workspace untouched', async () => {
+  test('a refused workspace setup leaves the workspace untouched', async () => {
     const before = await prisma.workspace.findUnique({
       where: { id: foreignWorkspaceId },
       select: { databaseProvisioned: true, postgresSchema: true },

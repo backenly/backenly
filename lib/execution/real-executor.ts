@@ -43,46 +43,10 @@ export async function executeReal(
   console.log(`[Real Executor] Copied graph entities:`, Object.keys(currentGraph.entities).join(', '))
   
   try {
-    // PHASE 0: Ensure workspace exists and is provisioned
-    console.log('[Real Executor] Phase 0: Checking workspace provisioning')
-    
-    // INTEGRATION MODE: Skip workspace provisioning entirely
-    if (process.env.ENGINE_MODE === 'integration') {
-      console.log('[Real Executor] 🧪 INTEGRATION MODE - Skipping workspace provisioning')
-    } else {
-      const { prisma } = await import('@/lib/db')
-      const { provisionWorkspaceDatabase } = await import('@/lib/services/databaseProvisioning')
-      
-      let workspace = await prisma.workspace.findFirst({
-        where: { projectId },
-      })
-      
-      if (!workspace) {
-        console.log('[Real Executor] No workspace found, creating one...')
-        workspace = await prisma.workspace.create({
-          data: {
-            name: `Workspace for project ${projectId}`,
-            projectId,
-            postgresSchema: `workspace_${projectId}`,
-            databaseProvisioned: false,
-          },
-        })
-      }
-      
-      if (!workspace.databaseProvisioned) {
-        console.log('[Real Executor] Workspace not provisioned, provisioning now...')
-        try {
-          await provisionWorkspaceDatabase(workspace.id, projectId)
-          console.log('[Real Executor] ✅ Workspace provisioned successfully')
-        } catch (provisionError) {
-          console.error('[Real Executor] ❌ Workspace provisioning failed:', provisionError)
-          throw new Error(`Failed to provision workspace: ${provisionError instanceof Error ? provisionError.message : 'Unknown error'}`)
-        }
-      } else {
-        console.log('[Real Executor] ✅ Workspace already provisioned')
-      }
-    }
-    
+    // No provisioning step: the project's workspace (its schema and its
+    // Workspace row) was created with the project, by createProvisionedProject
+    // (lib/projects/provision.ts).
+
     // PHASE 1: Run atomic executor to update graph with entities
     console.log('[Real Executor] Phase 1: Running atomic executor to build graph state')
     const { executeAtomic } = await import('@/lib/orchestration/atomic-executor')

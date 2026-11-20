@@ -136,6 +136,9 @@ jobs:
       # rows with no workspace schema and no PostgREST registration, so a user
       # connecting a frontend got a project whose data plane answered PGRST106
       # forever. One owned it to `userId: 'system'`, which is not a user id.
+      # The same script keeps CREATE DATABASE and DROP DATABASE in application
+      # code to lib/data-plane/project-databases.ts, after a removed path created
+      # a database per workspace on the platform's own connection.
       - name: One creation path for projects
         run: npx tsx scripts/verify-project-provisioning.ts
 

@@ -2507,3 +2507,9 @@ tests/integration/import-stops-at-the-plans-room.spec.ts
 # wrong task, write Backenly's own tables or a table the project lacks, write
 # past the plan's room, or anything once its job ended.
 tests/integration/import-sandbox-end-to-end.spec.ts
+# The workspace routes create no database: POST /api/workspaces writes the row
+# only, with no connection string in postgresSchema and an existing row kept;
+# provision-database answers 404 to everyone and changes nothing; DELETE
+# removes the row and never drops a database the row's column names. The
+# catalog and rows are the property, so it needs a real Postgres.
+tests/integration/workspace-routes-create-no-database.spec.ts
