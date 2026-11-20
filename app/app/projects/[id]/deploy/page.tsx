@@ -295,6 +295,7 @@ export default function DeployPage() {
   const latest = versions?.[0] ?? null
   const nextVersion = (latest?.version ?? 0) + 1
   const drifted = !!versions && versions.length > 0 && !versions.some((v) => v.isActive)
+  const hasPendingChanges = !versions || versions.length === 0 || drifted
   // A failed publish is a row in Versions with its own Try again, so the header button steps aside.
   const failedRow = !deploying && (refusal !== null || status === 'FAILED')
   const fact = publishFact({ projectStatus: deploying ? 'DEPLOYING' : status, latest })
@@ -326,7 +327,14 @@ export default function DeployPage() {
 
   const actions =
     canPublish && !failedRow ? (
-      <KitButton variant="primary" size="lg" onClick={() => void publish()} loading={deploying}>
+      <KitButton
+        variant="primary"
+        size="lg"
+        onClick={() => void publish()}
+        loading={deploying}
+        disabled={!hasPendingChanges && !deploying}
+        title={!hasPendingChanges ? 'All changes published. Working state matches production.' : undefined}
+      >
         {deploying ? 'Publishing…' : 'Publish'}
       </KitButton>
     ) : !role.loading && !role.error && !role.canWrite && publishable ? (
@@ -392,7 +400,16 @@ export default function DeployPage() {
               <>
                 <Facts className="mt-[10px]">
                   {tableCount > 0 && <Fact>{plural(tableCount, 'table')}</Fact>}
-                  {typeof backend?.endpointCount === 'number' && backend.endpointCount > 0 && <Fact>{plural(backend.endpointCount, 'endpoint')}</Fact>}
+                  {typeof backend?.endpointCount === 'number' && backend.endpointCount > 0 && (
+                    <Fact>
+                      <span title={`${backend.endpointCount} endpoints: ${tableCount * 5} table CRUD, ${Math.max(0, backend.endpointCount - (tableCount * 5))} custom/functions/auth`}>
+                        {plural(backend.endpointCount, 'endpoint')}
+                        <span className="ml-1 font-normal text-zinc-500">
+                          ({tableCount > 0 ? `${tableCount * 5} CRUD · ` : ''}{Math.max(0, backend.endpointCount - (tableCount * 5))} custom/func)
+                        </span>
+                      </span>
+                    </Fact>
+                  )}
                   {hasAuth && <Fact>Auth on</Fact>}
                   {hasStorage && <Fact>Storage on</Fact>}
                   {frontendFact && <Fact>{frontendFact}</Fact>}
