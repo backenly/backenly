@@ -120,6 +120,8 @@ export function ChangeHistory({
 }) {
   const [changes, setChanges] = useState<ChangeSummary[]>([])
   const [versions, setVersions] = useState<PublishedVersion[]>([])
+  const [branches, setBranches] = useState<Array<{ id: string; name: string }>>([])
+  const [selectedBranch, setSelectedBranch] = useState<string>('main')
   const [nextBefore, setNextBefore] = useState<number | null>(null)
   const [canManage, setCanManage] = useState(false)
   const [windowDays, setWindowDays] = useState<number | null>(null)
@@ -140,11 +142,26 @@ export function ChangeHistory({
     const q = new URLSearchParams({ limit: '30' })
     if (before) q.set('before', String(before))
     if (resource) q.set('resource', resource)
+    if (selectedBranch && selectedBranch !== 'main') q.set('branch', selectedBranch)
     const res = await fetch(`/api/projects/${projectId}/changes?${q}`, { credentials: 'include' })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(body.error || `Request failed with ${res.status}`)
     return body as Page
-  }, [projectId, resource])
+  }, [projectId, resource, selectedBranch])
+
+  // Load active preview branches for branch selector
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/branches`, { credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => {
+        if (!cancelled && Array.isArray(body?.branches)) {
+          setBranches(body.branches.map((b: any) => ({ id: b.id, name: b.name })))
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId])
 
   const apply = useCallback((page: Page) => {
     setChanges(page.changes ?? [])
@@ -333,19 +350,36 @@ export function ChangeHistory({
         meta={windowDays ? <span className="text-[13px] text-faint">Restorable for {windowDays} {windowDays === 1 ? 'day' : 'days'}</span> : undefined}
         description="Every schema and settings change is checked after it applies."
         actions={
-          showFilter ? (
-            <KitSelect
-              aria-label="Show changes to"
-              value={resource ?? ''}
-              onChange={(e) => onResource?.(e.target.value || null)}
-              wrapperClassName="w-[180px]"
-            >
-              <option value="">All changes</option>
-              {RESOURCES.map((r) => (
-                <option key={r.id} value={r.id}>{r.label}</option>
-              ))}
-            </KitSelect>
-          ) : undefined
+          <div className="flex flex-wrap items-center gap-[8px]">
+            {branches.length > 0 && (
+              <KitSelect
+                aria-label="Branch"
+                value={selectedBranch}
+                onChange={(e) => setSelectedBranch(e.target.value)}
+                wrapperClassName="w-[140px]"
+              >
+                <option value="main">Branch: main</option>
+                {branches.map((b) => (
+                  <option key={b.name} value={b.name}>
+                    Branch: {b.name}
+                  </option>
+                ))}
+              </KitSelect>
+            )}
+            {showFilter && (
+              <KitSelect
+                aria-label="Show changes to"
+                value={resource ?? ''}
+                onChange={(e) => onResource?.(e.target.value || null)}
+                wrapperClassName="w-[180px]"
+              >
+                <option value="">All changes</option>
+                {RESOURCES.map((r) => (
+                  <option key={r.id} value={r.id}>{r.label}</option>
+                ))}
+              </KitSelect>
+            )}
+          </div>
         }
       />
 

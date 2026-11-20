@@ -32,6 +32,54 @@ export const GET = withAuth(async (request: NextRequest, { user, params }) => {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
   const url = new URL(request.url)
+  const branchName = url.searchParams.get('branch')
+
+  if (branchName && branchName !== 'main') {
+    const { prisma } = await import('@/lib/db')
+    const branch = await prisma.workspaceBranch.findFirst({
+      where: {
+        projectId,
+        OR: [{ id: branchName }, { name: branchName }],
+      },
+      include: {
+        migrations: {
+          orderBy: { seq: 'desc' },
+        },
+      },
+    })
+
+    if (!branch) {
+      return NextResponse.json({ error: 'Branch not found' }, { status: 404 })
+    }
+
+    const changes = branch.migrations.map((m) => {
+      const stmts = Array.isArray(m.statements) ? (m.statements as string[]) : []
+      const firstLine = stmts[0] || 'Migration statement'
+      return {
+        id: m.id,
+        seq: m.seq,
+        status: 'applied',
+        summary: stmts.length > 1 ? `${firstLine} (+${stmts.length - 1} statements)` : firstLine,
+        createdAt: m.appliedAt.toISOString(),
+        actor: { kind: 'agent', label: m.appliedBy || 'Preview branch' },
+        resources: ['database'],
+        isDestructive: false,
+        canUndo: false,
+        canRestoreTo: false,
+      }
+    })
+
+    const canManage = await canAdministerProject(user.userId, projectId)
+    return NextResponse.json({
+      success: true,
+      changes,
+      windowDays: 7,
+      nextBeforeSeq: null,
+      branch: branch.name,
+      canManage,
+    })
+  }
+
   const before = Number(url.searchParams.get('before'))
   const limit = Number(url.searchParams.get('limit'))
   const resource = url.searchParams.get('resource')
