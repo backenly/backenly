@@ -319,7 +319,7 @@ describe('a project whose data moves to a database of its own', () => {
 describe('the SQL recorder', () => {
   it('captures a statement sent on a project database’s client, once', async () => {
     const db = await workspaceRawClient(homeDedicated)
-    // What a governed change does: a no-op on top of the client's own.
+    // What a governed change used to do: a no-op on top of the client's own.
     installSqlRecorder(db as any)
     const sql = `CREATE TABLE public.recorded_${SUFFIX} (id int)`
     const { statements } = await withSqlCapture(async () => {
@@ -335,15 +335,19 @@ describe('the SQL recorder', () => {
     expect(landed).toBe(HOME_OWN_DB)
   })
 
-  it('captures statements inside a transaction on it', async () => {
+  it('captures statements inside a transaction on it, and on a region’s client, with nothing installed by the caller', async () => {
     const db = await workspaceRawClient(regionDedicated)
     const inside = `CREATE TABLE public.recorded_tx_${SUFFIX} (id int)`
+    const onRegion = `CREATE TABLE public.recorded_region_${SUFFIX} (id int)`
     const { statements } = await withSqlCapture(async () => {
       await db.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(inside)
       })
+      // The region's own client: its recorder came with it, as no governed
+      // change or repair has run in this file to install one.
+      await regionRawClient('us-east-1').$executeRawUnsafe(onRegion)
     })
-    expect(statements.map((s) => s.sql)).toEqual([inside])
+    expect(statements.map((s) => s.sql)).toEqual([inside, onRegion])
   })
 })
 

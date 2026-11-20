@@ -716,13 +716,21 @@ export function regionRawClient(region: CloudRegionId, projectId?: string): Work
   return regionClient(region, projectId)
 }
 
-/** The full client for a region's database. Private: see WorkspaceRawClient. */
+/**
+ * The full client for a region's database. Private: see WorkspaceRawClient.
+ *
+ * The SQL recorder (lib/execution/sql-recorder.ts) is installed as the client
+ * is created, so what a change or a repair sends on it is captured wherever it
+ * was started from. Once per client: the recorder keeps a set of the clients
+ * it is on.
+ */
 function regionClient(region: CloudRegionId, projectId?: string): PrismaClient {
   const url = requireRegionDatabaseUrl(region, 'app', { projectId })
   const existing = workspaceClients.get(region)
   if (existing) return existing
 
   const client = new PrismaClient({ datasourceUrl: workspaceClientUrl(region, url), log: ['error'] })
+  installSqlRecorder(client as any)
   workspaceClients.set(region, client)
   return client
 }
