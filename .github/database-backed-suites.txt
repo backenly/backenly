@@ -1585,6 +1585,16 @@ tests/integration/reset-link-opens-a-page.spec.ts
 # property, so it needs a real Postgres.
 tests/integration/project-region.spec.ts
 
+# A project with a database of its own is reached there and only there: real
+# databases named as projects' own, home and in another region, are what its
+# raw client, pools and connection string land on, while region work stays on
+# the region's own database; without the data instance's variable it is
+# refused, never sent to the platform database or another region's; a moved
+# epoch is never answered with the old database; the SQL recorder captures
+# statements sent on such a client once; and the drift event store answers as
+# the Prisma model does on the same rows. Real databases are the property.
+tests/integration/project-database-resolution.spec.ts
+
 # A regional project's customer data on platform rows stays in its region: a
 # second database stands in for another region's, holding the real
 # regional_bodies table. Webhook and trigger payloads and replies, and function

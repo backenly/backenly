@@ -370,10 +370,13 @@ export async function withGovernedChange<T>(
 
   // The statements are captured where they are sent: the home client, and the
   // client of the project's own region, which is a different one for a project
-  // kept outside the home region (lib/data-plane/regional.ts).
+  // kept outside the home region (lib/data-plane/regional.ts). A project's own
+  // database's client has the recorder from its creation, and is pinned for
+  // the whole change, so it is one client from the first statement to the last.
   installSqlRecorder(prisma as any)
-  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const { pinWorkspaceClient, workspaceRawClient } = await import('@/lib/data-plane/regional')
   installSqlRecorder((await workspaceRawClient(projectId)) as any)
+  const unpin = await pinWorkspaceClient(projectId)
 
   return withChangeLock(projectId, async (client) => {
     const { resolveWorkspaceSchema } = await import('@/lib/services/workspace-pool')
@@ -586,5 +589,5 @@ export async function withGovernedChange<T>(
 
     if (thrown) throw thrown
     return { result: result as T, change: closed }
-  })
+  }).finally(unpin)
 }

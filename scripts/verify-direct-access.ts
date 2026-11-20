@@ -34,7 +34,7 @@ import { projectDriftEvents } from '../lib/data-plane/regional'
 
 // Counted in the project's region, where the event trigger records them.
 const pendingDriftCount = async (projectId: string) =>
-  (await projectDriftEvents(projectId)).count({ where: { projectId, status: 'pending' } })
+  (await projectDriftEvents(projectId)).countPending(projectId)
 
 const projectId = process.argv[2]
 const HOST = process.argv[3] || '127.0.0.1'

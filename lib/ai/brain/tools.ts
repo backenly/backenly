@@ -3584,7 +3584,7 @@ export async function dispatchTool(
         // In the project's region, where they are captured. Null when they could
         // not be read: "0 external changes" is a claim, not a default.
         (await import('@/lib/data-plane/regional')).projectDriftEvents(ctx.projectId)
-          .then((events) => events.count({ where: { projectId: ctx.projectId, status: 'pending' } }))
+          .then((events) => events.countPending(ctx.projectId))
           .catch(() => null),
         prisma.healthFinding.findMany({
           where: { projectId: ctx.projectId, status: 'auto_fixed', fixAppliedAt: { gte: since24h } },
