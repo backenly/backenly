@@ -13935,16 +13935,30 @@ async function executeFixAuth(params: any, projectId: string): Promise<Execution
       fixes.push('Recreated missing workspace users table — end-user auth now has a place to store accounts')
     }
 
-    // ── 4. OAuth provider re-check ────────────────────────────────────────────
-    if (provider) {
-      const cfg = await prisma.workspaceOAuthConfig?.findFirst?.({
-        where: { projectId, provider: provider.toLowerCase() },
-      }).catch(() => null)
+    // ── 4. OAuth provider redirect URI repair ─────────────────────────────────
+    const baseOrigin = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://backenly.com')
+    if (provider || issue === 'oauth_redirect_uri_missing') {
+      const targetProvider = provider ? String(provider).toLowerCase() : undefined
+      const oauthConfigs = await prisma.workspaceOAuthConfig.findMany({
+        where: {
+          projectId,
+          ...(targetProvider ? { provider: targetProvider } : {}),
+        },
+      }).catch(() => [])
 
-      if (!cfg) {
-        warnings.push(`No OAuth config found for "${provider}". Use ADD_PROVIDER with your client ID and secret to configure it.`)
+      if (oauthConfigs.length === 0 && targetProvider) {
+        warnings.push(`No OAuth config found for "${targetProvider}". Use ADD_PROVIDER with your client ID and secret to configure it.`)
       } else {
-        warnings.push(`OAuth config for "${provider}" exists. If it's still not working, delete and re-add it via "Add ${provider} OAuth with clientId=... clientSecret=..."`)
+        for (const cfg of oauthConfigs) {
+          if (!cfg.redirectUri) {
+            const canonicalUri = `${baseOrigin}/api/v1/${projectId}/auth/${cfg.provider.toLowerCase()}/callback`
+            await prisma.workspaceOAuthConfig.update({
+              where: { id: cfg.id },
+              data: { redirectUri: canonicalUri },
+            })
+            fixes.push(`Configured canonical redirect URI for ${cfg.provider} OAuth: ${canonicalUri}`)
+          }
+        }
       }
     }
 
