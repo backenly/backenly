@@ -49,7 +49,7 @@ import {
 import { UserTally, countUsers, listUsers, listUsersPage, mapFirebaseUser, readHashSettings, type ImportedUser } from './firebase-users'
 import { downloadObject, findDefaultBucket, listObjects, listObjectsPage, mimeTypeFor, readProjectInfo } from './firebase-storage'
 import { pendingRules, readFirestoreRules } from './firebase-rules'
-import { backenlyDestination, type FirebaseDestination } from './firebase-destination'
+import type { FirebaseDestination } from './firebase-destination'
 import { rowCost, throwIfAborted } from '../pg-engine'
 import { MAX_IMPORT_TABLES, MAX_IMPORT_USERS, RowRoom, fileRefusal, rowRefusal, tableCountRefusal, userCountRefusal, writeWithinRoom } from '../limits'
 import { ByteBudget, FILE_BYTES_IN_FLIGHT, waitForHeadroom } from '../pressure'
@@ -681,7 +681,8 @@ export function createFirebaseDriver(options: FirebaseDriverOptions = {}): Impor
   async function run(connection: { serviceAccountJson: string }, ctx: RunContext): Promise<RunResult> {
     const sa = parseServiceAccount(connection.serviceAccountJson)
     const { client } = google(sa, ctx.signal)
-    const dest = (options.destination ?? ((c: RunContext) => backenlyDestination({ projectId: c.projectId, userId: c.userId })))(ctx)
+    // Everything this import writes goes through the run's destination (lib/import/destination.ts).
+    const dest = (options.destination ?? ((c: RunContext) => c.destinations.firebase()))(ctx)
     const warnings: string[] = []
     // Documents and users are counted against the plan's room as they are written (lib/import/limits.ts).
     const room = new RowRoom(ctx.limits, () => dest.measureRows())

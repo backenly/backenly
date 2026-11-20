@@ -3,12 +3,13 @@
  * (lib/auth/password.ts MAX_VERIFIED_BCRYPT_COST). Every sign-in in a process
  * shares its few hash slots, whatever the project, and a hash's own cost sets
  * how long its check holds one, so a hash dearer than 14 is answered no at once,
- * without hashing. The import reads only hashes sign-in would check.
+ * without hashing. The import reads and keeps only hashes sign-in would check.
  */
 
 import bcrypt from 'bcrypt'
 import { bcryptCost, MAX_VERIFIED_BCRYPT_COST, verifyPassword } from '@/lib/auth/password'
 import { BCRYPT_HASH } from '@/lib/import/pg-source'
+import { KEPT_BCRYPT_HASH, keptAuthUser } from '@/lib/import/supabase-auth'
 
 const hashAt = (cost: string) => `$2b$${cost}$${'a'.repeat(22)}${'b'.repeat(31)}`
 
@@ -42,4 +43,23 @@ it('reads a source user’s password only at a cost sign-in checks', () => {
   const source = new RegExp(BCRYPT_HASH)
   for (const c of ['04', '10', '12', '14']) expect(source.test(hashAt(c))).toBe(true)
   for (const c of ['03', '15', '31']) expect(source.test(hashAt(c))).toBe(false)
+})
+
+it('keeps a moved-in password only at a cost sign-in checks', () => {
+  for (const c of ['04', '10', '12', '14']) expect(KEPT_BCRYPT_HASH.test(hashAt(c))).toBe(true)
+  for (const c of ['03', '15', '20', '31', '99']) expect(KEPT_BCRYPT_HASH.test(hashAt(c))).toBe(false)
+  const user = {
+    id: '6f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b',
+    email: 'ana@example.com',
+    password: hashAt('31'),
+    verified: true,
+    name: null,
+    avatar_url: null,
+    created_at: null,
+    last_sign_in_at: null,
+    banned: false,
+    provider: null,
+    provider_id: null,
+  }
+  expect(keptAuthUser(user)).toMatchObject({ email: 'ana@example.com', password: null })
 })
