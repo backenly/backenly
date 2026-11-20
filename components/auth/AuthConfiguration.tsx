@@ -358,6 +358,7 @@ function OAuthDialog({
   const [error, setError] = useState<string | null>(null)
   const [confirmOff, setConfirmOff] = useState(false)
   const redirect = apiBaseUrl ? `${apiBaseUrl}/auth/${provider}/callback` : null
+  const jsOrigin = apiBaseUrl ? (() => { try { return new URL(apiBaseUrl).origin } catch { return 'https://backenly.com' } })() : 'https://backenly.com'
   const upper = provider.toUpperCase()
 
   const save = async () => {
@@ -422,17 +423,40 @@ function OAuthDialog({
         }
       >
         <div className="space-y-[16px]">
-          <div>
-            <p className="mb-[6px] text-[12.5px] font-medium leading-[18px] text-zinc-300">Redirect URI</p>
-            {redirect ? <CopyField value={redirect} label="Copy redirect URI" /> : <p className="text-[12.5px] text-faint">The project’s address could not be read. Reload to try again.</p>}
-            <p className="mt-[6px] text-[12px] leading-[17px] text-faint">
-              Add it to your OAuth client in{' '}
-              <a href={meta.console} target="_blank" rel="noopener noreferrer" className={LINK}>
-                {meta.consoleName}
-                <span className="sr-only"> (opens in a new tab)</span>
-              </a>
-              .
-            </p>
+          <div className="space-y-[12px] rounded-[6px] border border-white/[0.08] bg-white/[0.02] p-[12px]">
+            {provider === 'google' && (
+              <div>
+                <p className="mb-[4px] text-[12px] font-medium text-zinc-300">Authorized JavaScript Origins</p>
+                <CopyField value={jsOrigin} label="Copy JavaScript Origin" />
+                <p className="mt-[3px] text-[11px] text-zinc-500">Add to &quot;Authorized JavaScript origins&quot; in Google Cloud Console.</p>
+              </div>
+            )}
+            <div>
+              <p className="mb-[4px] text-[12px] font-medium text-zinc-300">
+                {provider === 'facebook' ? 'Valid OAuth Redirect URI' : 'Authorized Redirect URI'}
+              </p>
+              {redirect ? (
+                <CopyField value={redirect} label="Copy redirect URI" />
+              ) : (
+                <p className="text-[12.5px] text-faint">The project’s address could not be read. Reload to try again.</p>
+              )}
+              <p className="mt-[4px] text-[11.5px] leading-[16px] text-zinc-400">
+                {provider === 'google' && (
+                  <>In Google Cloud Console &gt; APIs &amp; Services &gt; Credentials, paste both the origin and redirect URI into your OAuth 2.0 Web Client.</>
+                )}
+                {provider === 'facebook' && (
+                  <>In Meta for Developers &gt; Facebook Login &gt; Settings, paste this into <strong>Valid OAuth Redirect URIs</strong> and ensure Client OAuth Login is enabled.</>
+                )}
+                {provider === 'github' && (
+                  <>In GitHub &gt; Developer settings &gt; OAuth Apps, paste this into <strong>Authorization callback URL</strong>.</>
+                )}
+                {' '}
+                <a href={meta.console} target="_blank" rel="noopener noreferrer" className={LINK}>
+                  Open {meta.consoleName}
+                  <span className="sr-only"> (opens in a new tab)</span>
+                </a>
+              </p>
+            </div>
           </div>
           <KitField label="Client ID">
             <KitInput value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder={enabled ? 'A new client ID replaces the stored one' : ''} autoComplete="off" spellCheck={false} />
