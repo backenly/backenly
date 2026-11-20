@@ -182,20 +182,57 @@ function heapMb(memory: string): number {
   return Math.max(256, Math.floor(Number(memory) * 0.6))
 }
 
-/** Whether the family's latest definition is exactly the one this web would register. */
+/** The worker's one volume: a scratch /tmp of the task's own, nothing mounted from anywhere. */
+function onlyScratchVolume(td: any, c: any): boolean {
+  const volumes = td.volumes ?? []
+  const v = volumes[0]
+  const mounts = c.mountPoints ?? []
+  return (
+    volumes.length === 1 &&
+    v?.name === 'tmp' &&
+    !v.efsVolumeConfiguration &&
+    !v.dockerVolumeConfiguration &&
+    !v.fsxWindowsFileServerVolumeConfiguration &&
+    !v.host?.sourcePath &&
+    !v.configuredAtLaunch &&
+    mounts.length === 1 &&
+    mounts[0]?.sourceVolume === 'tmp' &&
+    mounts[0]?.containerPath === '/tmp'
+  )
+}
+
+/**
+ * Whether the family's latest definition is exactly the one this web would
+ * register: a hostile source's task runs under it, so anything this web would
+ * not have put there (a mount, a credential, another setting) means it is not
+ * reused, and this web registers its own.
+ */
 function sameDefinition(td: any, want: OwnImage, cfg: SandboxConfig): boolean {
   const c = td?.containerDefinitions?.[0]
+  const env = Object.fromEntries((c?.environment ?? []).map((e: any) => [e.name, e.value]))
   return (
     !!c &&
     td.containerDefinitions.length === 1 &&
     td.status === 'ACTIVE' &&
     !td.taskRoleArn &&
     td.networkMode === 'awsvpc' &&
+    !td.pidMode &&
+    !td.ipcMode &&
+    !td.proxyConfiguration &&
     !c.secrets?.length &&
+    !c.environmentFiles?.length &&
+    !c.repositoryCredentials &&
+    !c.privileged &&
+    !c.dependsOn?.length &&
+    !c.links?.length &&
+    !c.volumesFrom?.length &&
+    onlyScratchVolume(td, c) &&
     c.user === 'node' &&
     c.readonlyRootFilesystem === true &&
     JSON.stringify(c.entryPoint ?? []) === JSON.stringify(['node']) &&
-    JSON.stringify((c.environment ?? []).map((e: any) => e.name).sort()) === JSON.stringify(['NODE_ENV', 'NODE_OPTIONS']) &&
+    JSON.stringify(Object.keys(env).sort()) === JSON.stringify(['NODE_ENV', 'NODE_OPTIONS']) &&
+    env.NODE_ENV === 'production' &&
+    env.NODE_OPTIONS === `--max-old-space-size=${heapMb(cfg.memory)}` &&
     JSON.stringify(c.linuxParameters?.capabilities?.drop ?? []) === JSON.stringify(['ALL']) &&
     !c.linuxParameters?.capabilities?.add?.length &&
     td.executionRoleArn === cfg.executionRoleArn &&

@@ -53,8 +53,8 @@ export const LOOK_JOB_TYPE = 'import_look'
 /** How long a task may take to start and make its first call. */
 export const START_GRACE_MS = 4 * 60_000
 
-/** At most this many tasks at once, everywhere and per organization. */
-export const SANDBOX_CAPS = { looks: 10, imports: 6, looksPerOrg: 3, importsPerOrg: 1 }
+/** At most this many tasks at once: everywhere, per organization, and per person whatever their organizations. */
+export const SANDBOX_CAPS = { looks: 10, imports: 6, looksPerOrg: 3, importsPerOrg: 1, looksPerUser: 3, importsPerUser: 1 }
 
 export type SandboxStage = 'launching' | 'reading' | 'checking' | 'creating' | 'running' | 'ended'
 
@@ -126,26 +126,51 @@ const SAID = {
 
 // ── Room ──────────────────────────────────────────────────────────────────────
 
-/** Refuse a new task when the sandbox is full, everywhere or for this organization. */
-export async function assertSandboxRoom(kind: WorkerKind, orgId: string): Promise<void> {
+type JobCounter = Pick<typeof prisma, 'backgroundJob'>
+
+/** Whether the sandbox is full for a new task of this kind: everywhere, for this organization, or for this person. */
+async function sandboxFull(db: JobCounter, kind: WorkerKind, orgId: string, userId: string): Promise<boolean> {
   const type = kind === 'look' ? LOOK_JOB_TYPE : IMPORT_JOB_TYPE
   // Every job still running counts until it is closed (sweepImportSandbox closes a lapsed one within a minute),
-  // so a task that stops reporting keeps its place, and its organization's, until its task is stopped.
+  // so a task that stops reporting keeps its place, its organization's and its person's, until its task is stopped.
   const live = { type, status: JOB_STATUS.running }
-  const [all, org] = await Promise.all([
-    prisma.backgroundJob.count({ where: live }),
-    prisma.backgroundJob.count({ where: { ...live, payload: { path: ['orgId'], equals: orgId } } }),
+  const [all, org, user] = await Promise.all([
+    db.backgroundJob.count({ where: live }),
+    db.backgroundJob.count({ where: { ...live, payload: { path: ['orgId'], equals: orgId } } }),
+    db.backgroundJob.count({ where: { ...live, payload: { path: ['userId'], equals: userId } } }),
   ])
-  const full = kind === 'look' ? all >= SANDBOX_CAPS.looks || org >= SANDBOX_CAPS.looksPerOrg : all >= SANDBOX_CAPS.imports || org >= SANDBOX_CAPS.importsPerOrg
-  if (full) {
-    throw new ImportRefusedError(
-      503,
-      kind === 'look' ? SAID.busy : 'Backenly is moving other projects in right now. Try again in a few minutes; nothing was created.',
-      'IMPORT_BUSY',
-      {},
-      { 'Retry-After': kind === 'look' ? '60' : '120' },
-    )
-  }
+  return kind === 'look'
+    ? all >= SANDBOX_CAPS.looks || org >= SANDBOX_CAPS.looksPerOrg || user >= SANDBOX_CAPS.looksPerUser
+    : all >= SANDBOX_CAPS.imports || org >= SANDBOX_CAPS.importsPerOrg || user >= SANDBOX_CAPS.importsPerUser
+}
+
+function sandboxBusy(kind: WorkerKind): ImportRefusedError {
+  return new ImportRefusedError(
+    503,
+    kind === 'look' ? SAID.busy : 'Backenly is moving other projects in right now. Try again in a few minutes; nothing was created.',
+    'IMPORT_BUSY',
+    {},
+    { 'Retry-After': kind === 'look' ? '60' : '120' },
+  )
+}
+
+/** Refuse a new task when the sandbox is full, everywhere, for this organization or for this person. */
+export async function assertSandboxRoom(kind: WorkerKind, orgId: string, userId: string): Promise<void> {
+  if (await sandboxFull(prisma, kind, orgId, userId)) throw sandboxBusy(kind)
+}
+
+/**
+ * Create a sandbox job only while there is room: counted and created under one
+ * lock, so starts sent together cannot pass the caps together.
+ */
+async function createWithinRoom(kind: WorkerKind, orgId: string, userId: string, data: Prisma.BackgroundJobUncheckedCreateInput): Promise<void> {
+  const full = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('backenly:import-sandbox-room'))::text AS locked`
+    if (await sandboxFull(tx, kind, orgId, userId)) return true
+    await tx.backgroundJob.create({ data })
+    return false
+  })
+  if (full) throw sandboxBusy(kind)
 }
 
 // ── Starting ──────────────────────────────────────────────────────────────────
@@ -174,7 +199,7 @@ export async function startLook(input: {
   connection: ImportConnection
   limits: ImportLimits
 }): Promise<{ lookId: string }> {
-  await assertSandboxRoom('look', input.orgId)
+  await assertSandboxRoom('look', input.orgId, input.userId)
   const lookId = randomUUID()
   const { token, hash } = newJobToken()
   const now = new Date()
@@ -187,18 +212,16 @@ export async function startLook(input: {
     preview: null,
     refusal: null,
   }
-  await prisma.backgroundJob.create({
-    data: {
-      id: lookId,
-      type: LOOK_JOB_TYPE,
-      status: JOB_STATUS.running,
-      payload: payload as unknown as Prisma.InputJsonValue,
-      attempts: 1,
-      maxAttempts: 1,
-      runAt: now,
-      startedAt: now,
-      timeoutAt: new Date(now.getTime() + START_GRACE_MS),
-    },
+  await createWithinRoom('look', input.orgId, input.userId, {
+    id: lookId,
+    type: LOOK_JOB_TYPE,
+    status: JOB_STATUS.running,
+    payload: payload as unknown as Prisma.InputJsonValue,
+    attempts: 1,
+    maxAttempts: 1,
+    runAt: now,
+    startedAt: now,
+    timeoutAt: new Date(now.getTime() + START_GRACE_MS),
   })
   await launch(lookId, 'look', token)
   return { lookId }
@@ -233,7 +256,7 @@ export async function startSandboxImport(input: {
   limits: ImportLimits
   spendBudget?: () => Promise<void>
 }): Promise<{ jobId: string }> {
-  await assertSandboxRoom('import', input.orgId)
+  await assertSandboxRoom('import', input.orgId, input.userId)
   // Spent once a task is about to start: a start turned away as busy spends none of the organization's starts.
   await input.spendBudget?.()
   const jobId = randomUUID()
@@ -263,18 +286,16 @@ export async function startSandboxImport(input: {
     sandbox: newSandbox('import', hash, await sealConnection(input.connection), deadline, input.limits),
     refusal: null,
   }
-  await prisma.backgroundJob.create({
-    data: {
-      id: jobId,
-      type: IMPORT_JOB_TYPE,
-      status: JOB_STATUS.running,
-      payload: payload as unknown as Prisma.InputJsonValue,
-      attempts: 1,
-      maxAttempts: 1,
-      runAt: now,
-      startedAt: now,
-      timeoutAt: new Date(now.getTime() + START_GRACE_MS),
-    },
+  await createWithinRoom('import', input.orgId, input.userId, {
+    id: jobId,
+    type: IMPORT_JOB_TYPE,
+    status: JOB_STATUS.running,
+    payload: payload as unknown as Prisma.InputJsonValue,
+    attempts: 1,
+    maxAttempts: 1,
+    runAt: now,
+    startedAt: now,
+    timeoutAt: new Date(now.getTime() + START_GRACE_MS),
   })
   await launch(jobId, 'import', token)
   return { jobId }

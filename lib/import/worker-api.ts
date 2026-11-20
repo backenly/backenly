@@ -9,7 +9,11 @@
  *   - the job is proven by its token (only the SHA-256 is stored), and, where
  *     the job's task is known, by the task's ARN as well; a job that ended
  *     answers nothing but 409 IMPORT_ENDED;
- *   - every body is read within a cap, gzip included, before it is parsed;
+ *   - every call takes a place in this process before anything runs, a
+ *     database read included: a cap on all task calls at once, on one job's
+ *     calls at once, and on one job's calls a second;
+ *   - every body is read within a cap and a deadline, gzip included, before
+ *     it is parsed;
  *   - every op's arguments are checked against a closed schema: names are
  *     PostgreSQL names, types come from closed lists, sizes are capped; rows go
  *     only into tables of the job's own project that exist, through the columns
@@ -17,11 +21,14 @@
  *   - schema work happens once per job, and only what the person chose moves
  *     (users, files);
  *   - every write is measured against the plan's room HERE, whatever the task
- *     counted (ROOM_REFUSED when it would not fit), one write at a time per job;
+ *     counted (ROOM_REFUSED when it would not fit), one write at a time per job,
+ *     under a lease of its own that stops the write's remaining steps once its
+ *     job ends or it runs past the task's own wait for it;
  *   - everything is attributed to the import in History, as when it ran in one
  *     process.
  */
 
+import { randomUUID } from 'crypto'
 import { promisify } from 'util'
 import { gunzip } from 'zlib'
 import { NextResponse } from 'next/server'
@@ -93,15 +100,29 @@ class Refused extends Error {
 
 // ── Bodies ────────────────────────────────────────────────────────────────────
 
-async function readBody(request: Request, max: number): Promise<Buffer> {
+/** How long a body may take to arrive: a task that trickles one holds its place no longer than this. */
+const BODY_WITHIN_MS = { json: 30_000, preview: 60_000, op: 120_000 } as const
+
+async function readBody(request: Request, max: number, withinMs: number): Promise<Buffer> {
   const declared = Number(request.headers.get('content-length') ?? 'NaN')
   if (Number.isFinite(declared) && declared > max) throw new Refused(413, 'The body is too large.')
   const reader = request.body?.getReader()
   const parts: Buffer[] = []
   let size = 0
   if (reader) {
+    const deadline = Date.now() + withinMs
     for (;;) {
-      const { done, value } = await reader.read()
+      const left = deadline - Date.now()
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const next = await (left > 0
+        ? Promise.race([reader.read(), new Promise<'late'>((resolve) => (timer = setTimeout(() => resolve('late'), left)))])
+        : Promise.resolve('late' as const))
+      clearTimeout(timer)
+      if (next === 'late') {
+        await reader.cancel().catch(() => {})
+        throw new Refused(408, 'The body took too long to arrive.')
+      }
+      const { done, value } = next
       if (done) break
       size += value.byteLength
       if (size > max) {
@@ -114,8 +135,8 @@ async function readBody(request: Request, max: number): Promise<Buffer> {
   return Buffer.concat(parts)
 }
 
-async function readJson(request: Request, max: number): Promise<unknown> {
-  const raw = await readBody(request, max)
+async function readJson(request: Request, max: number, withinMs: number = BODY_WITHIN_MS.json): Promise<unknown> {
+  const raw = await readBody(request, max, withinMs)
   let text: Buffer = raw
   if ((request.headers.get('content-encoding') ?? '').toLowerCase() === 'gzip') {
     try {
@@ -207,6 +228,57 @@ function takeBodySlot(): (() => void) | null {
 
 const busy = () =>
   answer(503, { error: 'Backenly is busy with other imports; send this again in a moment.', code: 'IMPORT_BUSY' })
+
+// ── Calls in this process ─────────────────────────────────────────────────────
+
+/**
+ * Every task call takes a place here before anything else runs, its job's
+ * database read included: at most MAX_TASK_CALLS at once from all tasks
+ * together, MAX_CALLS_PER_JOB at once from one job, and one job's calls at
+ * JOB_CALL_RATE a second on average. A task reports progress about once a
+ * second and sends its writes one at a time, each a database round trip or
+ * more, so it seldom meets these, and waits a moment when it does; one that
+ * sends more is told IMPORT_BUSY before anything of its call is read, and what
+ * any task can make a web process read, inflate and query stays bounded.
+ */
+const MAX_TASK_CALLS = 48
+const MAX_CALLS_PER_JOB = 3
+const JOB_CALL_RATE = { perSecond: 20, burst: 60 }
+let taskCalls = 0
+const jobCalls = new Map<string, { inFlight: number; tokens: number; at: number }>()
+
+function takeCallPlace(): (() => void) | null {
+  if (taskCalls >= MAX_TASK_CALLS) return null
+  taskCalls++
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    taskCalls--
+  }
+}
+
+function takeJobPlace(jobId: string): (() => void) | null {
+  const now = Date.now()
+  let j = jobCalls.get(jobId)
+  if (!j) {
+    if (jobCalls.size >= 2_000) for (const [id, x] of jobCalls) if (x.inFlight === 0) jobCalls.delete(id)
+    j = { inFlight: 0, tokens: JOB_CALL_RATE.burst, at: now }
+    jobCalls.set(jobId, j)
+  }
+  j.tokens = Math.min(JOB_CALL_RATE.burst, j.tokens + ((now - j.at) / 1000) * JOB_CALL_RATE.perSecond)
+  j.at = now
+  if (j.inFlight >= MAX_CALLS_PER_JOB || j.tokens < 1) return null
+  j.tokens -= 1
+  j.inFlight++
+  const entry = j
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    entry.inFlight--
+  }
+}
 
 // ── The job ───────────────────────────────────────────────────────────────────
 
@@ -309,10 +381,20 @@ const fbUser = z
   })
   .strict()
 
+/** What one import's schema may hold in all: far above a real project's, and a bound on the DDL a task can ask for. */
+const MAX_IMPORT_COLUMNS = 30_000
+const MAX_IMPORT_FOREIGN_KEYS = 5_000
+const columnsWithin = (tables: Array<{ columns?: unknown[]; createColumns?: unknown[] }>) =>
+  tables.reduce((n, t) => n + (t.columns?.length ?? t.createColumns?.length ?? 0), 0) <= MAX_IMPORT_COLUMNS
+
 const OP_ARGS: Record<DestinationOp, z.ZodTypeAny> = {
   'pg.createTables': z
     .object({
-      tables: z.array(z.object({ name: tableName, columns: z.array(pgColumn).max(1600) }).strict()).min(1).max(MAX_IMPORT_TABLES),
+      tables: z
+        .array(z.object({ name: tableName, columns: z.array(pgColumn).max(1600) }).strict())
+        .min(1)
+        .max(MAX_IMPORT_TABLES)
+        .refine(columnsWithin, 'too many columns'),
       title: z.string().max(300),
       usersTable: z.object({ social: z.boolean() }).strict().nullable(),
     })
@@ -335,7 +417,8 @@ const OP_ARGS: Record<DestinationOp, z.ZodTypeAny> = {
             })
             .strict(),
         )
-        .max(MAX_IMPORT_TABLES),
+        .max(MAX_IMPORT_TABLES)
+        .refine((keys) => keys.reduce((n, k) => n + k.deferredForeignKeys.length, 0) <= MAX_IMPORT_FOREIGN_KEYS, 'too many foreign keys'),
       buckets: z.array(bucket).max(100).nullable(),
     })
     .strict(),
@@ -344,7 +427,8 @@ const OP_ARGS: Record<DestinationOp, z.ZodTypeAny> = {
     .object({
       plans: z
         .array(z.object({ name: tableName, parentTable: tableName.nullable(), createColumns: z.array(fbCreateColumn).max(1600) }).strict())
-        .max(MAX_IMPORT_TABLES),
+        .max(MAX_IMPORT_TABLES)
+        .refine(columnsWithin, 'too many columns'),
       title: z.string().max(300),
     })
     .strict(),
@@ -405,17 +489,63 @@ async function assertRoom(projectId: string, payload: ImportPayload, cost: numbe
  * connection of the platform's pool; one left by a web task that died lapses
  * on its own.
  */
-async function takeJobLease(jobId: string): Promise<boolean> {
-  const until = new Date(Date.now() + 15 * 60_000).toISOString()
+const LEASE_MS = 5 * 60_000
+/** As long as the task waits for one op's answer (lib/import/worker/remote.ts): past it, no one is waiting. */
+const OP_WALL_MS = 15 * 60_000
+const LEASE_RENEW_MS = 30_000
+
+/** The lease's own id, or null while another write of the job holds one. */
+async function takeJobLease(jobId: string): Promise<string | null> {
+  const lease = randomUUID()
+  const until = new Date(Date.now() + LEASE_MS).toISOString()
   const took = await prisma.$executeRaw`UPDATE background_jobs
-       SET payload = jsonb_set(payload, '{sandbox,writing}', to_jsonb(${until}::text), true), "updatedAt" = now()
+       SET payload = jsonb_set(jsonb_set(payload, '{sandbox,writing}', to_jsonb(${until}::text), true), '{sandbox,writingId}', to_jsonb(${lease}::text), true),
+           "updatedAt" = now()
      WHERE id = ${jobId} AND status = ${JOB_STATUS.running}
        AND (payload->'sandbox'->>'writing' IS NULL OR (payload->'sandbox'->>'writing')::timestamptz < now())`
-  return took === 1
+  return took === 1 ? lease : null
 }
 
-async function releaseJobLease(jobId: string): Promise<void> {
-  await prisma.$executeRaw`UPDATE background_jobs SET payload = payload #- '{sandbox,writing}', "updatedAt" = now() WHERE id = ${jobId}`.catch(() => {})
+/** Keep this lease while its write runs; false once the job ended or the lease is no longer this write's. */
+async function renewJobLease(jobId: string, lease: string): Promise<boolean> {
+  const until = new Date(Date.now() + LEASE_MS).toISOString()
+  const n = await prisma.$executeRaw`UPDATE background_jobs
+       SET payload = jsonb_set(payload, '{sandbox,writing}', to_jsonb(${until}::text), true), "updatedAt" = now()
+     WHERE id = ${jobId} AND status = ${JOB_STATUS.running} AND payload->'sandbox'->>'writingId' = ${lease}`
+  return n === 1
+}
+
+/** Give the lease back: only this write's own, never one a later write took. */
+async function releaseJobLease(jobId: string, lease: string): Promise<void> {
+  await prisma.$executeRaw`UPDATE background_jobs SET payload = (payload #- '{sandbox,writing}') #- '{sandbox,writingId}', "updatedAt" = now()
+     WHERE id = ${jobId} AND payload->'sandbox'->>'writingId' = ${lease}`.catch(() => {})
+}
+
+/**
+ * Hold a write's lease while it runs and say when to stop: the signal aborts
+ * once the job ended (the lease could not be renewed) or the write ran past
+ * OP_WALL_MS. Schema work stops at its next step; the lease then lapses.
+ */
+function holdLease(jobId: string, lease: string): { signal: AbortSignal; stop: () => void } {
+  const controller = new AbortController()
+  const started = Date.now()
+  const timer = setInterval(() => {
+    if (Date.now() - started > OP_WALL_MS) {
+      controller.abort(new Refused(504, 'This write ran past its time.'))
+      clearInterval(timer)
+      return
+    }
+    void renewJobLease(jobId, lease).then(
+      (held) => {
+        if (!held) {
+          controller.abort(new Refused(409, 'This import has ended.', 'IMPORT_ENDED'))
+          clearInterval(timer)
+        }
+      },
+      () => {},
+    )
+  }, LEASE_RENEW_MS)
+  return { signal: controller.signal, stop: () => clearInterval(timer) }
 }
 
 /**
@@ -446,11 +576,11 @@ async function tableCount(projectId: string): Promise<number> {
 /** Tables a new project holds before an import adds any (users, the teams tables and the like), with room to spare. */
 const TABLES_BESIDES_THE_IMPORT = 50
 
-async function runOp(row: BackgroundJob, op: DestinationOp, args: any): Promise<Record<string, unknown>> {
+async function runOp(row: BackgroundJob, op: DestinationOp, args: any, signal: AbortSignal): Promise<Record<string, unknown>> {
   const payload = row.payload as unknown as ImportPayload
   const projectId = row.projectId!
   const userId = payload.userId
-  const pg = () => localPgDestination({ projectId, userId, jobId: row.id })
+  const pg = () => localPgDestination({ projectId, userId, jobId: row.id, signal })
   const fb = async () => (await import('./drivers/firebase-destination')).backenlyDestination({ projectId, userId })
 
   switch (op) {
@@ -551,7 +681,7 @@ async function runOp(row: BackgroundJob, op: DestinationOp, args: any): Promise<
   }
 }
 
-async function handleOp(row: BackgroundJob, body: any): Promise<{ status: number; body: Record<string, unknown> }> {
+async function handleOp(row: BackgroundJob, body: any, signal: AbortSignal): Promise<{ status: number; body: Record<string, unknown> }> {
   const payload = row.payload as unknown as ImportPayload
   const s = sandboxOf(row)!
   const op = body?.op as DestinationOp
@@ -566,13 +696,16 @@ async function handleOp(row: BackgroundJob, body: any): Promise<{ status: number
       if (step && !(await takeOnce(row.id, step))) throw new Refused(409, `${op} already ran for this import.`)
       const { withChangeAttribution } = await import('@/lib/changes/attribution')
       return withChangeAttribution({ source: 'import', actorUserId: payload.userId, apiKeyId: null, groupId: `import:${row.id}` }, () =>
-        runOp(row, op, parsed.data),
+        runOp(row, op, parsed.data, signal),
       )
     }
     const result = await run()
+    if (signal.aborted) throw signal.reason instanceof Refused ? signal.reason : new Refused(409, 'This import has ended.', 'IMPORT_ENDED')
     await extendLease(row.id)
     return { status: 200, body: { result } }
-  } catch (err) {
+  } catch (caught) {
+    // A write stopped by its lease says why, whatever its step threw on the way out.
+    const err = signal.aborted && !(caught instanceof Refused) && signal.reason instanceof Refused ? signal.reason : caught
     if (err instanceof Refused) return { status: err.status, body: { error: err.message, ...(err.code ? { code: err.code } : {}) } }
     // The governed kernel's own sentence ("Backenly could not create posts: …") is the person's to read.
     const said = err instanceof Error && /^(Backenly|Copying|The )/.test(err.message) ? err.message.slice(0, 400) : 'Backenly could not write this part of the import.'
@@ -594,7 +727,8 @@ async function handleFile(row: BackgroundJob, request: Request): Promise<NextRes
   // Its length first: a file is read only up to what it said it was, and never past the cap.
   const declared = Number(request.headers.get('content-length') ?? 'NaN')
   if (!Number.isFinite(declared) || declared < 0) return answer(411, { error: 'Send the file with its length.' })
-  const buffer = await readBody(request, Math.min(declared, MAX_BUFFERED_UPLOAD_FILE_BYTES))
+  // At least 512 KB a second: a trickled file holds the job's write no longer than that.
+  const buffer = await readBody(request, Math.min(declared, MAX_BUFFERED_UPLOAD_FILE_BYTES), Math.max(60_000, Math.ceil(declared / (512 * 1024)) * 1000))
   const { uploadImportFile } = await import('./drivers/firebase-destination')
   const outcome = await uploadImportFile({ projectId: row.projectId, userId: payload.userId }, bucketId, { name, buffer, mimeType: mimeType ?? null })
   await extendLease(row.id)
@@ -604,12 +738,34 @@ async function handleFile(row: BackgroundJob, request: Request): Promise<NextRes
 /** One task call. */
 export async function handleWorkerCall(action: string, request: Request): Promise<Response> {
   if (!(WORKER_ACTIONS as readonly string[]).includes(action)) return notFound()
-  const proven = await provenJob(request)
-  if ('refused' in proven) return proven.refused
-  const { row } = proven
+  // A place in this process first, before the job is even read (Calls in this process, above).
+  const place = takeCallPlace()
+  if (!place) return busy()
+  const held: Array<() => void> = [place]
+  let handedOff = false
+  /** A long answer keeps its places until it is sent: the stream gives them back. */
+  const handOff = () => {
+    handedOff = true
+    return () => {
+      for (const give of held) give()
+    }
+  }
+  try {
+    const proven = await provenJob(request)
+    if ('refused' in proven) return proven.refused
+    const jobPlace = takeJobPlace(proven.row.id)
+    if (!jobPlace) return busy()
+    held.push(jobPlace)
+    return await answerCall(action as WorkerAction, request, proven.row, handOff)
+  } finally {
+    if (!handedOff) for (const give of held) give()
+  }
+}
+
+async function answerCall(action: WorkerAction, request: Request, row: BackgroundJob, handOff: () => () => void): Promise<Response> {
   const s = sandboxOf(row)!
   try {
-    switch (action as WorkerAction) {
+    switch (action) {
       case 'spec': {
         const body = (await readJson(request, BODY_LIMITS.json)) as { protocol?: unknown }
         if (body?.protocol !== PROTOCOL) return answer(409, { error: `This control plane speaks protocol ${PROTOCOL}.`, code: 'IMPORT_PROTOCOL' })
@@ -617,7 +773,7 @@ export async function handleWorkerCall(action: string, request: Request): Promis
       }
       case 'preview': {
         if (s.kind !== 'look' || s.stage !== 'reading') return ended()
-        const body = (await readJson(request, BODY_LIMITS.preview)) as { preview?: any }
+        const body = (await readJson(request, BODY_LIMITS.preview, BODY_WITHIN_MS.preview)) as { preview?: any }
         const preview = body?.preview
         if (!preview || typeof preview.source !== 'string' || !Array.isArray(preview.tables) || !Array.isArray(preview.rules) || !Array.isArray(preview.warnings)) {
           return answer(400, { error: 'Not a preview.' })
@@ -629,6 +785,7 @@ export async function handleWorkerCall(action: string, request: Request): Promis
       case 'checked': {
         if (s.kind !== 'import') return ended()
         // Creating the project can outlast the load balancer's idle timeout: keep the answer alive.
+        const done = handOff()
         return keepAlive(async () => {
           try {
             const projectId = await workerChecked(row)
@@ -638,7 +795,7 @@ export async function handleWorkerCall(action: string, request: Request): Promis
             if (err instanceof ImportRefusedError) return { status: 409, body: { error: err.message, code: 'IMPORT_ENDED' } }
             throw err
           }
-        })
+        }, done)
       }
       case 'next': {
         if (s.kind !== 'import') return ended()
@@ -656,30 +813,36 @@ export async function handleWorkerCall(action: string, request: Request): Promis
         }
         const release = takeBodySlot()
         if (!release) return busy()
-        if (!(await takeJobLease(row.id))) {
+        const lease = await takeJobLease(row.id)
+        if (!lease) {
           release()
           return busy()
         }
         let body: unknown
         try {
-          body = await readJson(request, BODY_LIMITS.op)
+          body = await readJson(request, BODY_LIMITS.op, BODY_WITHIN_MS.op)
         } catch (err) {
           release()
-          await releaseJobLease(row.id)
+          await releaseJobLease(row.id, lease)
           throw err
         }
+        const hold = holdLease(row.id, lease)
+        const done = handOff()
         return keepAlive(
-          () => handleOp(row, body),
+          () => handleOp(row, body, hold.signal),
           () => {
+            hold.stop()
             release()
-            void releaseJobLease(row.id)
+            void releaseJobLease(row.id, lease)
+            done()
           },
         )
       }
       case 'file': {
         const release = takeBodySlot()
         if (!release) return busy()
-        if (!(await takeJobLease(row.id))) {
+        const lease = await takeJobLease(row.id)
+        if (!lease) {
           release()
           return busy()
         }
@@ -687,7 +850,7 @@ export async function handleWorkerCall(action: string, request: Request): Promis
           return await handleFile(row, request)
         } finally {
           release()
-          await releaseJobLease(row.id)
+          await releaseJobLease(row.id, lease)
         }
       }
       case 'finish': {

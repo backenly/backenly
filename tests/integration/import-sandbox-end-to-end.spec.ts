@@ -42,7 +42,7 @@ import { IMPORT_JOB_TYPE, JOB_STATUS } from '@/lib/import/jobs'
 import { limitsLeft } from '@/lib/import/limits'
 import { initialProgress } from '@/lib/import/progress'
 import { newJobToken, sealConnection } from '@/lib/import/sandbox'
-import { LOOK_JOB_TYPE, readImportStart, readLook, type SandboxStage } from '@/lib/import/sandbox-jobs'
+import { LOOK_JOB_TYPE, SANDBOX_CAPS, assertSandboxRoom, readImportStart, readLook, type SandboxStage } from '@/lib/import/sandbox-jobs'
 import { handleWorkerCall } from '@/lib/import/worker-api'
 import { runWorker } from '@/lib/import/worker/main'
 import { HEADER_JOB, HEADER_TASK } from '@/lib/import/worker/protocol'
@@ -247,6 +247,66 @@ describe('what a task may not do', () => {
     expect(refused.status).toBe(409)
     expect(refused.json.code).toBe('IMPORT_ROOM')
     expect(refused.json.error).toMatch(/^Backenly stopped the import after /)
+  })
+
+  it('is told to wait, before anything of its call is read, when it calls more or faster than a task does', async () => {
+    const j = await job('import', { stage: 'running', handed: true })
+    expect((await call(j, 'next', {})).status).toBe(200)
+    // Twenty at once, again and again: past three at once, or past its rate, a job's calls are told IMPORT_BUSY.
+    let busySeen = false
+    for (let round = 0; round < 10 && !busySeen; round++) {
+      const answers = await Promise.all(Array.from({ length: 20 }, () => call(j, 'next', {})))
+      expect(answers.every((r) => r.status === 200 || (r.status === 503 && r.json.code === 'IMPORT_BUSY'))).toBe(true)
+      busySeen = answers.some((r) => r.status === 503)
+    }
+    expect(busySeen).toBe(true)
+  })
+
+  it("keeps one write of a job at a time, and gives back only its own lease", async () => {
+    const j = await job('import', { stage: 'running', handed: true })
+    const other = '00000000-0000-4000-8000-000000000000'
+    const hold = (until: Date) =>
+      prisma.$executeRaw`UPDATE background_jobs SET payload = jsonb_set(jsonb_set(payload, '{sandbox,writing}', to_jsonb(${until.toISOString()}::text), true), '{sandbox,writingId}', to_jsonb(${other}::text), true) WHERE id = ${j.jobId}`
+    const sandbox = async () => ((await prisma.backgroundJob.findUnique({ where: { id: j.jobId } }))!.payload as any).sandbox
+    // Another write holds the job: this one waits, and the other's lease stays.
+    await hold(new Date(Date.now() + 60_000))
+    const waited = await call(j, 'op', { op: 'pg.measure', args: {} })
+    expect([waited.status, waited.json.code]).toEqual([503, 'IMPORT_BUSY'])
+    expect((await sandbox()).writingId).toBe(other)
+    // Once that lease lapsed, this write takes the job, runs, and gives back its own lease.
+    await hold(new Date(Date.now() - 1_000))
+    const ran = await call(j, 'op', { op: 'pg.measure', args: {} })
+    expect(ran.status).toBe(200)
+    const after = await sandbox()
+    expect(after.writing).toBeUndefined()
+    expect(after.writingId).toBeUndefined()
+  })
+
+  it('holds one person to their own share of the sandbox, whatever their organizations', async () => {
+    const now = new Date()
+    const ids: string[] = []
+    for (let i = 0; i < SANDBOX_CAPS.looksPerUser; i++) {
+      const id = crypto.randomUUID()
+      ids.push(id)
+      await prisma.backgroundJob.create({
+        data: {
+          id,
+          type: LOOK_JOB_TYPE,
+          status: JOB_STATUS.running,
+          payload: { orgId: `org-sbx-person-${i}`, userId: strangerId, source: 'postgres', sandbox: {}, preview: null, refusal: null } as unknown as Prisma.InputJsonValue,
+          attempts: 1,
+          maxAttempts: 1,
+          runAt: now,
+          startedAt: now,
+          timeoutAt: new Date(now.getTime() + 60_000),
+        },
+      })
+    }
+    try {
+      await expect(assertSandboxRoom('look', 'org-sbx-person-new', strangerId)).rejects.toMatchObject({ code: 'IMPORT_BUSY' })
+    } finally {
+      await prisma.backgroundJob.deleteMany({ where: { id: { in: ids } } })
+    }
   })
 
   it('does nothing at all once its job has ended', async () => {

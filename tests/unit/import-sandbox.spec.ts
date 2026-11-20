@@ -136,6 +136,22 @@ describe('the arguments a sandbox task may send', () => {
     ).toBe(false)
   })
 
+  it('takes a schema only up to what one import may hold in all', () => {
+    const wide = (n: number) => ({ name: `t${n}`, columns: Array.from({ length: 1_000 }, (_, i) => ({ name: `c${i}`, type: 'TEXT' })) })
+    const tables = (n: number) => Array.from({ length: n }, (_, i) => wide(i))
+    expect(opArgsAccepted('pg.createTables', { tables: tables(30), title: 'Move in', usersTable: null })).toBe(true)
+    expect(opArgsAccepted('pg.createTables', { tables: tables(31), title: 'Move in', usersTable: null })).toBe(false)
+    const fb = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `t${i}`, parentTable: null, createColumns: Array.from({ length: 1_000 }, (_, k) => ({ name: `c${k}`, type: 'text' })) }))
+    expect(opArgsAccepted('fb.createTables', { plans: fb(30), title: 'Move in' })).toBe(true)
+    expect(opArgsAccepted('fb.createTables', { plans: fb(31), title: 'Move in' })).toBe(false)
+    const fk = { column: 'author_id', references: { table: 'authors', column: 'id', onDelete: 'CASCADE', onUpdate: 'NO ACTION' } }
+    const keys = (perTable: number, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `t${i}`, deferredForeignKeys: Array.from({ length: perTable }, () => fk) }))
+    const finish = (k: unknown) => ({ title: 'Move in', keys: k, buckets: null })
+    expect(opArgsAccepted('pg.finishSchema', finish(keys(1_000, 5)))).toBe(true)
+    expect(opArgsAccepted('pg.finishSchema', finish(keys(1_000, 6)))).toBe(false)
+  })
+
   it("takes a column's type only from the planner's closed list, and an exact type only in a declared spelling", () => {
     const withColumn = (column: Record<string, unknown>) => ({ tables: [{ name: 'posts', columns: [column] }], title: 'Move in', usersTable: null })
     expect(opArgsAccepted('pg.createTables', withColumn({ name: 'price', type: 'TEXT', sqlType: 'numeric(19,2)' }))).toBe(true)
