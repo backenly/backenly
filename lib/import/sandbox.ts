@@ -29,7 +29,7 @@
  * and optionally IMPORT_SANDBOX_CPU (1024) and IMPORT_SANDBOX_MEMORY (2048).
  */
 
-import { createHash, randomBytes, timingSafeEqual } from 'crypto'
+import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'crypto'
 import type { ImportConnection } from './contract'
 import type { WorkerKind } from './worker/protocol'
 
@@ -83,10 +83,39 @@ export function sandboxConfig(env: Env = process.env): SandboxConfig | null {
 
 // ── The job token ─────────────────────────────────────────────────────────────
 
-/** A token for one job: given to its task, stored only as its SHA-256. */
-export function newJobToken(): { token: string; hash: string } {
-  const token = randomBytes(32).toString('base64url')
+let tokenKey: Buffer | null = null
+
+/** The server's key for job tokens, derived apart from every other use of the secret it comes from. */
+function jobTokenKey(): Buffer {
+  if (tokenKey) return tokenKey
+  const raw = process.env.ENV_VAR_ENCRYPTION_KEY || process.env.JWT_SECRET
+  if (!raw) throw new Error('The import sandbox needs ENV_VAR_ENCRYPTION_KEY or JWT_SECRET for its job tokens.')
+  tokenKey = Buffer.from(hkdfSync('sha256', Buffer.from(raw, 'utf8'), Buffer.alloc(0), 'backenly/import-job-token/v1', 32) as ArrayBuffer)
+  return tokenKey
+}
+
+function tokenMac(jobId: string, nonce: Buffer): Buffer {
+  return createHmac('sha256', jobTokenKey()).update(`${jobId}:`).update(nonce).digest().subarray(0, 16)
+}
+
+/**
+ * A job's token: 16 random bytes and a MAC of them with the job's id, under
+ * the server's key. The MAC lets a web process turn away a token that was
+ * never one of its jobs' without reading the database; the job's row holds
+ * only the token's SHA-256, which proves it is this job's live token.
+ */
+export function newJobToken(jobId: string): { token: string; hash: string } {
+  const nonce = randomBytes(16)
+  const token = Buffer.concat([nonce, tokenMac(jobId, nonce)]).toString('base64url')
   return { token, hash: tokenHash(token) }
+}
+
+/** Whether `token` was made for `jobId` by a server holding the key: no database read. */
+export function tokenMadeFor(jobId: string, token: string): boolean {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return false
+  const raw = Buffer.from(token, 'base64url')
+  if (raw.length !== 32) return false
+  return timingSafeEqual(raw.subarray(16), tokenMac(jobId, raw.subarray(0, 16)))
 }
 
 export function tokenHash(token: string): string {
@@ -182,70 +211,6 @@ function heapMb(memory: string): number {
   return Math.max(256, Math.floor(Number(memory) * 0.6))
 }
 
-/** The worker's one volume: a scratch /tmp of the task's own, nothing mounted from anywhere. */
-function onlyScratchVolume(td: any, c: any): boolean {
-  const volumes = td.volumes ?? []
-  const v = volumes[0]
-  const mounts = c.mountPoints ?? []
-  return (
-    volumes.length === 1 &&
-    v?.name === 'tmp' &&
-    !v.efsVolumeConfiguration &&
-    !v.dockerVolumeConfiguration &&
-    !v.fsxWindowsFileServerVolumeConfiguration &&
-    !v.host?.sourcePath &&
-    !v.configuredAtLaunch &&
-    mounts.length === 1 &&
-    mounts[0]?.sourceVolume === 'tmp' &&
-    mounts[0]?.containerPath === '/tmp'
-  )
-}
-
-/**
- * Whether the family's latest definition is exactly the one this web would
- * register: a hostile source's task runs under it, so anything this web would
- * not have put there (a mount, a credential, another setting) means it is not
- * reused, and this web registers its own.
- */
-function sameDefinition(td: any, want: OwnImage, cfg: SandboxConfig): boolean {
-  const c = td?.containerDefinitions?.[0]
-  const env = Object.fromEntries((c?.environment ?? []).map((e: any) => [e.name, e.value]))
-  return (
-    !!c &&
-    td.containerDefinitions.length === 1 &&
-    td.status === 'ACTIVE' &&
-    !td.taskRoleArn &&
-    td.networkMode === 'awsvpc' &&
-    !td.pidMode &&
-    !td.ipcMode &&
-    !td.proxyConfiguration &&
-    !c.secrets?.length &&
-    !c.environmentFiles?.length &&
-    !c.repositoryCredentials &&
-    !c.privileged &&
-    !c.dependsOn?.length &&
-    !c.links?.length &&
-    !c.volumesFrom?.length &&
-    onlyScratchVolume(td, c) &&
-    c.user === 'node' &&
-    c.readonlyRootFilesystem === true &&
-    JSON.stringify(c.entryPoint ?? []) === JSON.stringify(['node']) &&
-    JSON.stringify(Object.keys(env).sort()) === JSON.stringify(['NODE_ENV', 'NODE_OPTIONS']) &&
-    env.NODE_ENV === 'production' &&
-    env.NODE_OPTIONS === `--max-old-space-size=${heapMb(cfg.memory)}` &&
-    JSON.stringify(c.linuxParameters?.capabilities?.drop ?? []) === JSON.stringify(['ALL']) &&
-    !c.linuxParameters?.capabilities?.add?.length &&
-    td.executionRoleArn === cfg.executionRoleArn &&
-    String(td.cpu) === cfg.cpu &&
-    String(td.memory) === cfg.memory &&
-    c.name === WORKER_CONTAINER &&
-    c.image === want.image &&
-    c.logConfiguration?.options?.['awslogs-group'] === cfg.logGroup &&
-    JSON.stringify(c.command ?? []) === JSON.stringify([WORKER_ENTRY]) &&
-    (want.runtimePlatform?.cpuArchitecture ?? null) === (td.runtimePlatform?.cpuArchitecture ?? null)
-  )
-}
-
 export function ecsLauncher(cfg: SandboxConfig): SandboxLauncher {
   let clientPromise: Promise<import('@aws-sdk/client-ecs').ECSClient> | null = null
   const client = () =>
@@ -256,15 +221,10 @@ export function ecsLauncher(cfg: SandboxConfig): SandboxLauncher {
     const ecsClient = await client()
     const want = await ownImage(ecsClient)
     if (definition && definition.image === want.image) return definition.arn
-    const { DescribeTaskDefinitionCommand, RegisterTaskDefinitionCommand } = await import('@aws-sdk/client-ecs')
-    const latest = await ecsClient.send(new DescribeTaskDefinitionCommand({ taskDefinition: cfg.family })).then(
-      (r) => r.taskDefinition,
-      () => undefined,
-    )
-    if (latest?.taskDefinitionArn && sameDefinition(latest, want, cfg)) {
-      definition = { image: want.image, arn: latest.taskDefinitionArn }
-      return definition.arn
-    }
+    // Always this web's own registration, never the family's latest: a hostile source's task runs under it, and a
+    // revision anything else registered could carry a mount, a credential or a command this web never put there.
+    // Once per web process and image, so the family gains a revision when a web task starts, no more.
+    const { RegisterTaskDefinitionCommand } = await import('@aws-sdk/client-ecs')
     const registered = await ecsClient.send(
       new RegisterTaskDefinitionCommand({
         family: cfg.family,

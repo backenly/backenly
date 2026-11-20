@@ -6,7 +6,7 @@
  */
 
 import { importReading } from '@/lib/import/jobs'
-import { newJobToken, sandboxConfig, setSandboxLauncherForTests, tokenHash, tokenMatches } from '@/lib/import/sandbox'
+import { newJobToken, sandboxConfig, setSandboxLauncherForTests, tokenHash, tokenMadeFor, tokenMatches } from '@/lib/import/sandbox'
 import { KEPT_BCRYPT_HASH, keptAuthUser } from '@/lib/import/supabase-auth'
 import { opArgsAccepted } from '@/lib/import/worker-api'
 import { failureOf, mergePatches, workerEnv } from '@/lib/import/worker/main'
@@ -54,14 +54,27 @@ describe('where a source is read', () => {
 
 describe('the job token', () => {
   it('is proven by its hash alone, in constant time', () => {
-    const { token, hash } = newJobToken()
+    const jobId = '6f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b'
+    const { token, hash } = newJobToken(jobId)
     expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(hash).toBe(tokenHash(token))
     expect(tokenMatches(token, hash)).toBe(true)
-    expect(tokenMatches(newJobToken().token, hash)).toBe(false)
+    expect(tokenMatches(newJobToken(jobId).token, hash)).toBe(false)
     // An ended job has no hash: its token proves nothing.
     expect(tokenMatches(token, null)).toBe(false)
     expect(tokenMatches(token, 'not-a-hash')).toBe(false)
+  })
+
+  it('is told apart from no token of this job without the database', () => {
+    const jobId = '6f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b'
+    const { token } = newJobToken(jobId)
+    expect(tokenMadeFor(jobId, token)).toBe(true)
+    expect(tokenMadeFor('0f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b', token)).toBe(false)
+    const raw = Buffer.from(token, 'base64url')
+    raw[31] ^= 1
+    expect(tokenMadeFor(jobId, raw.toString('base64url'))).toBe(false)
+    expect(tokenMadeFor(jobId, 'A'.repeat(43))).toBe(false)
+    expect(tokenMadeFor(jobId, token + 'x')).toBe(false)
   })
 })
 
@@ -173,7 +186,7 @@ describe('the arguments a sandbox task may send', () => {
 
 describe('the sandbox task', () => {
   it('runs only with its three settings', () => {
-    const token = newJobToken().token
+    const token = newJobToken('6f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b').token
     expect(workerEnv({ IMPORT_ORIGIN: 'https://backenly.com', IMPORT_JOB_ID: '6f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b', IMPORT_JOB_TOKEN: token })).toEqual({
       origin: 'https://backenly.com',
       jobId: '6f1c2c1e-7a3b-4b9e-9f00-1c2d3e4f5a6b',

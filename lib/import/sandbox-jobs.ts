@@ -164,12 +164,22 @@ export async function assertSandboxRoom(kind: WorkerKind, orgId: string, userId:
  * lock, so starts sent together cannot pass the caps together.
  */
 async function createWithinRoom(kind: WorkerKind, orgId: string, userId: string, data: Prisma.BackgroundJobUncheckedCreateInput): Promise<void> {
-  const full = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('backenly:import-sandbox-room'))::text AS locked`
-    if (await sandboxFull(tx, kind, orgId, userId)) return true
-    await tx.backgroundJob.create({ data })
-    return false
-  })
+  let full: boolean
+  try {
+    full = await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('backenly:import-sandbox-room'))`
+        if (await sandboxFull(tx, kind, orgId, userId)) return true
+        await tx.backgroundJob.create({ data })
+        return false
+      },
+      { maxWait: 10_000, timeout: 15_000 },
+    )
+  } catch (err) {
+    // Starts queued behind the lock past its wait: as busy as a full sandbox, and nothing was created.
+    if ((err as { code?: string })?.code === 'P2028') throw sandboxBusy(kind)
+    throw err
+  }
   if (full) throw sandboxBusy(kind)
 }
 
@@ -201,7 +211,7 @@ export async function startLook(input: {
 }): Promise<{ lookId: string }> {
   await assertSandboxRoom('look', input.orgId, input.userId)
   const lookId = randomUUID()
-  const { token, hash } = newJobToken()
+  const { token, hash } = newJobToken(lookId)
   const now = new Date()
   const deadline = new Date(now.getTime() + START_GRACE_MS + IMPORT_LIMITS.inspectMs)
   const payload: LookPayload = {
@@ -257,10 +267,8 @@ export async function startSandboxImport(input: {
   spendBudget?: () => Promise<void>
 }): Promise<{ jobId: string }> {
   await assertSandboxRoom('import', input.orgId, input.userId)
-  // Spent once a task is about to start: a start turned away as busy spends none of the organization's starts.
-  await input.spendBudget?.()
   const jobId = randomUUID()
-  const { token, hash } = newJobToken()
+  const { token, hash } = newJobToken(jobId)
   const now = new Date()
   const deadline = new Date(now.getTime() + START_GRACE_MS + IMPORT_LIMITS.checkMs + IMPORT_LIMITS.maxMs)
   const source = input.connection.source
@@ -297,6 +305,13 @@ export async function startSandboxImport(input: {
     startedAt: now,
     timeoutAt: new Date(now.getTime() + START_GRACE_MS),
   })
+  // Spent once the task's place is held: a start turned away as busy spends none of the organization's starts.
+  try {
+    await input.spendBudget?.()
+  } catch (err) {
+    await prisma.backgroundJob.delete({ where: { id: jobId } }).catch(() => {})
+    throw err
+  }
   await launch(jobId, 'import', token)
   return { jobId }
 }

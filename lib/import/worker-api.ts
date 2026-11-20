@@ -47,7 +47,7 @@ import { MAX_IMPORT_TABLES, PAGE_SLACK_BYTES, STORED_PER_COUNTED, roomRefusal } 
 import { measureProjectRows, rowCost } from './pg-engine'
 import { KEPT_BCRYPT_HASH, keptAuthUser, userCost } from './supabase-auth'
 import type { ImportedUser } from './drivers/firebase-users'
-import { tokenMatches } from './sandbox'
+import { tokenMadeFor, tokenMatches } from './sandbox'
 import {
   LOOK_JOB_TYPE,
   extendLease,
@@ -161,7 +161,7 @@ async function readJson(request: Request, max: number, withinMs: number = BODY_W
  * idle timeout never ends the request, then the JSON. The status is then
  * always 200; `ok: false` and `status` in the body say a refusal.
  */
-function keepAlive(work: () => Promise<{ status: number; body: Record<string, unknown> }>, done: () => void = () => {}): Response {
+function keepAlive(work: () => Promise<{ status: number; body: Record<string, unknown> }>, done: () => void | Promise<void> = () => {}): Response {
   const encoder = new TextEncoder()
   let timer: ReturnType<typeof setInterval> | undefined
   let open = true
@@ -184,7 +184,10 @@ function keepAlive(work: () => Promise<{ status: number; body: Record<string, un
         send(controller, JSON.stringify({ ok: false, status: 500, error: 'Something went wrong on our side.' }))
       } finally {
         clearInterval(timer)
-        done()
+        // Before the answer ends: what the call held (its lease above all) is given back by the time the task reads it.
+        await Promise.resolve()
+          .then(done)
+          .catch(() => {})
         if (open) {
           open = false
           try {
@@ -284,11 +287,25 @@ function takeJobPlace(jobId: string): (() => void) | null {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-/** The job this call is for, proven; or the answer to give instead. */
-async function provenJob(request: Request): Promise<{ row: BackgroundJob } | { refused: NextResponse }> {
+interface Claim {
+  jobId: string
+  bearer: string
+}
+
+/**
+ * The job a call says it is for, and its token, when the token was made for
+ * that job by this server (lib/import/sandbox.ts tokenMadeFor): no database
+ * read, so a call that is no job's takes no place in this process at all.
+ */
+function claimOf(request: Request): Claim | null {
   const jobId = request.headers.get(HEADER_JOB) ?? ''
-  const bearer = /^Bearer ([A-Za-z0-9_-]{20,200})$/.exec(request.headers.get('authorization') ?? '')?.[1]
-  if (!UUID.test(jobId) || !bearer) return { refused: notFound() }
+  const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get('authorization') ?? '')?.[1]
+  if (!UUID.test(jobId) || !bearer || !tokenMadeFor(jobId.toLowerCase(), bearer)) return null
+  return { jobId, bearer }
+}
+
+/** The job this call is for, proven against its row; or the answer to give instead. */
+async function provenJob(request: Request, { jobId, bearer }: Claim): Promise<{ row: BackgroundJob } | { refused: NextResponse }> {
   const row = await prisma.backgroundJob.findFirst({ where: { id: jobId, type: { in: [IMPORT_JOB_TYPE, LOOK_JOB_TYPE] } } })
   const s = row ? sandboxOf(row) : null
   // A job that ended has no token hash left, so its token proves nothing: 404 like a wrong one.
@@ -489,7 +506,7 @@ async function assertRoom(projectId: string, payload: ImportPayload, cost: numbe
  * connection of the platform's pool; one left by a web task that died lapses
  * on its own.
  */
-const LEASE_MS = 5 * 60_000
+const LEASE_MS = 2 * 60_000
 /** As long as the task waits for one op's answer (lib/import/worker/remote.ts): past it, no one is waiting. */
 const OP_WALL_MS = 15 * 60_000
 const LEASE_RENEW_MS = 30_000
@@ -522,23 +539,21 @@ async function releaseJobLease(jobId: string, lease: string): Promise<void> {
 }
 
 /**
- * Hold a write's lease while it runs and say when to stop: the signal aborts
- * once the job ended (the lease could not be renewed) or the write ran past
- * OP_WALL_MS. Schema work stops at its next step; the lease then lapses.
+ * Hold a write's lease until the write settles, and say when to stop: the
+ * signal aborts once the job ended (the lease could not be renewed) or the
+ * write ran past OP_WALL_MS, and its steps stop at the next one. The lease is
+ * kept until the write settles, so no second write of the job starts beside
+ * one still running; once the job ended it cannot be renewed, and lapses.
  */
 function holdLease(jobId: string, lease: string): { signal: AbortSignal; stop: () => void } {
   const controller = new AbortController()
   const started = Date.now()
   const timer = setInterval(() => {
-    if (Date.now() - started > OP_WALL_MS) {
-      controller.abort(new Refused(504, 'This write ran past its time.'))
-      clearInterval(timer)
-      return
-    }
+    if (!controller.signal.aborted && Date.now() - started > OP_WALL_MS) controller.abort(new Refused(504, 'This write ran past its time.'))
     void renewJobLease(jobId, lease).then(
       (held) => {
         if (!held) {
-          controller.abort(new Refused(409, 'This import has ended.', 'IMPORT_ENDED'))
+          if (!controller.signal.aborted) controller.abort(new Refused(409, 'This import has ended.', 'IMPORT_ENDED'))
           clearInterval(timer)
         }
       },
@@ -575,13 +590,32 @@ async function tableCount(projectId: string): Promise<number> {
 
 /** Tables a new project holds before an import adds any (users, the teams tables and the like), with room to spare. */
 const TABLES_BESIDES_THE_IMPORT = 50
+/** Their columns, with room to spare. */
+const COLUMNS_BESIDES_THE_IMPORT = 2_000
+
+/** Columns of ordinary tables in the project's own schema now. */
+async function columnCount(projectId: string): Promise<number> {
+  const { projectPool } = await import('@/lib/data-plane/regional')
+  const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+  const pool = await projectPool(projectId, 'import', { max: 4 })
+  const r = await pool.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM pg_catalog.pg_attribute a
+       JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped`,
+    [workspaceSchemaName(projectId)],
+  )
+  return Number(r.rows[0]?.n ?? 0)
+}
+
+const columnsAsked = (plans: Array<{ createColumns?: unknown[] }>) => plans.reduce((n, p) => n + (p.createColumns?.length ?? 0), 0)
 
 async function runOp(row: BackgroundJob, op: DestinationOp, args: any, signal: AbortSignal): Promise<Record<string, unknown>> {
   const payload = row.payload as unknown as ImportPayload
   const projectId = row.projectId!
   const userId = payload.userId
   const pg = () => localPgDestination({ projectId, userId, jobId: row.id, signal })
-  const fb = async () => (await import('./drivers/firebase-destination')).backenlyDestination({ projectId, userId })
+  const fb = async () => (await import('./drivers/firebase-destination')).backenlyDestination({ projectId, userId, signal })
 
   switch (op) {
     case 'pg.createTables':
@@ -637,6 +671,10 @@ async function runOp(row: BackgroundJob, op: DestinationOp, args: any, signal: A
       if ((await tableCount(projectId)) + (args.plans as unknown[]).length > MAX_IMPORT_TABLES + TABLES_BESIDES_THE_IMPORT) {
         throw new Refused(409, `One import moves up to ${MAX_IMPORT_TABLES.toLocaleString('en-US')} tables.`)
       }
+      // And its columns, counted across every call: collections arrive in several.
+      if ((await columnCount(projectId)) + columnsAsked(args.plans) > MAX_IMPORT_COLUMNS + COLUMNS_BESIDES_THE_IMPORT) {
+        throw new Refused(409, `One import moves up to ${MAX_IMPORT_COLUMNS.toLocaleString('en-US')} columns.`)
+      }
       return { unindexed: await (await fb()).createTables(args.plans, args.title) }
     case 'fb.addExtraColumn':
       if (!(await tableColumns(projectId, args.table))) throw new Refused(404, `There is no table ${args.table}.`)
@@ -689,7 +727,12 @@ async function handleOp(row: BackgroundJob, body: any, signal: AbortSignal): Pro
   const family = payload.source === 'firebase' ? (FIREBASE_OPS as readonly string[]) : (PG_OPS as readonly string[])
   if (typeof op !== 'string' || !family.includes(op)) return { status: 400, body: { error: 'Not an op for this source.' } }
   const parsed = OP_ARGS[op].safeParse(body?.args ?? {})
-  if (!parsed.success) return { status: 400, body: { error: `The ${op} arguments were refused.` } }
+  if (!parsed.success) {
+    const said = parsed.error.issues.map((i) => i.message)
+    if (said.includes('too many columns')) return { status: 409, body: { error: `One import moves up to ${MAX_IMPORT_COLUMNS.toLocaleString('en-US')} columns.` } }
+    if (said.includes('too many foreign keys')) return { status: 409, body: { error: `One import moves up to ${MAX_IMPORT_FOREIGN_KEYS.toLocaleString('en-US')} foreign keys.` } }
+    return { status: 400, body: { error: `The ${op} arguments were refused.` } }
+  }
   try {
     const run = async () => {
       const step = ONCE[op]
@@ -738,7 +781,10 @@ async function handleFile(row: BackgroundJob, request: Request): Promise<NextRes
 /** One task call. */
 export async function handleWorkerCall(action: string, request: Request): Promise<Response> {
   if (!(WORKER_ACTIONS as readonly string[]).includes(action)) return notFound()
-  // A place in this process first, before the job is even read (Calls in this process, above).
+  // A token this server made for the job it names, or nothing at all: checked without the database.
+  const claim = claimOf(request)
+  if (!claim) return notFound()
+  // Then a place in this process, before the job is even read (Calls in this process, above).
   const place = takeCallPlace()
   if (!place) return busy()
   const held: Array<() => void> = [place]
@@ -751,7 +797,7 @@ export async function handleWorkerCall(action: string, request: Request): Promis
     }
   }
   try {
-    const proven = await provenJob(request)
+    const proven = await provenJob(request, claim)
     if ('refused' in proven) return proven.refused
     const jobPlace = takeJobPlace(proven.row.id)
     if (!jobPlace) return busy()
@@ -813,42 +859,67 @@ async function answerCall(action: WorkerAction, request: Request, row: Backgroun
         }
         const release = takeBodySlot()
         if (!release) return busy()
-        const lease = await takeJobLease(row.id)
+        let lease: string | null
+        try {
+          lease = await takeJobLease(row.id)
+        } catch (err) {
+          release()
+          throw err
+        }
         if (!lease) {
           release()
           return busy()
         }
+        const leaseId = lease
         let body: unknown
         try {
           body = await readJson(request, BODY_LIMITS.op, BODY_WITHIN_MS.op)
         } catch (err) {
           release()
-          await releaseJobLease(row.id, lease)
+          await releaseJobLease(row.id, leaseId)
           throw err
         }
-        const hold = holdLease(row.id, lease)
-        const done = handOff()
+        const hold = holdLease(row.id, leaseId)
+        const giveBack = handOff()
+        let placesGiven = false
+        const givePlaces = () => {
+          if (placesGiven) return
+          placesGiven = true
+          release()
+          giveBack()
+        }
+        // A write that never settles gives back this process's places a while after the task stopped waiting for it.
+        // Its lease stays held until it settles or its job ends, so no second write of the job runs beside it.
+        const backstop = setTimeout(givePlaces, OP_WALL_MS + 5 * 60_000)
         return keepAlive(
           () => handleOp(row, body, hold.signal),
-          () => {
+          async () => {
+            clearTimeout(backstop)
             hold.stop()
-            release()
-            void releaseJobLease(row.id, lease)
-            done()
+            givePlaces()
+            await releaseJobLease(row.id, leaseId)
           },
         )
       }
       case 'file': {
         const release = takeBodySlot()
         if (!release) return busy()
-        const lease = await takeJobLease(row.id)
+        let lease: string | null
+        try {
+          lease = await takeJobLease(row.id)
+        } catch (err) {
+          release()
+          throw err
+        }
         if (!lease) {
           release()
           return busy()
         }
+        const hold = holdLease(row.id, lease)
         try {
           return await handleFile(row, request)
         } finally {
+          hold.stop()
           release()
           await releaseJobLease(row.id, lease)
         }

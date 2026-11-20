@@ -208,8 +208,8 @@ export async function uploadImportFile(
   }
 }
 
-export function backenlyDestination(input: { projectId: string; userId: string }): FirebaseDestination {
-  const { projectId, userId } = input
+export function backenlyDestination(input: { projectId: string; userId: string; signal?: AbortSignal }): FirebaseDestination {
+  const { projectId, userId, signal } = input
   // The project's own schema; schemaIdent refuses it unless the id is a uuid.
   const schema = `workspace_${projectId}`
   /** The tables this import writes rows into, for measureRows. */
@@ -264,6 +264,7 @@ export function backenlyDestination(input: { projectId: string; userId: string }
       if (plans.length === 0) return unindexed
       await governed(title, async () => {
         for (const plan of plans) {
+          signal?.throwIfAborted()
           tablesWritten.add(plan.name)
           await act('CREATE_TABLE', createTableParams(plan))
           await act('SET_PERMISSION', { tableName: plan.name, template: 'admin_only' })
@@ -286,6 +287,7 @@ export function backenlyDestination(input: { projectId: string; userId: string }
     async insertRows(table, columns, rows) {
       let written = 0
       for (const stmt of buildInserts(schema, table, columns, rows)) {
+        signal?.throwIfAborted()
         try {
           written += await asServiceRole(async (c) => (await c.query(stmt.sql, stmt.values)).rowCount ?? 0)
         } catch (err) {

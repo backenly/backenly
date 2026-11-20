@@ -65,7 +65,7 @@ const roomy = (): ImportLimits => limitsLeft({ planRowBytes: 500 * MB, planFileB
 /** What sandbox-jobs.ts writes when it launches a task, for a project that exists already. */
 async function job(kind: 'look' | 'import', opts: { stage?: SandboxStage; limits?: ImportLimits; taskArn?: string; handed?: boolean } = {}) {
   const jobId = crypto.randomUUID()
-  const { token, hash } = newJobToken()
+  const { token, hash } = newJobToken(jobId)
   const now = new Date()
   const sandbox = {
     kind,
@@ -210,7 +210,9 @@ it('moves a source into the project through the sandbox, every write run by the 
 describe('what a task may not do', () => {
   it('speaks for no job with the wrong token, and for a job only from its own task', async () => {
     const j = await job('import', { stage: 'running', handed: true })
-    expect((await call({ ...j, token: newJobToken().token }, 'next', {})).status).toBe(404)
+    // Another token made for this very job, but not the one its row holds; and one made for no job at all.
+    expect((await call({ ...j, token: newJobToken(j.jobId).token }, 'next', {})).status).toBe(404)
+    expect((await call({ ...j, token: newJobToken(crypto.randomUUID()).token }, 'next', {})).status).toBe(404)
     const pinned = await job('import', { stage: 'running', handed: true, taskArn: 'arn:aws:ecs:ap-south-1:111122223333:task/c/abc' })
     expect((await call(pinned, 'next', {})).status).toBe(403)
     expect((await call(pinned, 'next', {}, { [HEADER_TASK]: 'arn:aws:ecs:ap-south-1:111122223333:task/c/abc' })).status).toBe(200)
@@ -283,6 +285,8 @@ describe('what a task may not do', () => {
   })
 
   it('holds one person to their own share of the sandbox, whatever their organizations', async () => {
+    // Room for this person in a new organization before, so the refusal below is the person's own share.
+    await expect(assertSandboxRoom('look', 'org-sbx-person-new', strangerId)).resolves.toBeUndefined()
     const now = new Date()
     const ids: string[] = []
     for (let i = 0; i < SANDBOX_CAPS.looksPerUser; i++) {
