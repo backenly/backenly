@@ -641,7 +641,6 @@ const progressWritten = new Map<string, number>()
 
 /** Merge a task's progress; answers whether a person canceled the import. */
 export async function workerProgress(row: BackgroundJob, patch: ProgressPatch): Promise<{ cancel: boolean }> {
-  const p = row.payload as unknown as ImportPayload
   const clean: ProgressPatch = { ...patch }
   // The task may move what it counts, never who or where the job is.
   for (const k of ['jobId', 'projectId', 'projectName', 'region', 'orgId', 'source', 'status', 'startedAt', 'finishedAt', 'error'] as const) {
@@ -654,18 +653,20 @@ export async function workerProgress(row: BackgroundJob, patch: ProgressPatch): 
   delete (clean as any).warnings
   if (clean.phase !== undefined && !PHASES.includes(clean.phase as ImportPhase)) delete (clean as any).phase
   const cancel = row.error === IMPORT_ERRORS.cancelRequested
-  // At most one write a second per job in this process, whatever the task sends: the job's row is
-  // rewritten whole each time. A call in between still keeps the lease.
+  // At most one write a second per job in this process, whatever the task sends: the job's row is rewritten whole
+  // each time. A patch that comes sooner waits its turn (under a second; a job sends a few calls at once at most,
+  // worker-api.ts), never dropped, so the task's last word (every table counted and verified) is the one kept.
+  const since = Date.now() - (progressWritten.get(row.id) ?? 0)
+  if (since < 900) await new Promise((resolve) => setTimeout(resolve, 900 - since))
   const now = Date.now()
-  if (now - (progressWritten.get(row.id) ?? 0) < 900) {
-    await extendLease(row.id)
-    return { cancel }
-  }
   progressWritten.set(row.id, now)
   if (progressWritten.size > 500) {
     for (const [id, at] of progressWritten) if (now - at > 3_600_000) progressWritten.delete(id)
   }
-  let progress = mergeProgress(p.progress, clean)
+  // The progress as it is now, not as it was when this call arrived: an earlier patch may have been written meanwhile.
+  const current = await prisma.backgroundJob.findUnique({ where: { id: row.id }, select: { payload: true, status: true } })
+  if (!current || current.status !== JOB_STATUS.running) return { cancel }
+  let progress = mergeProgress((current.payload as unknown as ImportPayload).progress, clean)
   if (progress.tables.length > MAX_PROGRESS_TABLES) progress = { ...progress, tables: progress.tables.slice(0, MAX_PROGRESS_TABLES) }
   await prisma.$executeRaw`UPDATE background_jobs
        SET payload = jsonb_set(payload, '{progress}', ${JSON.stringify(progress)}::jsonb, true),

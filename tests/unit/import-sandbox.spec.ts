@@ -9,7 +9,7 @@ import { importReading } from '@/lib/import/jobs'
 import { newJobToken, sandboxConfig, setSandboxLauncherForTests, tokenHash, tokenMadeFor, tokenMatches } from '@/lib/import/sandbox'
 import { KEPT_BCRYPT_HASH, keptAuthUser } from '@/lib/import/supabase-auth'
 import { opArgsAccepted } from '@/lib/import/worker-api'
-import { failureOf, mergePatches, workerEnv } from '@/lib/import/worker/main'
+import { ProgressSender, failureOf, mergePatches, workerEnv } from '@/lib/import/worker/main'
 import { ImportInputError } from '@/lib/import/driver'
 import { ImportAborted } from '@/lib/import/pg-engine'
 
@@ -214,5 +214,32 @@ describe('the sandbox task', () => {
       ['a', 4],
       ['b', 0],
     ])
+  })
+})
+
+describe("the task's progress", () => {
+  it('sends its last word after a send already in flight, never instead of it', async () => {
+    const sent: unknown[] = []
+    let release: () => void = () => {}
+    const api = {
+      call: (_action: string, body: { patch: unknown }) => {
+        sent.push(body.patch)
+        // The first send hangs until released; the rest answer at once.
+        return sent.length === 1 ? new Promise((resolve) => (release = () => resolve({ cancel: false }))) : Promise.resolve({ cancel: false })
+      },
+    }
+    const sender = new ProgressSender(api as any, new AbortController())
+    try {
+      sender.add({ phase: 'rows' })
+      const first = sender.flush(false)
+      sender.add({ phase: 'verifying', tables: [{ name: 'authors', sourceRows: 12, copiedRows: 12, verified: true }] })
+      const last = sender.flush(true)
+      release()
+      await first
+      await last
+      expect(sent).toEqual([{ phase: 'rows' }, { phase: 'verifying', tables: [{ name: 'authors', sourceRows: 12, copiedRows: 12, verified: true }] }])
+    } finally {
+      sender.stop()
+    }
   })
 })
