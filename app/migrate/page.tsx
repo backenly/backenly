@@ -66,9 +66,10 @@ export const metadata: Metadata = pageMetadata({
 })
 
 const URL = `${SITE_URL}${GUIDE_PATH}`
-// Nothing reads `start` yet: signup lands on /app, and the import is the
-// "Import it" link under Create your first project (components/onboarding/WelcomeDialog.tsx).
-const START = '/auth/signup?start=move'
+// Signup follows ?redirect= (lib/auth/return-path.ts) to /app/welcome, which on
+// Backenly Cloud forwards to the organization's import page (after naming the
+// first organization, for a new account); a self-hosted deployment lands on /app.
+const START = `/auth/signup?redirect=${encodeURIComponent('/app/welcome')}`
 // Literal, not SiteShell's ROUTES: that object comes from a client module and is undefined in a server page.
 const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
 

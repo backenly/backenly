@@ -53,6 +53,10 @@ export function MovedNotice({ projects }: { projects: Project[] }) {
   const moved = project.importedFrom
   const from = SOURCES[moved.source].name
   const rules = moved.rulesPending
+  // Firestore security rules have no exact translation, so nothing waits in
+  // Autonomy for a Firebase move: its tables stay closed until rules are
+  // written (the import's own Done summary says the same, components/onboarding/MoveStep.tsx).
+  const closedOnly = moved.source === 'firebase'
 
   return (
     <section
@@ -72,11 +76,18 @@ export function MovedNotice({ projects }: { projects: Project[] }) {
             moved from {from}.
           </span>{' '}
           {moved.tables === 1 ? 'Its table matches.' : `All ${n(moved.tables)} tables match.`} Your app can’t read{' '}
-          {moved.tables === 1 ? 'it' : 'them'} until you approve {n(rules)} access {rules === 1 ? 'rule' : 'rules'}.
+          {moved.tables === 1 ? 'it' : 'them'}{' '}
+          {closedOnly
+            ? 'until access rules are added: Firestore security rules don’t carry over.'
+            : `until you approve ${n(rules)} access ${rules === 1 ? 'rule' : 'rules'}.`}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2 pl-[26px] sm:pl-0">
-        <KitButtonLink href={`/app/projects/${project.id}/autonomy`}>Review access rules</KitButtonLink>
+        {closedOnly ? (
+          <KitButtonLink href={`/app/projects/${project.id}/database`}>Open the tables</KitButtonLink>
+        ) : (
+          <KitButtonLink href={`/app/projects/${project.id}/autonomy`}>Review access rules</KitButtonLink>
+        )}
         <IconButton icon={X} label="Dismiss" onClick={() => setDismissed((d) => [...d, project.id])} />
       </div>
     </section>
