@@ -2,14 +2,20 @@
  * What a move carries, and where each part of it stands at a moment.
  *
  * `MovePlan` is the shape the importer's report already has
- * (lib/import/jobs.ts progress: tables with source and copied rows, auth
- * users, policies), plus files. `progressAt(plan, t)` turns a plan into the
- * state of every row at `t` seconds, as a pure function, so the console can
- * play a real move from the importer's events and the landing page can loop
- * the same picture from a clock, and both render through one ledger.
+ * (lib/import/contract.ts ImportProgress: tables with source and copied rows,
+ * users, files, and the access rules waiting for approval). `progressAt(plan, t)`
+ * turns a plan into the state of every row at `t` seconds, as a pure
+ * function, so the /migrate page can loop a move from a clock.
  *
- * Rows copy in batches of 500, the importer's BATCH_SIZE, so a counter steps
- * the way the real one does instead of spinning through every integer.
+ * The importer copies rows in batches (lib/import/pg-engine.ts sizes them,
+ * up to 1,000 rows), so the picture's counter steps 500 at a time instead of
+ * spinning through every integer.
+ *
+ * The example plans hold only what the importer reports for that source: an
+ * access-rules row only where rules are translated and wait for approval
+ * (Supabase; Firestore rules are never translated, and a plain Postgres app
+ * rarely has policies in shapes that translate), and "stays behind" only
+ * where the review counts it (a Supabase database's functions).
  */
 
 import type { SourceId } from './sources'
@@ -21,11 +27,11 @@ export interface MoveTable {
 
 export interface MovePlan {
   source: SourceId
-  /** The project's name where it is now, which it keeps on Backenly. */
+  /** The new project's name, as the person set it on the Review step. */
   project: string
   /** Where it is now, in the source's own words: its region, or its project id. */
   sourceWhere: string
-  /** The source's account or organization, which names the Backenly organization. */
+  /** The Backenly organization it moves into. */
   sourceOrg: string
   /** The Backenly region it moves into. */
   region: string
@@ -34,12 +40,10 @@ export interface MovePlan {
   tables: MoveTable[]
   users?: number
   files?: { count: number; bytes: number; buckets: number }
-  /** Access rules, rewritten for Backenly and held until a person approves them. */
+  /** Access rules translated for Backenly, one per table, held until a person approves them. */
   rules?: { count: number; word: string; short: string }
-  /** What stays behind, said plainly. */
+  /** What stays behind, as the review counts it. */
   staysBehind?: { count: number; word: string }
-  /** The size of the whole move, for the estimate. */
-  minutes: number
 }
 
 export const COURTSIDE_SUPABASE: MovePlan = {
@@ -62,9 +66,8 @@ export const COURTSIDE_SUPABASE: MovePlan = {
   ],
   users: 12904,
   files: { count: 13467, bytes: 2.1e9, buckets: 2 },
-  rules: { count: 18, word: 'row-level security policies', short: 'policies' },
-  staysBehind: { count: 3, word: 'Edge Functions' },
-  minutes: 4,
+  rules: { count: 7, word: 'tables’ row-level security policies', short: 'tables' },
+  staysBehind: { count: 3, word: 'database functions' },
 }
 
 export const COURTSIDE_FIREBASE: MovePlan = {
@@ -86,9 +89,6 @@ export const COURTSIDE_FIREBASE: MovePlan = {
   ],
   users: 12904,
   files: { count: 13467, bytes: 2.1e9, buckets: 1 },
-  rules: { count: 14, word: 'Security Rules', short: 'rules' },
-  staysBehind: { count: 4, word: 'Cloud Functions' },
-  minutes: 5,
 }
 
 export const COURTSIDE_POSTGRES: MovePlan = {
@@ -109,8 +109,6 @@ export const COURTSIDE_POSTGRES: MovePlan = {
     { name: 'coaches', rows: 41 },
     { name: 'clubs', rows: 12 },
   ],
-  rules: { count: 6, word: 'row-level security policies', short: 'policies' },
-  minutes: 2,
 }
 
 export const DEMO_PLANS: Record<SourceId, MovePlan> = {

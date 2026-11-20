@@ -51,8 +51,9 @@ import {
      end in an arrow, an approval gate or a stop;
    - after the move as the landing's cells; the questions; the closing.
 
-   The words are app/migrate/content.ts, unchanged in substance. The page and
-   its links wait for NEXT_PUBLIC_MIGRATION=published (components/migrate/flag.ts).
+   The words are app/migrate/content.ts, checked against the importer as
+   built on 2026-11-21, as are the words below. The page and its links wait
+   for NEXT_PUBLIC_MIGRATION=published (components/migrate/flag.ts).
    Violet stays low (founders, 2026-11-15: less of the purple).
 ───────────────────────────────────────────────────────────── */
 
@@ -65,17 +66,19 @@ export const metadata: Metadata = pageMetadata({
 })
 
 const URL = `${SITE_URL}${GUIDE_PATH}`
+// Nothing reads `start` yet: signup lands on /app, and the import is the
+// "Import it" link under Create your first project (components/onboarding/WelcomeDialog.tsx).
 const START = '/auth/signup?start=move'
 // Literal, not SiteShell's ROUTES: that object comes from a client module and is undefined in a server page.
 const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
 
 const SUMMARY =
-  'Backenly moves a project in one click: its tables and rows, its users with their passwords, and its files. Your old project is only read, so your app keeps running there until you switch it over.'
+  'Backenly copies a project into a new Backenly project: its tables and rows, its users with their passwords, and its files. Your old project is only read, so your app keeps running there until you switch it over.'
 
 /** Three facts from the guide's own pages, set under the actions. */
 const HERO_FACTS = [
-  'Read access only. Nothing in your old project changes.',
-  'Your users keep the passwords they have.',
+  'Backenly only reads your old project. Nothing there changes.',
+  'Users who sign in with a password keep it.',
   'Every table is counted on both sides before the move is done.',
 ]
 
@@ -165,7 +168,7 @@ const AFTER: CellItem[] = [
   {
     icon: ShieldCheck,
     title: 'Approve the access rules',
-    body: 'Backenly rewrites row-level security policies and Security Rules as its own access rules and holds them for you. Until you approve them, only your server key can read or write the moved tables, so nothing is open while you check them.',
+    body: 'Backenly translates the row-level security policies it understands into its own access rules and holds them for your approval on the project’s Autonomy page. Firestore Security Rules are not translated. Until a table has rules, only your server key can read or write it, so nothing is open while you check.',
   },
   {
     icon: Code2,
@@ -186,7 +189,7 @@ const AFTER: CellItem[] = [
   {
     icon: RefreshCw,
     title: 'Switch when you are ready',
-    body: 'Your old project keeps running, untouched. Move again right before you switch, so the copy is fresh, then point your app at Backenly.',
+    body: 'Your old project keeps running, untouched. Move again right before you switch, so the copy is fresh (each move makes a new project), then point your app at Backenly.',
   },
 ]
 
@@ -253,13 +256,13 @@ export default function MigrationGuide() {
             layout="stacked"
             tag={{ icon: Route, label: 'How it works' }}
             title="How a move works"
-            body="A move copies a project into a new Backenly project and checks it: every table is counted on the old side and the new, and the move is done only when the two counts match. Start one from the first screen after you sign up."
+            body="A move copies a project into a new Backenly project and checks it: every table is counted on the old side and the new, and any count that differs is reported. Start one after you sign up, from Import it under Create your first project."
           />
           <div className="border-t border-white/[0.08] p-[16px] sm:p-[28px] lg:p-[40px]">
             <MoveSteps
               steps={STEPS}
               screens={[
-                <StepScreen key="connect" title="Connect Supabase" lede="Pick the project to move. Backenly gets read access only, and never writes to Supabase.">
+                <StepScreen key="connect" title="Connect Supabase" lede="Paste the project’s connection string. Backenly only reads Supabase, and never writes to it.">
                   <ConnectPreview source="supabase" />
                 </StepScreen>,
                 <StepScreen
@@ -345,7 +348,7 @@ export default function MigrationGuide() {
           </div>
         </section>
 
-        <CloseBox title="Move your project" lede="Sign up, choose Move an existing project, and connect Supabase or Firebase. Your project keeps its name.">
+        <CloseBox title="Move your project" lede="Sign up, choose Import it when Backenly asks you to create your first project, and connect Supabase, Firebase or Postgres.">
           <Link href={START} className={PRIMARY_CTA}>
             Move your project
             <ArrowRight aria-hidden className="h-[16px] w-[16px] transition-transform duration-150 group-hover:translate-x-[2px]" />
