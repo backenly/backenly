@@ -66,12 +66,13 @@ export interface UsersContext {
 }
 
 /**
- * A bcrypt hash as Backenly's sign-in reads one (lib/auth/password.ts): the
- * $2a$, $2b$ or $2y$ form, a two-digit cost, 53 characters of salt and hash.
- * Anything else arrives as no password, and its owner sets one with "Forgot
- * password", as a user who never had one does.
+ * A bcrypt hash as Backenly's sign-in checks one (lib/auth/password.ts): the
+ * $2a$, $2b$ or $2y$ form, at a cost from 4 to MAX_VERIFIED_BCRYPT_COST (14),
+ * 53 characters of salt and hash. Anything else, a dearer hash included, which
+ * sign-in would refuse to check, arrives as no password, and its owner sets one
+ * with "Forgot password", as a user who never had one does.
  */
-export const KEPT_BCRYPT_HASH = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/
+export const KEPT_BCRYPT_HASH = /^\$2[aby]\$(?:0[4-9]|1[0-4])\$[./A-Za-z0-9]{53}$/
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
