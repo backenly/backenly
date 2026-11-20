@@ -121,12 +121,7 @@ async function accountEntitlements(projectId: string): Promise<{ accountId: stri
 
 /** Distinct end users this month across every project that bills to the account. */
 async function accountMau(accountId: string, month: string): Promise<number> {
-  const rows = await prisma.$queryRaw<Array<{ n: number }>>`
-    SELECT count(DISTINCT a."endUserId")::int AS n
-    FROM "project_active_users" a
-    JOIN "projects" p ON p."id" = a."projectId"
-    WHERE COALESCE(p."organizationId", p."userId") = ${accountId} AND a."month" = ${month}`
-  return rows[0]?.n ?? 0
+  return prisma.projectActiveUser.count({ where: { month, project: accountProjectsWhere(accountId) } })
 }
 
 /**

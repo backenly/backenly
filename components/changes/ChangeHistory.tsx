@@ -31,6 +31,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Rocket } from 'lucide-react'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { KitButton, KitConfirmDialog, KitSelect, OverflowMenu, PageHeader } from '@/components/inspector/kit'
 import { recordNav, useRecordParam } from '@/components/console/RecordDrawer'
 import { ErrorRow } from '@/components/console/states'
@@ -149,8 +150,9 @@ export function ChangeHistory({
     return body as Page
   }, [projectId, resource, selectedBranch])
 
-  // Load active preview branches for branch selector
+  // Load active preview branches for branch selector (Cloud only)
   useEffect(() => {
+    if (!CLOUD_CONTROL_PLANE) return
     let cancelled = false
     fetch(`/api/projects/${projectId}/branches`, { credentials: 'include' })
       .then((res) => (res.ok ? res.json() : null))
@@ -351,7 +353,7 @@ export function ChangeHistory({
         description="Every schema and settings change is checked after it applies."
         actions={
           <div className="flex flex-wrap items-center gap-[8px]">
-            {branches.length > 0 && (
+            {CLOUD_CONTROL_PLANE && branches.length > 0 && (
               <KitSelect
                 aria-label="Branch"
                 value={selectedBranch}
