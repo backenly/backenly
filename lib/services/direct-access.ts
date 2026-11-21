@@ -863,8 +863,9 @@ export interface CarriedLogin {
 
 /**
  * A project's direct logins, made ready in the database of its own it is
- * moving into (lib/data-plane/tenancy-migration.ts), before its row names that
- * database. The project is paused for the move, its logins stopped, and they
+ * moving into (lib/data-plane/tenancy-migration.ts), before its schemas are
+ * copied in, which name them, and before its row names that database. The
+ * project is paused for the move, its logins stopped, and they
  * stay stopped here: the resume brings back each one the pause stopped, from
  * what its credential row then keeps (lib/projects/paused-logins.ts), and with
  * it the pooler's row (restorePoolerLogins).
