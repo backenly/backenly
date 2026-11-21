@@ -674,8 +674,10 @@ const globalForWorkspace = globalThis as unknown as {
   backenlyWorkspaceClients?: Map<CloudRegionId, PrismaClient>
   backenlyDatabaseClients?: DatabaseRegistry<PrismaClient>
   backenlyDataInstanceBudgets?: Map<string, ConnectionBudget>
+  backenlyDataInstanceClients?: Map<CloudRegionId, PrismaClient>
 }
 const workspaceClients = (globalForWorkspace.backenlyWorkspaceClients ??= new Map<CloudRegionId, PrismaClient>())
+const dataInstanceClients = (globalForWorkspace.backenlyDataInstanceClients ??= new Map<CloudRegionId, PrismaClient>())
 
 /**
  * The home workspace client's pool size when DATABASE_URL names none. That
@@ -734,6 +736,34 @@ function regionClient(region: CloudRegionId, projectId?: string): PrismaClient {
   const client = new PrismaClient({ datasourceUrl: workspaceClientUrl(region, url), log: ['error'] })
   installSqlRecorder(client as any)
   workspaceClients.set(region, client)
+  return client
+}
+
+/** The data instance client's pool: instance-wide upkeep (logins, the catalog), never a project's queries. */
+const DATA_INSTANCE_CONNECTION_LIMIT = 2
+
+/**
+ * Raw SQL on the database a region's data instance connection names
+ * (DATA_DATABASE_URL[_REGION] as given, not a project's database), for work
+ * about the instance rather than one project database: its logins, which
+ * belong to the whole instance, and its catalog of databases. Outside the home
+ * region with no DATA_ variable that connection is the region's own, and so is
+ * this client (regionRawClient). In the home region it is never the platform
+ * database: an unset DATA_DATABASE_URL is refused (requireRegionDataInstanceUrl).
+ *
+ * The database it names must hold the helpers the regional procedure installs
+ * (the login helpers above all), as a region's own does: the procedure treats
+ * a data instance's own database as a region's.
+ */
+export function dataInstanceRawClient(region: CloudRegionId): WorkspaceRawClient {
+  const url = requireRegionDataInstanceUrl(region, 'app')
+  if (url === regionDatabaseUrl(region, 'app')) return regionRawClient(region)
+  const existing = dataInstanceClients.get(region)
+  if (existing) return existing
+  const parsed = new URL(withoutStatementCache(url))
+  if (!parsed.searchParams.has('connection_limit')) parsed.searchParams.set('connection_limit', String(DATA_INSTANCE_CONNECTION_LIMIT))
+  const client = new PrismaClient({ datasourceUrl: parsed.toString(), log: ['error'] })
+  dataInstanceClients.set(region, client)
   return client
 }
 
@@ -1001,8 +1031,9 @@ export async function projectPostgrest(projectId: string): Promise<RegionPostgre
  * platform client is not one of them and stays open.
  */
 export async function disconnectRegionalClients(): Promise<void> {
-  const clients = [...workspaceClients.values()]
+  const clients = [...workspaceClients.values(), ...dataInstanceClients.values()]
   workspaceClients.clear()
+  dataInstanceClients.clear()
   const pools = [...regionPools.values()]
   regionPools.clear()
   const retired = [...retiredPools]
@@ -1139,4 +1170,20 @@ export async function projectPool(
   const placement = await projectDatabase(projectId)
   if (placement.tenancy === 'dedicated') return databasePool(placement.region, placement.database as string, name, config, projectId)
   return regionPool(placement.region, name, config, projectId)
+}
+
+/**
+ * Close every connection this process holds on one project database through
+ * this module, pinned or not, and wait for them to close: its clients, and its
+ * pools of every subsystem. For a database about to be dropped
+ * (lib/data-plane/project-databases.ts), whose connections are of no more use.
+ * A later request for the database opens them again, as after any close.
+ */
+export async function closeProjectDatabaseConnections(region: CloudRegionId, database: string): Promise<void> {
+  refuseBadName(database)
+  const key = clientKey(region, database)
+  await Promise.all([
+    databaseClients.closeWhere((k) => k === key),
+    databasePools.closeWhere((k) => k.startsWith(`${key}/`), (pool) => pool.end()),
+  ])
 }

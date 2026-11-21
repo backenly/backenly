@@ -298,6 +298,21 @@ export async function register() {
         )
       })
 
+      // ── Project databases no project names, dropped, 03:50 UTC ─────────────
+      //
+      // A creation that stopped between cloning a project's database and
+      // writing the row that records it leaves a database nothing names
+      // (lib/data-plane/project-databases.ts). Those more than an hour old are
+      // dropped on every data instance home has a database creator connection
+      // for, as the purge above reaches every region from home. Nothing to do
+      // where no region has one.
+      cron.platform('50 3 * * *', async () => {
+        const { sweepOrphanProjectDatabases } = await import('./lib/data-plane/project-databases')
+        await sweepOrphanProjectDatabases().catch((err: any) =>
+          console.error('[ProjectDatabases] Orphan sweep error:', err?.message)
+        )
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')

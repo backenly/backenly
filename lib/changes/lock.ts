@@ -341,6 +341,14 @@ export async function changeLockHeld(projectId: string): Promise<boolean> {
   return (res.rowCount ?? 0) > 0
 }
 
+/**
+ * Close this process's lock pool on one project database, connections held or
+ * not: for a database about to be dropped (lib/data-plane/project-databases.ts).
+ */
+export async function closeChangeLockPoolOn(region: CloudRegionId, database: string): Promise<void> {
+  await databasePools.closeWhere((key) => key === `${region}/${database}`)
+}
+
 /** Close every region's pool and every project database's. Tests only. */
 export async function closeChangeLockPool(): Promise<void> {
   const all = [...pools.values()]
