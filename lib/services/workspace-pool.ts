@@ -169,7 +169,22 @@ async function workspacePool(projectId: string): Promise<Pool> {
  * outside one, SET LOCAL does nothing.
  */
 function workspaceSettingsSql(schemaName: string): string {
-  return `SET LOCAL search_path TO "${schemaName}", public; SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`
+  return `SET LOCAL search_path TO ${quotedSchema(schemaName)}, public; SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`
+}
+
+/**
+ * A workspace schema name as a quoted identifier, for the one place it is
+ * written into SQL text (SET search_path takes no parameters). Every name the
+ * platform gives is letters, digits, `_` and `-` (getWorkspaceDatabaseNames),
+ * so anything else is refused rather than escaped.
+ */
+const PLAIN_SCHEMA_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,62}$/
+
+function quotedSchema(schemaName: string): string {
+  if (!PLAIN_SCHEMA_NAME.test(schemaName)) {
+    throw new Error('The workspace schema name is not a plain identifier, so no query was sent.')
+  }
+  return `"${schemaName}"`
 }
 
 /**
@@ -217,7 +232,7 @@ export async function acquireWorkspaceClient(projectId: string): Promise<PoolCli
   // The pool sets release afresh on every checkout; this checkout's ends the connection.
   client.release = () => release(true)
   try {
-    await client.query(`SET search_path TO "${schemaName}", public; SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`)
+    await client.query(`SET search_path TO ${quotedSchema(schemaName)}, public; SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`)
   } catch (err) {
     client.release()
     throw err
