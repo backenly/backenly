@@ -587,8 +587,13 @@ async function waitForProjectRecovery(projectId: string): Promise<PostgrestStatu
   return status
 }
 
-/** Ask the region's PostgREST host to stop the project's own PostgREST and start it again. */
-async function restartOnHost(projectId: string, region: CloudRegionId, database: string): Promise<{ ok: boolean; detail: string }> {
+/**
+ * Ask the region's PostgREST host to stop the project's own PostgREST and start
+ * it again. Also what a move into a database of its own asks once the project's
+ * row names that database (lib/data-plane/tenancy-migration.ts), so its own
+ * PostgREST reads the moved schemas afresh before it serves again.
+ */
+export async function restartOnHost(projectId: string, region: CloudRegionId, database: string): Promise<{ ok: boolean; detail: string }> {
   const base = regionPostgrestHostUrl(region)
   const target = await projectPostgrest(projectId)
   if (!base || !target) return { ok: false, detail: `${regionSetting(PGRST_HOST_URL_SETTING, region).variable} is not set` }

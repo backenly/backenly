@@ -460,6 +460,26 @@ async function creationTimes(region: CloudRegionId, databases: string[]): Promis
 }
 
 /**
+ * Whether a move into a database of its own that has not ended names
+ * `database` as the one it is filling (lib/data-plane/tenancy-migration.ts
+ * records it on its job as soon as the database exists). Such a database is no
+ * orphan, however long the move takes: no project row names it until the move
+ * ends.
+ */
+async function movingInto(database: string): Promise<boolean> {
+  const { REGIONAL_STATUS, TENANCY_MIGRATION_JOB_TYPE } = await import('@/lib/queue')
+  const job = await prisma.backgroundJob.findFirst({
+    where: {
+      type: TENANCY_MIGRATION_JOB_TYPE,
+      status: { in: [REGIONAL_STATUS.pending, REGIONAL_STATUS.running] },
+      result: { path: ['database'], equals: database },
+    },
+    select: { id: true },
+  })
+  return job !== null
+}
+
+/**
  * Drop the project databases no project names, on each region's data instance
  * this process has a database creator connection for (by default every region
  * it has one for). Only databases the creator owns, whose creation row in that
@@ -495,6 +515,12 @@ export async function sweepOrphanProjectDatabases(
         try {
           // A creation that committed since the listing names it now.
           if (await prisma.project.findFirst({ where: { databaseName: database }, select: { id: true } })) continue
+          // A move into it that is still running names it on its job, not yet
+          // on a project row (lib/data-plane/tenancy-migration.ts).
+          if (await movingInto(database)) {
+            report.tooRecent.push(database)
+            continue
+          }
           await dropProjectDatabase({ region, database })
           report.dropped.push(database)
           await prisma.auditLog
