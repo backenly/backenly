@@ -183,10 +183,13 @@ export async function handleViaPostgrest(
 
   // The PostgREST serving the project's region. Without one, the request
   // falls through to the legacy handler, which also runs in the project's
-  // region; it is never sent to another region's PostgREST.
+  // region; it is never sent to another region's PostgREST. A project with a
+  // database of its own is served by its own PostgREST on the region's host;
+  // without one configured it is refused (a 503 from projectPostgrest), never
+  // sent to the region's shared one.
   const postgrest = await projectPostgrest(ctx.projectId)
   if (!postgrest) return false
-  const { url: baseUrl, jwtSecret: secret } = postgrest
+  const { url: baseUrl, jwtSecret: secret, database } = postgrest
 
   // One id for this request, echoed to the caller and printed in our own logs,
   // so "it failed at 14:03" becomes a single lookup instead of a search across
@@ -279,6 +282,8 @@ export async function handleViaPostgrest(
         projectId: ctx.projectId,
         endUserId: ctx.endUserId,
         serviceRole: ctx.isServiceRole,
+        // Only for a database of its own; absent, the claims are as they always were.
+        database,
       }),
       secret,
     )

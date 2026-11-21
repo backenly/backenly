@@ -22,11 +22,12 @@
  *   - both Dockerfiles must actually point Node at all of them. Deleting the
  *     ENV line would reintroduce the blind loop with no build or test failure
  *     at all;
- *   - the copy published at /certs/rds-ca-cloud-regions.pem, which direct
- *     Postgres connection strings name as sslrootcert so a client can verify
- *     the server (lib/services/direct-access.ts), must be byte for byte the
- *     bundle the images build: a client verifying with a different set would
- *     refuse a server the platform itself trusts, or the other way round.
+ *   - the copy published at /certs/rds-ca-cloud-regions.pem must be byte for
+ *     byte the bundle the images build (the connection pooler's image is held
+ *     to it too, tests/unit/pooler-image.spec.ts): one reviewed set, wherever
+ *     it is read. Customers' connection strings no longer name it: they reach
+ *     a project's database through the pooler, whose certificate is publicly
+ *     trusted (lib/services/direct-access.ts).
  */
 
 import { createHash } from 'node:crypto'

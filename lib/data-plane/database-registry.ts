@@ -163,6 +163,22 @@ export class DatabaseRegistry<T> {
     await Promise.all(all.map((entry) => this.closeQuietly(entry, close)))
   }
 
+  /**
+   * Close and forget every value whose key `match` accepts, pinned or not, and
+   * wait for them to close: for a database that is about to be dropped, whose
+   * connections are of no further use to anyone. Answers how many were closed.
+   */
+  async closeWhere(match: (key: string) => boolean, close: RegistryOptions<T>['close'] = this.options.close): Promise<number> {
+    const matched = [...this.entries.values()].filter((entry) => match(entry.key))
+    for (const entry of matched) {
+      this.entries.delete(entry.key)
+      // Ended, not let go: nothing they held is left to count.
+      if (entry.member) entry.budget?.leave(entry.member)
+    }
+    await Promise.all(matched.map((entry) => this.closeQuietly(entry, close)))
+    return matched.length
+  }
+
   private entry(key: string, create: (tracker: UseTracker) => T, admission?: Admission): Entry<T> {
     const existing = this.entries.get(key)
     if (existing) {

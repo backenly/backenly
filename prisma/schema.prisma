@@ -4032,11 +4032,10 @@ model DatabaseCredential {
   @@map("database_credentials")
 }
 
-// The addresses a project's direct Postgres logins may connect from
-// (lib/services/direct-access-addresses.ts). Where a region's database has a
-// public endpoint, its network allowlist admits the union of every project's
-// addresses there and nothing else (lib/services/direct-access-allowlist.ts).
-// Adding or removing one is a governed change with a History entry
+// The addresses a project's direct Postgres logins could connect from, a
+// retired feature: direct connections now go through the connection pooler
+// (lib/data-plane/pooler.ts), which keeps no address list, and nothing adds a
+// row. Kept so History entries made while it existed can still be restored
 // (lib/changes/resources/addresses.ts). Gone with the project.
 model DirectAccessAddress {
   id        String   @id @default(cuid())

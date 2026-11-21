@@ -35,6 +35,13 @@
  *                     authorize a request: home does not answer and the copy is
  *                     not enforced or is stale
  *
+ * Where the region gives new projects databases of their own
+ * (BACKENLY_DEDICATED_DATABASES[_REGION] is not off,
+ * lib/projects/database-tenancy.ts), the instance holding them must answer too,
+ * in the home region as anywhere: `checks.dataInstance`. A process that cannot
+ * reach it, or has no connection for it, cannot create or serve those
+ * projects, and is not ready.
+ *
  * Every dependency is asked with a timeout, so a dropped peering connection
  * makes the answer "not reachable" within seconds rather than a hung check.
  * Failure reasons are codes, never error text: this endpoint is public and a
@@ -43,8 +50,9 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { runHealthCheck } from '@/lib/db/startup-validation'
-import { regionRawClient } from '@/lib/data-plane/regional'
+import { dataInstanceRawClient, regionRawClient } from '@/lib/data-plane/regional'
 import { serviceRegion } from '@/lib/data-plane/serving'
+import { dedicatedDatabasesMode } from '@/lib/projects/database-tenancy'
 import { rateLimitHealth } from '@/lib/security/rate-limit-backend'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { authMaxStalenessMs, authProjectionMode, type AuthProjectionMode } from '@/lib/auth-projection/mode'
@@ -67,6 +75,8 @@ export interface RegionalProbes {
   homeDatabase(): Promise<unknown>
   /** The age of the region's authorization copy. */
   copyFreshness(region: CloudRegionId, maxStalenessMs: number): Promise<{ fresh: boolean; ageMs: number | null }>
+  /** Resolves when the instance holding the region's project databases answers; asked only where they are given. */
+  dataInstance?(region: CloudRegionId): Promise<unknown>
 }
 
 export interface AuthProjectionDependency {
@@ -82,8 +92,11 @@ export interface RegionalReadiness {
   healthy: boolean
   degraded: boolean
   region: CloudRegionId
-  /** What `healthy` is made of; every value true when ready. */
-  checks: { database: boolean; authorization: boolean }
+  /**
+   * What `healthy` is made of; every value true when ready. `dataInstance`
+   * only where the region gives new projects databases of their own.
+   */
+  checks: { database: boolean; authorization: boolean; dataInstance?: boolean }
   dependencies: {
     home: { reachable: boolean; reason?: ProbeFailure }
     authProjection: AuthProjectionDependency
@@ -117,21 +130,23 @@ export async function within<T>(probe: () => Promise<T>, timeoutMs: number = DEP
 export async function regionalReadiness(
   region: CloudRegionId,
   probes: RegionalProbes,
-  options: { mode?: AuthProjectionMode; maxStalenessMs?: number; timeoutMs?: number } = {},
+  options: { mode?: AuthProjectionMode; maxStalenessMs?: number; timeoutMs?: number; dataInstance?: boolean } = {},
 ): Promise<RegionalReadiness> {
   const mode = options.mode ?? authProjectionMode()
   const boundMs = options.maxStalenessMs ?? authMaxStalenessMs()
   const timeoutMs = options.timeoutMs ?? DEPENDENCY_TIMEOUT_MS
+  const askData = options.dataInstance === true && typeof probes.dataInstance === 'function'
 
-  const [own, home, copy] = await Promise.all([
+  const [own, home, copy, data] = await Promise.all([
     within(() => probes.regionDatabase(region), timeoutMs),
     within(() => probes.homeDatabase(), timeoutMs),
     mode === 'off' ? Promise.resolve(null) : within(() => probes.copyFreshness(region, boundMs), timeoutMs),
+    askData ? within(() => (probes.dataInstance as NonNullable<RegionalProbes['dataInstance']>)(region), timeoutMs) : Promise.resolve(null),
   ])
 
   const copyFresh = copy !== null && copy.ok && copy.value.fresh
   const canAuthorize = home.ok || (mode === 'enforce' && copyFresh)
-  const healthy = own.ok && canAuthorize
+  const healthy = own.ok && canAuthorize && (data === null || data.ok)
   const copyImpaired = mode !== 'off' && !copyFresh
 
   const authProjection: AuthProjectionDependency =
@@ -145,12 +160,26 @@ export async function regionalReadiness(
     healthy,
     degraded: healthy && (!home.ok || copyImpaired),
     region,
-    checks: { database: own.ok, authorization: canAuthorize },
+    checks: { database: own.ok, authorization: canAuthorize, ...(data === null ? {} : { dataInstance: data.ok }) },
     dependencies: {
       home: home.ok ? { reachable: true } : { reachable: false, reason: failureOf(home) },
       authProjection,
     },
   }
+}
+
+/**
+ * Whether `region` gives new projects databases of their own, so readiness asks
+ * for the instance holding them. A switch this build does not understand reads
+ * as off (lib/projects/database-tenancy.ts), here too.
+ */
+function asksDataInstance(region: CloudRegionId, env: Env): boolean {
+  return dedicatedDatabasesMode(region, env).mode !== 'off'
+}
+
+/** The data instance's own database answers (lib/data-plane/regional.ts dataInstanceRawClient). */
+function probeDataInstance(region: CloudRegionId): Promise<unknown> {
+  return dataInstanceRawClient(region).$queryRaw`SELECT 1`
 }
 
 function failureOf<T>(result: ProbeResult<T>): ProbeFailure | undefined {
@@ -161,6 +190,7 @@ const liveProbes: RegionalProbes = {
   regionDatabase: (region) => regionRawClient(region).$queryRaw`SELECT 1`,
   homeDatabase: () => prisma.$queryRaw`SELECT 1`,
   copyFreshness: (region, maxStalenessMs) => copyFreshness(region, maxStalenessMs),
+  dataInstance: (region) => probeDataInstance(region),
 }
 
 export type Readiness = (Awaited<ReturnType<typeof runHealthCheck>> & { region: CloudRegionId; degraded: boolean }) | (RegionalReadiness & {
@@ -177,12 +207,17 @@ export type Readiness = (Awaited<ReturnType<typeof runHealthCheck>> & { region: 
 export async function readiness(env: Env = process.env): Promise<Readiness> {
   const region = serviceRegion(env)
   if (region === HOME_REGION) {
-    return { ...(await runHealthCheck()), region, degraded: false }
+    const home = await runHealthCheck()
+    if (!asksDataInstance(region, env)) return { ...home, region, degraded: false }
+    const data = await within(() => probeDataInstance(region))
+    if (!data.ok) console.warn(`[health] region ${region} not ready: the instance holding projects' own databases does not answer (${failureOf(data)})`)
+    return { ...home, healthy: home.healthy && data.ok, checks: { ...home.checks, dataInstance: data.ok }, region, degraded: false }
   }
 
   const result = await regionalReadiness(region, liveProbes, {
     mode: authProjectionMode(env.BACKENLY_AUTH_PROJECTION),
     maxStalenessMs: authMaxStalenessMs(env.AUTH_MAX_STALENESS_MS),
+    dataInstance: asksDataInstance(region, env),
   })
   if (!result.healthy || result.degraded) {
     // A line per check while impaired, for the region's log metric and alarm;
@@ -190,6 +225,7 @@ export async function readiness(env: Env = process.env): Promise<Readiness> {
     console.warn(
       `[health] region ${region} ${result.healthy ? 'degraded' : 'not ready'}: ` +
         `database ${result.checks.database ? 'answers' : 'does not answer'}, ` +
+        (result.checks.dataInstance === undefined ? '' : `project databases' instance ${result.checks.dataInstance ? 'answers' : 'does not answer'}, `) +
         `home ${result.dependencies.home.reachable ? 'answers' : `does not answer (${result.dependencies.home.reason})`}, ` +
         `authorization copy ${describeCopy(result.dependencies.authProjection)}`,
     )

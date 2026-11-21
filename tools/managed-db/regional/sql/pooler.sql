@@ -18,7 +18,8 @@
 --                                 sets updated_at = now() when it changes a row.
 --   backenly_pooler.databases()   the project databases the pooler lists: every
 --                                 existing p_<32 hex> database with an active
---                                 login. The pooler reads it at start and every
+--                                 login, with the pool size its logins'
+--                                 connection limit allows. The pooler reads it at start and every
 --                                 few seconds after, and serves no other
 --                                 database name: a client asking for the
 --                                 region's shared database, postgres or
@@ -50,45 +51,45 @@
 -- written to both places) and its sessions be ended (pg_terminate_backend).
 --
 -- ── What the regional procedure does around this file ──────────────────────
--- This file does not do the following; tools/managed-db/regional/bootstrap.sh,
--- sql/roles.sql, sql/verify.sql, launch.ts and image-files.txt are to be
--- extended to do them, in this order:
+-- tools/managed-db/regional/bootstrap.sh runs this file as the step `pooler`
+-- of an apply, in a region whose administrator made backenly_pooler_auth, in
+-- this order:
 --
---   1. roles.sql has created backenly_app (it does today).
---
---   2. The role backenly_pooler_auth, the way roles.sql manages its logins: a
---      SCRAM-SHA-256 verifier from a new variable, BACKENLY_POOLER_AUTH_VERIFIER,
---      which launch.ts computes; the password set only when the role is
---      created or named in BOOTSTRAP_ROTATE, and recorded in
---      backenly_meta.bootstrap_credentials:
---        CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT;
+--   1. sql/roles.sql creates backenly_app, and backenly_pooler_auth only when
+--      the run supplies its SCRAM-SHA-256 verifier, BACKENLY_POOLER_AUTH_VERIFIER,
+--      which launch.ts computes (secrets.poolerAuth in the region's launch
+--      config). The password is set only when the role is created or named in
+--      BOOTSTRAP_ROTATE, and recorded in backenly_meta.bootstrap_credentials:
+--        CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 60;
 --        ALTER ROLE backenly_pooler_auth PASSWORD '<verifier>';
 --      Every other attribute stays at its default (NOSUPERUSER NOCREATEDB
 --      NOCREATEROLE NOREPLICATION NOBYPASSRLS), and the role is granted no
 --      role; this file refuses one that has either. Its password goes to the
 --      pooler as POOLER_AUTH_PASSWORD (services/pooler/README.md): printable
 --      ASCII without spaces, double quotes or backslashes, at least 16
---      characters. launch.ts's generatePassword() (64 hex characters) fits.
+--      characters. launch.ts keeps generatePassword()'s 64 hex characters, the
+--      password itself rather than a connection string, in that secret.
 --
---   3. The database, from the shell, connected to the regional database as
+--   2. The database, from the shell, connected to the regional database as
 --      the administrator. CREATE DATABASE cannot run inside a transaction or a
 --      DO block, so it is two statements:
---        SELECT 1 FROM pg_database WHERE datname = 'backenly_pooler';
---        CREATE DATABASE backenly_pooler;      -- only when the first returned nothing
+--        SELECT count(*) FROM pg_database WHERE datname = 'backenly_pooler';
+--        CREATE DATABASE backenly_pooler TEMPLATE template0;   -- only when it is 0
 --      Created by the administrator, so the administrator owns it; this file
---      checks that.
+--      checks that. From template0, so it holds nothing template1 may.
 --
---   4. This file, connected to backenly_pooler as the administrator:
---        psql -X -v ON_ERROR_STOP=1 -d <the regional URL, database backenly_pooler> \
---             -f tools/managed-db/regional/sql/pooler.sql
---      recorded as a step of its own in backenly_meta.bootstrap_steps (which
---      lives in the regional database) with this file's checksum. It is safe
+--   3. This file, connected to backenly_pooler as the administrator (the
+--      regional URL with its database replaced), recorded as the step
+--      `pooler` in backenly_meta.bootstrap_steps of the REGIONAL database,
+--      with the checksum of this file and sql/verify-pooler.sql. It is safe
 --      to re-run, it converges privileges to exactly what is declared here,
---      and it ends by checking that state, so a failed check rolls back the
---      whole run.
+--      and it ends with sql/verify-pooler.sql, so a failed check rolls back
+--      the whole run.
 --
---   5. verify.sql (or a check of its own against backenly_pooler) asserts the
---      same end state; the checks at the end of this file are the list.
+--   4. sql/verify.sql checks the role and that the step and the database are
+--      there; sql/verify-pooler.sql, run on its own against backenly_pooler,
+--      checks this file's end state. Both run wherever the procedure verifies
+--      the region, an apply and a check alike.
 --
 -- Runs as the RDS master, which is NOT a superuser: nothing here needs one.
 -- tests/integration/pooler-auth.spec.ts runs it as such an administrator on a
@@ -195,18 +196,42 @@ AS $lookup$
 $lookup$;
 
 -- Only databases that exist, so the pooler never lists a name the server
--- would answer "does not exist" for after a login.
+-- would answer "does not exist" for after a login. With each, its pool size:
+-- the smallest connection limit among its active logins (the plan's limit,
+-- set on each login), so the pooler never opens more server connections for a
+-- login than the server lets it hold; NULL when every login is unlimited, and
+-- the pooler then uses its default.
+--
+-- An earlier form returned SETOF text; a function's result type cannot be
+-- replaced in place, so that form is dropped first.
+-- (Looked up with to_regprocedure, which answers NULL for a missing function,
+-- never with a ::regprocedure cast, which fails while planning when it is missing.)
+DO $drop_old_databases$
+DECLARE
+  old_form regprocedure := to_regprocedure('backenly_pooler.databases()');
+BEGIN
+  IF old_form IS NOT NULL AND EXISTS (
+       SELECT 1 FROM pg_catalog.pg_proc AS p
+        WHERE p.oid = old_form AND p.proretset AND p.prorettype = 'text'::regtype) THEN
+    DROP FUNCTION backenly_pooler.databases();
+  END IF;
+END
+$drop_old_databases$;
+
 CREATE OR REPLACE FUNCTION backenly_pooler.databases()
-RETURNS SETOF text
+RETURNS TABLE (database text, pool_size integer)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $databases$
-  SELECT DISTINCT l.database
+  SELECT l.database,
+         min(NULLIF(GREATEST(r.rolconnlimit, 0), 0))::integer
     FROM backenly_pooler.logins AS l
     JOIN pg_catalog.pg_database AS d ON d.datname = l.database::name
+    LEFT JOIN pg_catalog.pg_roles AS r ON r.rolname = l.rolname::name
    WHERE l.active
+   GROUP BY l.database
    ORDER BY 1
 $databases$;
 
@@ -218,84 +243,9 @@ REVOKE ALL ON FUNCTION backenly_pooler.databases() FROM backenly_app, backenly_p
 GRANT EXECUTE ON FUNCTION backenly_pooler.databases() TO backenly_pooler_auth;
 
 -- ── What this file declares, checked ───────────────────────────────────────
-DO $$
-DECLARE
-  fn oid;
-  problems text[] := '{}';
-  c record;
-BEGIN
-  -- Exactly these functions, so a call can never resolve to another signature.
-  IF (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'backenly_pooler') IS DISTINCT FROM
-     ARRAY['backenly_pooler.databases()', 'backenly_pooler.lookup(text,text)'] THEN
-    problems := problems || 'backenly_pooler holds functions other than databases() and lookup(text, text)'::text;
-  END IF;
-  FOREACH fn IN ARRAY ARRAY['backenly_pooler.lookup(text,text)'::regprocedure, 'backenly_pooler.databases()'::regprocedure]::oid[] LOOP
-    IF NOT (SELECT prosecdef FROM pg_proc WHERE oid = fn) THEN
-      problems := problems || format('%s is not SECURITY DEFINER', fn::regprocedure);
-    END IF;
-    IF (SELECT proconfig FROM pg_proc WHERE oid = fn) IS DISTINCT FROM ARRAY['search_path=pg_catalog, pg_temp'] THEN
-      problems := problems || format('%s does not fix its search_path', fn::regprocedure);
-    END IF;
-    IF (SELECT proowner FROM pg_proc WHERE oid = fn) <> (SELECT relowner FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass) THEN
-      problems := problems || format('%s and logins have different owners, so it may not read logins', fn::regprocedure);
-    END IF;
-  END LOOP;
-
-  IF (SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END,
-                        ', ' ORDER BY attnum)
-        FROM pg_attribute WHERE attrelid = 'backenly_pooler.logins'::regclass AND attnum > 0 AND NOT attisdropped)
-     IS DISTINCT FROM
-     'rolname text not null, verifier text not null, database text not null, active boolean not null, updated_at timestamp with time zone not null' THEN
-    problems := problems || 'backenly_pooler.logins does not have the declared columns'::text;
-  END IF;
-  IF (SELECT count(*) FROM pg_constraint WHERE conrelid = 'backenly_pooler.logins'::regclass AND contype = 'c') <> 3
-     OR NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'backenly_pooler.logins'::regclass AND contype = 'p') THEN
-    problems := problems || 'backenly_pooler.logins does not have its primary key and three checks'::text;
-  END IF;
-
-  -- Privileges, as each role would actually have them (memberships included).
-  FOR c IN
-    SELECT * FROM (VALUES
-      -- who                   what                                        expected
-      ('public',               'CONNECT on the database',                  has_database_privilege('public', 'backenly_pooler', 'CONNECT'), false),
-      ('public',               'TEMPORARY on the database',                has_database_privilege('public', 'backenly_pooler', 'TEMPORARY'), false),
-      ('public',               'CREATE on the database',                   has_database_privilege('public', 'backenly_pooler', 'CREATE'), false),
-      ('public',               'USAGE on schema public',                   has_schema_privilege('public', 'public', 'USAGE'), false),
-      ('public',               'CREATE on schema public',                  has_schema_privilege('public', 'public', 'CREATE'), false),
-      ('public',               'USAGE on schema backenly_pooler',          has_schema_privilege('public', 'backenly_pooler', 'USAGE'), false),
-      ('public',               'any privilege on logins',                  has_table_privilege('public', 'backenly_pooler.logins', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), false),
-      ('public',               'EXECUTE on lookup',                        has_function_privilege('public', 'backenly_pooler.lookup(text, text)', 'EXECUTE'), false),
-      ('public',               'EXECUTE on databases',                     has_function_privilege('public', 'backenly_pooler.databases()', 'EXECUTE'), false),
-      ('backenly_pooler_auth', 'CONNECT on the database',                  has_database_privilege('backenly_pooler_auth', 'backenly_pooler', 'CONNECT'), true),
-      ('backenly_pooler_auth', 'TEMPORARY or CREATE on the database',      has_database_privilege('backenly_pooler_auth', 'backenly_pooler', 'TEMPORARY, CREATE'), false),
-      ('backenly_pooler_auth', 'USAGE on schema backenly_pooler',          has_schema_privilege('backenly_pooler_auth', 'backenly_pooler', 'USAGE'), true),
-      ('backenly_pooler_auth', 'CREATE on any schema here',                has_schema_privilege('backenly_pooler_auth', 'backenly_pooler', 'CREATE') OR has_schema_privilege('backenly_pooler_auth', 'public', 'CREATE'), false),
-      ('backenly_pooler_auth', 'any privilege on logins',                  has_table_privilege('backenly_pooler_auth', 'backenly_pooler.logins', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), false),
-      ('backenly_pooler_auth', 'EXECUTE on lookup',                        has_function_privilege('backenly_pooler_auth', 'backenly_pooler.lookup(text, text)', 'EXECUTE'), true),
-      ('backenly_pooler_auth', 'EXECUTE on databases',                     has_function_privilege('backenly_pooler_auth', 'backenly_pooler.databases()', 'EXECUTE'), true),
-      ('backenly_app',         'CONNECT on the database',                  has_database_privilege('backenly_app', 'backenly_pooler', 'CONNECT'), true),
-      ('backenly_app',         'TEMPORARY or CREATE on the database',      has_database_privilege('backenly_app', 'backenly_pooler', 'TEMPORARY, CREATE'), false),
-      ('backenly_app',         'USAGE on schema backenly_pooler',          has_schema_privilege('backenly_app', 'backenly_pooler', 'USAGE'), true),
-      ('backenly_app',         'CREATE on any schema here',                has_schema_privilege('backenly_app', 'backenly_pooler', 'CREATE') OR has_schema_privilege('backenly_app', 'public', 'CREATE'), false),
-      ('backenly_app',         'SELECT on logins',                         has_table_privilege('backenly_app', 'backenly_pooler.logins', 'SELECT'), true),
-      ('backenly_app',         'INSERT on logins',                         has_table_privilege('backenly_app', 'backenly_pooler.logins', 'INSERT'), true),
-      ('backenly_app',         'UPDATE on logins',                         has_table_privilege('backenly_app', 'backenly_pooler.logins', 'UPDATE'), true),
-      ('backenly_app',         'DELETE on logins',                         has_table_privilege('backenly_app', 'backenly_pooler.logins', 'DELETE'), true),
-      ('backenly_app',         'TRUNCATE, REFERENCES or TRIGGER on logins', has_table_privilege('backenly_app', 'backenly_pooler.logins', 'TRUNCATE, REFERENCES, TRIGGER'), false),
-      ('backenly_app',         'EXECUTE on lookup',                        has_function_privilege('backenly_app', 'backenly_pooler.lookup(text, text)', 'EXECUTE'), false),
-      ('backenly_app',         'EXECUTE on databases',                     has_function_privilege('backenly_app', 'backenly_pooler.databases()', 'EXECUTE'), false)
-    ) AS v(who, what, actual, expected)
-  LOOP
-    IF c.actual IS DISTINCT FROM c.expected THEN
-      problems := problems || format('%s %s %s', c.who, CASE WHEN c.expected THEN 'lacks' ELSE 'has' END, c.what);
-    END IF;
-  END LOOP;
-
-  IF cardinality(problems) > 0 THEN
-    RAISE EXCEPTION 'pooler.sql did not reach its declared state: %', array_to_string(problems, '; ');
-  END IF;
-  RAISE NOTICE 'backenly_pooler: logins table, lookup, databases and privileges as declared';
-END $$;
+-- sql/verify-pooler.sql, read-only, which bootstrap.sh also runs on its own to
+-- audit a live region. Inside this transaction, so a run that does not reach
+-- the declared state rolls back whole.
+\ir verify-pooler.sql
 
 COMMIT;

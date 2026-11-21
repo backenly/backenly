@@ -67,7 +67,7 @@ import { detectSubsystemRecurrence } from './subsystem-recurrence'
 import { detectFailingFunctions } from './function-failures'
 import { detectRefusedWrites } from './refused-writes'
 import { detectGuessedConstraints } from './guessed-constraints'
-import { hasCapability, type PlatformCapability } from './platform-capabilities'
+import { capabilityTargetOf, hasCapability, type PlatformCapability } from './platform-capabilities'
 import { assertProjectReachable } from '@/lib/data-plane/regional'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -494,15 +494,17 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
   // A project whose database this process cannot reach has no report: the
   // region error is thrown here, once, rather than recorded by every probe
   // below as "could not be checked" in a report that otherwise looks like one.
-  const { region } = await assertProjectReachable(projectId)
+  const placement = await assertProjectReachable(projectId)
 
-  // Resolve every declared capability ONCE per report, on the server holding
-  // the project's data. hasCapability caches for ten minutes per region, so
-  // this is a map lookup on all but the first call in a window.
+  // Resolve every declared capability ONCE per report, on the database holding
+  // the project's data: its region's, or its own. hasCapability caches for ten
+  // minutes per database, so this is a map lookup on all but the first call in
+  // a window.
   const requiredCaps = [...new Set(INVARIANTS.flatMap(i => requirementsOf(i)))]
+  const target = capabilityTargetOf(placement)
   const capStates = new Map(
     await Promise.all(
-      requiredCaps.map(async (c) => [c, await hasCapability(c, region)] as const),
+      requiredCaps.map(async (c) => [c, await hasCapability(c, target)] as const),
     ),
   )
 

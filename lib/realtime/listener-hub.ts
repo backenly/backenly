@@ -598,6 +598,16 @@ class ListenerHub {
   }
 
   /**
+   * Close this process's listener on one project database, if it holds one:
+   * for a database about to be dropped (lib/data-plane/project-databases.ts),
+   * whose project is past serving anyone. Its streams end with it.
+   */
+  closeDatabase(target: RealtimeDatabase): void {
+    if (target.database === null) return
+    this.listeners.get(realtimeDatabaseKey(target))?.close()
+  }
+
+  /**
    * Run the repair pass on every listener now, and wait for it: functions
    * brought current, replaced channels followed. The timer does the same
    * about once a minute.

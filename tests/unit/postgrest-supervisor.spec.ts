@@ -53,11 +53,20 @@ jest.mock('@/lib/db', () => ({
   },
 }))
 
-// The heal is for the region of the project that reported it.
+// The heal is for the region of the project that reported it. Every project
+// here is in its region's shared database; a project with a database of its
+// own is healed on its own (tests/unit/postgrest-dedicated-heal.spec.ts).
 const mockProjectRegion = jest.fn()
 jest.mock('@/lib/data-plane/regional', () => ({
   ...jest.requireActual('@/lib/data-plane/regional'),
   projectRegion: (...a: unknown[]) => mockProjectRegion(...a),
+  projectDatabase: async (projectId: string) => ({
+    region: await mockProjectRegion(projectId),
+    tenancy: 'shared',
+    database: null,
+    instance: null,
+    epoch: 0,
+  }),
 }))
 
 jest.mock('node:child_process', () => ({ exec: (...a: unknown[]) => mockExec(...a) }))

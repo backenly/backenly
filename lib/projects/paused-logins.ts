@@ -27,14 +27,24 @@
  * While a project is paused no login is created or re-keyed
  * (lib/services/direct-access.ts, DirectAccessPausedError).
  *
+ * A project with a database of its own also takes CONNECT on that database
+ * from its logins while it is paused, its functions' login included, and gives
+ * it back when it is resumed or restored and not otherwise paused
+ * (lib/data-plane/project-databases.ts setProjectDatabaseConnect): a login is
+ * then kept out by the database as well as by NOLOGIN. Its logins' rows in the
+ * connection pooler's table are turned off and on with it
+ * (lib/services/direct-access.ts stopPoolerLogins, restorePoolerLogins), so
+ * the pooler stops signing them in too.
+ *
  * Nothing here throws. A failure is logged, and the hourly pass
  * (reconcileDirectLoginsWithPause, instrumentation.ts) brings every project's
  * logins in line with whether it is paused, as the next pause or resume does.
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { projectDatabase, workspaceRawClient } from '@/lib/data-plane/regional'
 import { decryptValue } from '@/lib/security/projectEnvCrypto'
+import { restorePoolerLogins, stopPoolerLogins } from '@/lib/services/direct-access'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 
 type RawClient = Awaited<ReturnType<typeof workspaceRawClient>>
@@ -72,6 +82,45 @@ async function hasHelper(db: RawClient, signature: string): Promise<boolean> {
  * is not the pause's to mark. Answers the logins stopped. Never throws.
  */
 export async function stopDirectLogins(projectId: string, why: string): Promise<string[]> {
+  const stopped = await stopCredentialLogins(projectId, why)
+  await setOwnDatabaseOpen(projectId, false, why)
+  return stopped
+}
+
+/**
+ * For a project with a database of its own: whether its logins may connect to
+ * it (setProjectDatabaseConnect), and whether the connection pooler signs them
+ * in (stopPoolerLogins, restorePoolerLogins). Opening is skipped while the
+ * project is paused. Never throws; a failure is logged, and the hourly pass
+ * tries again.
+ */
+async function setOwnDatabaseOpen(projectId: string, open: boolean, why: string): Promise<void> {
+  try {
+    // A project in a shared database has none of its own: nothing to change.
+    if ((await projectDatabase(projectId)).tenancy !== 'dedicated') return
+    if (open) {
+      const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true } })
+      if (!project || project.pausedAt) return
+    }
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: its own database not ${open ? 'opened' : 'closed'} to its logins (${why}): ${failure(err)}; the hourly pass tries again`)
+    return
+  }
+  try {
+    const { setProjectDatabaseConnect } = await import('@/lib/data-plane/project-databases')
+    const { changed } = await setProjectDatabaseConnect(projectId, open)
+    if (changed.length > 0) {
+      console.log(`[DirectAccess] project=${projectId}: CONNECT on its database ${open ? 'given back to' : 'taken from'} ${changed.length} login(s) (${why})`)
+    }
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: CONNECT on its database not ${open ? 'given back' : 'taken'} (${why}): ${failure(err)}; the hourly pass tries again`)
+  }
+  // Neither throws.
+  if (open) await restorePoolerLogins(projectId)
+  else await stopPoolerLogins(projectId)
+}
+
+async function stopCredentialLogins(projectId: string, why: string): Promise<string[]> {
   try {
     const rows = await prisma.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } })
     if (rows.length === 0) return []
@@ -101,6 +150,12 @@ export async function stopDirectLogins(projectId: string, why: string): Promise<
  * Answers the logins brought back. Never throws.
  */
 export async function restoreDirectLogins(projectId: string, why: string): Promise<string[]> {
+  const restored = await restoreCredentialLogins(projectId, why)
+  await setOwnDatabaseOpen(projectId, true, why)
+  return restored
+}
+
+async function restoreCredentialLogins(projectId: string, why: string): Promise<string[]> {
   try {
     const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true } })
     // Still paused (for inactivity, say, after a deleted project's restore): they stay stopped.
@@ -142,9 +197,15 @@ export async function restoreDirectLogins(projectId: string, why: string): Promi
  */
 export async function reconcileDirectLoginsWithPause(): Promise<{ stopped: number; restored: number }> {
   const { withProjectLifecycleLock, LifecycleBusyError } = await import('./pause-lifecycle')
-  const projects = await prisma.databaseCredential
+  const withCredentials = await prisma.databaseCredential
     .findMany({ select: { projectId: true }, distinct: ['projectId'] })
     .catch(() => [] as Array<{ projectId: string }>)
+  // A project with a database of its own has a login (its functions') whether
+  // or not it has credentials, and CONNECT on its database to keep in line.
+  const withOwnDatabase = await prisma.project
+    .findMany({ where: { databaseTenancy: 'dedicated' }, select: { id: true } })
+    .catch(() => [] as Array<{ id: string }>)
+  const projects = [...new Set([...withCredentials.map((p) => p.projectId), ...withOwnDatabase.map((p) => p.id)])].map((projectId) => ({ projectId }))
   let stopped = 0
   let restored = 0
   for (const { projectId } of projects) {

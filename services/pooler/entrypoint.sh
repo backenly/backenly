@@ -308,28 +308,40 @@ EOF
 }
 
 # ── databases.ini ─────────────────────────────────────────────────────────────
-# render_databases: the [databases] list for the names on standard input, one
-# per line. Every name must be a project database's, or nothing is rendered.
-# The auth_query of each names its own database, so a login is checked only
-# for the database it belongs to.
+# render_databases: the [databases] list for the lines on standard input, one
+# per database: its name, optionally followed by `|` and its pool size (the
+# smallest connection limit among its logins, backenly_pooler.databases()).
+# Every name must be a project database's and every size a whole number from 1
+# to 1000, or nothing is rendered. A database with a size gets that pool_size,
+# so the pooler never opens more server connections for one of its logins than
+# the server lets that login hold; one without uses default_pool_size. The
+# auth_query of each names its own database, so a login is checked only for the
+# database it belongs to.
 render_databases() {
-  local name
-  local -a names=()
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
+  local line name size
+  local -a entries=()
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    name="${line%%|*}"
+    size=""
+    [ "$name" = "$line" ] || size="${line#*|}"
     if ! [[ "$name" =~ $PROJECT_DATABASE ]]; then
       printf 'pooler: "%s" is not a project database name; the list was not changed\n' "${name:0:80}" >&2
       return 1
     fi
-    names+=("$name")
+    if [ -n "$size" ] && ! { [[ "$size" =~ ^[1-9][0-9]{0,3}$ ]] && ((size <= 1000)); }; then
+      printf 'pooler: "%s" is not a pool size for %s; the list was not changed\n' "${size:0:20}" "$name" >&2
+      return 1
+    fi
+    entries+=("$name|$size")
   done
   printf ';; Rendered by services/pooler/entrypoint.sh from backenly_pooler.databases().\n'
   printf '[databases]\n'
-  if ((${#names[@]} > 0)); then
-    while IFS= read -r name; do
-      printf "%s = host=%s port=%s dbname=%s auth_query='SELECT usename, passwd FROM backenly_pooler.lookup(\$1, ''%s'')'\n" \
-        "$name" "$POOLER_SERVER_HOST" "$POOLER_SERVER_PORT" "$name" "$name"
-    done < <(printf '%s\n' "${names[@]}" | sort -u)
+  if ((${#entries[@]} > 0)); then
+    while IFS='|' read -r name size; do
+      printf "%s = host=%s port=%s dbname=%s%s auth_query='SELECT usename, passwd FROM backenly_pooler.lookup(\$1, ''%s'')'\n" \
+        "$name" "$POOLER_SERVER_HOST" "$POOLER_SERVER_PORT" "$name" "${size:+ pool_size=$size}" "$name"
+    done < <(printf '%s\n' "${entries[@]}" | sort -t '|' -k1,1 -u)
   fi
 }
 
@@ -361,7 +373,7 @@ if [ -n "$server_ca" ]; then list_conninfo+=" sslrootcert=$server_ca"; fi
 refresh_databases() {
   local names
   if ! names="$(PGPASSFILE="$CONF_DIR/pgpass" psql -X -q -At -v ON_ERROR_STOP=1 -d "$list_conninfo" \
-    -c 'SELECT d FROM backenly_pooler.databases() AS d' 2>"$CONF_DIR/list.err")"; then
+    -c "SELECT database || '|' || coalesce(pool_size::text, '') FROM backenly_pooler.databases()" 2>"$CONF_DIR/list.err")"; then
     printf 'pooler: could not read the project database list: %s\n' "$(head -n 1 "$CONF_DIR/list.err")" >&2
     return 1
   fi

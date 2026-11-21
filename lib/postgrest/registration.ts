@@ -40,8 +40,22 @@
  */
 
 import { prisma } from '@/lib/db'
-import { regionRawClient, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { databaseClient, regionRawClient, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+
+/**
+ * The database a registry is read in: a region's own (a region id alone), or a
+ * project's own database in it, which holds a registry of its own read by that
+ * project's PostgREST only. A pass over a region's registries walks the
+ * region's database and then each project database of the region
+ * (lib/data-plane/project-databases.ts forEachProjectDatabase).
+ */
+export type RegistryTarget = CloudRegionId | { region: CloudRegionId; database: string | null }
+
+function registryClient(target: RegistryTarget): WorkspaceRawClient {
+  if (typeof target === 'string') return regionRawClient(target)
+  return target.database === null ? regionRawClient(target.region) : databaseClient(target.region, target.database)
+}
 import { isChangeVaultSchema, projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 /**
@@ -143,8 +157,8 @@ export interface RegistrationResult {
  * installed by the same script and in the same transaction as the register
  * side, so its presence answers for both.
  */
-export async function postgrestRegistryInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
-  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
+export async function postgrestRegistryInstalled(target: RegistryTarget = HOME_REGION): Promise<boolean> {
+  const rows = await registryClient(target).$queryRaw<Array<{ present: boolean }>>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_proc p
@@ -271,10 +285,11 @@ export async function registerSchemaByName(schema: string): Promise<Registration
  * down every tenant at once — loud, and already covered. This one catches a
  * per-project silent death, which is what actually shipped.
  */
-export async function unregisteredSchemas(region: CloudRegionId = HOME_REGION): Promise<string[]> {
-  // One region's database and its own registry. Each region's PostgREST
-  // serves only the schemas in that region.
-  const db = regionRawClient(region)
+export async function unregisteredSchemas(target: RegistryTarget = HOME_REGION): Promise<string[]> {
+  // One database and its own registry: a region's, whose PostgREST serves only
+  // the schemas in that region, or a project's own, whose PostgREST serves
+  // that database alone.
+  const db = registryClient(target)
   const listRows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )

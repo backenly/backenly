@@ -309,6 +309,22 @@ describe('the pooler entrypoint lists', () => {
     ])
   })
 
+  it("each database's pool sized to its logins' connection limit when the list gives one", () => {
+    const result = databases(`p_${hex('c')}|2\np_${hex('d')}|\np_${hex('e')}|20\n`)
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+    const line = (c: string, size: string) =>
+      `p_${hex(c)} = host=db.example.internal port=5432 dbname=p_${hex(c)}${size} ` +
+      `auth_query='SELECT usename, passwd FROM backenly_pooler.lookup($1, ''p_${hex(c)}'')'`
+    expect(entries(result.stdout)).toEqual(['[databases]', line('c', ' pool_size=2'), line('d', ''), line('e', ' pool_size=20')])
+  })
+
+  it.each([['0'], ['-1'], ['02'], ['1001'], ['5 '], ['x']])('refuses the whole list for a pool size of %j', (size) => {
+    const result = databases(`p_${hex('a')}|1\np_${hex('b')}|${size}\n`)
+    expect(result.status).not.toBe(0)
+    expect(result.stdout).not.toContain('[databases]')
+  })
+
   it('an empty section when no project has an active login', () => {
     const result = databases('')
     expect(result.status).toBe(0)

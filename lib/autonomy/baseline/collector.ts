@@ -43,10 +43,9 @@ import type { Pool } from 'pg'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
-import { hasCapability } from '../platform-capabilities'
+import { capabilityTargetOf, hasCapability, type CapabilityTarget } from '../platform-capabilities'
 import { byOwnRoleColumn, projectStatement, projectStatementScope, statementRoles } from '../statement-attribution'
-import { projectRegion, regionPool } from '@/lib/data-plane/regional'
-import type { CloudRegionId } from '@/lib/regions'
+import { projectDatabase, projectPool } from '@/lib/data-plane/regional'
 
 /** Raw cumulative readings, kept between runs so deltas can be computed. */
 const RAW_LEDGER_TYPE = 'baseline_raw'
@@ -132,12 +131,12 @@ async function writeSample(
  */
 async function collectQueryLatency(
   pool: Pool,
-  region: CloudRegionId,
+  target: CapabilityTarget,
   projectId: string,
   schema: string,
   bucket: Date,
 ): Promise<void> {
-  const cap = await hasCapability('pg_stat_statements', region)
+  const cap = await hasCapability('pg_stat_statements', target)
   if (!cap.available) return
 
   const roles = statementRoles(schema, projectId)
@@ -294,15 +293,18 @@ async function collectConnections(pool: Pool, projectId: string, bucket: Date): 
 export async function collectBaseline(projectId: string, at: Date = new Date()): Promise<void> {
   const schema = `workspace_${projectId}`
   const bucket = hourBucket(at)
-  // Statistics live in the database holding the project's data. Resolved
-  // outside the allSettled below, which would otherwise swallow a region error
-  // and leave the hour looking quiet rather than unmeasured.
-  const region = await projectRegion(projectId)
-  const pool = regionPool(region, 'baseline', { max: 2 }, projectId)
+  // Statistics live in the database holding the project's data: its region's,
+  // or its own, where the activity counted is the project's alone and
+  // pg_stat_statements, which is the whole instance's, is read for that
+  // database only (projectStatementScope). Resolved outside the allSettled
+  // below, which would otherwise swallow a region error and leave the hour
+  // looking quiet rather than unmeasured.
+  const placement = await projectDatabase(projectId)
+  const pool = await projectPool(projectId, 'baseline', { max: 2 })
   // allSettled, not sequential awaits: one collector failing (a missing
   // extension, a dropped schema mid-sweep) must not cost the other two.
   await Promise.allSettled([
-    collectQueryLatency(pool, region, projectId, schema, bucket),
+    collectQueryLatency(pool, capabilityTargetOf(placement), projectId, schema, bucket),
     collectTableActivity(pool, projectId, schema, bucket),
     collectConnections(pool, projectId, bucket),
   ])
