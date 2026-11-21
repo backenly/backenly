@@ -44,7 +44,22 @@ export interface InternalClaims {
   role: InternalRole
   /** Present for auditing only — never used for schema selection. */
   project_id: string
+  /**
+   * Only for a project with a database of its own: the project the token is
+   * for. Its PostgREST host serves the project at /p/<aud>/ and its PostgREST
+   * process is started with PGRST_JWT_AUD=<aud>, so the token is accepted for
+   * this project and no other.
+   */
+  aud?: string
+  /** Only with `aud`: the project's database (`p_<32 hex>`), which the host serves it from. */
+  db?: string
 }
+
+/**
+ * A project database's name: `p_` and 32 lowercase hex digits. The PostgREST
+ * host (services/pgrst-host/token.ts) accepts exactly this pattern.
+ */
+export const DEDICATED_DATABASE_NAME = /^p_[0-9a-f]{32}$/
 
 const IDENT = /^[a-z0-9_-]{1,63}$/i
 
@@ -208,21 +223,39 @@ export function buildUpstreamHeaders(
  *
  * `service_role` is only ever produced from a server-side decision (an owner
  * API key), never from anything the caller can assert.
+ *
+ * `database` is for a project with a database of its own, and comes from the
+ * project's platform record, never from the request. With it the token also
+ * carries `aud` (the project) and `db` (its database), which the PostgREST
+ * host requires before it starts or reaches the project's PostgREST. Without
+ * it the claims are exactly what they have always been: the region's shared
+ * PostgREST is configured with no audience, and its tokens keep their shape.
  */
 export function internalClaimsFor(input: {
   projectId: string
   endUserId?: string | null
   serviceRole?: boolean
+  database?: string | null
 }): InternalClaims {
   const projectId = profileForProject(input.projectId).replace(/^workspace_/, '')
 
+  let claims: InternalClaims
   if (input.serviceRole) {
-    return { role: 'service_role', project_id: projectId }
+    claims = { role: 'service_role', project_id: projectId }
+  } else if (input.endUserId) {
+    claims = { role: 'authenticated', sub: String(input.endUserId), project_id: projectId }
+  } else {
+    claims = { role: 'anon', project_id: projectId }
   }
-  if (input.endUserId) {
-    return { role: 'authenticated', sub: String(input.endUserId), project_id: projectId }
+  if (input.database === undefined || input.database === null) return claims
+
+  // Validated rather than trusted: the host starts a PostgREST process on the
+  // database this names.
+  const database = String(input.database)
+  if (!DEDICATED_DATABASE_NAME.test(database)) {
+    throw new Error(`Refusing to bind an internal token to "${input.database}": not a project database name.`)
   }
-  return { role: 'anon', project_id: projectId }
+  return { ...claims, aud: projectId, db: database }
 }
 
 /** Seconds an internal token stays valid. One request's worth, not a session. */
