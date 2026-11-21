@@ -40,10 +40,11 @@ tests/integration/mcp-oauth-flow.spec.ts
 tests/integration/mcp-oauth-consent.spec.ts
 tests/integration/mcp-direct-access-url.spec.ts
 
-# A region with no developer-facing Postgres host issues no login and shows no
-# connection string, in the console's routes and over MCP, and says so; logins
-# that exist stay listed by name to be revoked (production QA re-test,
-# 2026-11-16, N4).
+# A project nothing outside can reach issues no login and shows no connection
+# string, in the console's routes and over MCP, and says why (a self-hosted
+# database with no host; on Backenly Cloud, a shared database); logins that
+# exist stay listed by name to be revoked (production QA re-test, 2026-11-16,
+# N4).
 tests/integration/direct-postgres-only-where-reachable.spec.ts
 
 # Where a region's database endpoint admits only allowed addresses, each
@@ -51,15 +52,12 @@ tests/integration/direct-postgres-only-where-reachable.spec.ts
 # add and remove is a History entry with a restore, and the region's prefix
 # list is kept equal to the union of every project's addresses there, never
 # dropping one another project still allows. EC2 is a stand-in; no AWS call.
-tests/integration/direct-postgres-allowed-addresses.spec.ts
 tests/integration/direct-postgres-allowed-addresses-history.spec.ts
 tests/integration/direct-postgres-allowlist-sync.spec.ts
 
-# Where the endpoint fronts RDS, each login has a libpq string (verify-full
-# through hostaddr) and one for every other client (verify-ca), both naming the
-# published RDS CA bundle; each login holds its plan's connections at once,
-# set at creation and at every read of its credentials, enforced by Postgres.
-tests/integration/direct-postgres-verified-strings-and-limits.spec.ts
+# Each login holds its plan's connections at once, set at creation and at every
+# read of its credentials and by the hourly pass, enforced by Postgres.
+tests/integration/direct-postgres-connection-limits.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
@@ -808,6 +806,20 @@ tests/integration/regional-bootstrap.spec.ts
 # logins and nothing more, and PUBLIC nothing. Needs PostgreSQL 16 server
 # binaries (PG_BINDIR); fails rather than skips in CI.
 tests/integration/pooler-auth.spec.ts
+
+# A project database's logins through the application
+# (lib/services/direct-access.ts), with a cluster the suite creates as the data
+# instance: each login is made inside the project's database with a verifier
+# Backenly computed, and backenly_pooler.lookup, as the pooler's login calls it,
+# returns exactly the server's verifier; a rotation keeps the two equal and the
+# old password stops; a pause makes the role NOLOGIN, ends its sessions and
+# empties the lookup (from the role alone, and with the row off); a resume puts
+# the same verifier back, so the password signs in again; a revocation removes
+# the row and the role; the scheduled pass writes back a missing row and
+# removes a stray one; schema changes are allowed only while the region offers
+# the pooler; run_query signs in as the read-only login. Needs PostgreSQL 16
+# server binaries (PG_BINDIR); fails rather than skips in CI.
+tests/integration/pooler-logins.spec.ts
 
 # ── Credential rotation ─────────────────────────────────────────────────────
 #
