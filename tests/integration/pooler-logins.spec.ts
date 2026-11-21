@@ -329,8 +329,11 @@ suite('a project database’s logins, through the application', () => {
     expect(await lookup(rw)).toEqual([])
     expect(await lookup(ro)).toEqual([])
 
-    expect(await stopPoolerLogins(projectId)).toBe(2)
+    // Stopping a project's logins also turns its pooler rows off
+    // (lib/projects/paused-logins.ts), so a second stop changes nothing.
     expect((await poolerRow(rw))?.active).toBe(false)
+    expect((await poolerRow(ro))?.active).toBe(false)
+    expect(await stopPoolerLogins(projectId)).toBe(0)
     expect(await lookup(rw)).toEqual([])
     expect(await signsIn(rw, rwPassword)).toBe(false)
   })
