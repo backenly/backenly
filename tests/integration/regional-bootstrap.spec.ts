@@ -43,6 +43,13 @@
  * clone. The application's paths run against a clone as they do against the
  * region's database.
  *
+ * Then the platform takes a project with a database of its own through its
+ * whole life against that template, as the application does it: created by
+ * the region's switch, used, read over v1 and v2 from its own PostgREST on the
+ * PostgREST host (the real postgrest binary CI provides), snapshotted and
+ * restored, asked to be deleted and restored, purged; a creation whose
+ * platform row fails; the switch for staff only; the daily orphan sweep.
+ *
  * What only a throwaway RDS instance can add is RDS's own role patches; that
  * rehearsal needs AWS and is not this suite.
  *
@@ -51,14 +58,21 @@
  */
 
 import { execFileSync, spawnSync } from 'child_process'
-import { createHash, randomUUID } from 'crypto'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import fs from 'fs'
-import net from 'net'
+import http from 'http'
+import net, { type AddressInfo } from 'net'
 import os from 'os'
 import path from 'path'
 import { Client } from 'pg'
 
-import { disconnectRegionalClients } from '@/lib/data-plane/regional'
+import {
+  disconnectRegionalClients,
+  projectDatabaseUrl,
+  projectPostgrest,
+  regionRawClient,
+  workspaceRawClient,
+} from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { driftCaptureHealth, driftEventBacklog } from '@/lib/autonomy/drift-event-upkeep'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
@@ -1519,6 +1533,437 @@ suite('a project’s own database, cloned from the region’s template', () => {
     expect(wrongWay.status).not.toBe(0)
     expect(wrongWay.output).toContain('is a project database or their template')
     expect(psqlFile(adminUrl(), 'tools/managed-db/regional/sql/project-db.sql').output).toContain('is neither backenly_project_template nor a project database')
+  })
+})
+
+/** The postgrest binary the PostgREST host runs: CI provides it (PGRST_HOST_BINARY). */
+const POSTGREST_BINARY = process.env.PGRST_HOST_BINARY || 'postgrest'
+function postgrestRunnable(): boolean {
+  try {
+    execFileSync(POSTGREST_BINARY, ['--version'], { encoding: 'utf8', timeout: 10_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+suite('a project with a database of its own, from creation to purge, through the platform', () => {
+  // The platform's own paths, against the template the suite above built, in
+  // us-east-1, whose own instance is its data instance (no DATA_* variable),
+  // as a region's is. The switch gives every new project there a database of
+  // its own (lib/projects/database-tenancy.ts), which the region's database
+  // creator makes (lib/data-plane/project-databases.ts). The tests run in
+  // order: one project's life, then the edges around it.
+  const REGION = 'us-east-1'
+  const SECRET = randomBytes(32).toString('hex')
+  const saved = new Map<string, string | undefined>()
+  const set = (name: string, value: string | undefined) => {
+    if (!saved.has(name)) saved.set(name, process.env[name])
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+  let ownerId = ''
+  let ownerEmail = ''
+  let staffUserId = ''
+  let staffRoleId = ''
+  let staffProjectId = ''
+  /** Every project made here, for what a failed test leaves behind. */
+  const made: string[] = []
+  let projectId = ''
+  let database = ''
+  let schema = ''
+
+  /** The p_ databases the creator owns on the cluster. */
+  const creatorDatabases = async () =>
+    (
+      await rows<{ datname: string }>(
+        superUrl(),
+        `SELECT datname::text AS datname FROM pg_database
+          WHERE datname ~ '^p_[0-9a-f]{32}$' AND pg_get_userbyid(datdba) = 'backenly_dbcreator' ORDER BY 1`,
+      )
+    ).map((r) => r.datname)
+  const databaseExists = async (name: string) => (await rows(superUrl(), `SELECT 1 FROM pg_database WHERE datname = $1`, [name])).length > 0
+  const canConnect = async (login: string, name: string) =>
+    (await rows<{ connect: boolean }>(superUrl(), `SELECT has_database_privilege($1, $2, 'CONNECT') AS connect`, [login, name]))[0].connect
+
+  /** Until no session of `login` is on `name`: a process that just ended leaves its sessions for a moment. */
+  async function untilNoSessions(name: string, login: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      const [{ n }] = await rows<{ n: number }>(
+        superUrl(),
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND usename = $2`,
+        [name, login],
+      )
+      if (n === 0) return
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw new Error(`sessions of ${login} are still connected to ${name}`)
+  }
+
+  beforeAll(async () => {
+    set('DATABASE_URL_US_EAST_1', loginUrl('backenly_app'))
+    set('BACKUP_DATABASE_URL_US_EAST_1', loginUrl('backenly_backup'))
+    set('DBCREATOR_DATABASE_URL_US_EAST_1', creatorUrl())
+    set('BACKENLY_DEDICATED_DATABASES_US_EAST_1', 'new')
+    set('BACKENLY_EDITION', 'cloud')
+    // Snapshots are taken where the project's data is: as us-east-1's own process.
+    set('BACKENLY_SERVICE_REGION', REGION)
+    set('BACKUP_DIR', path.join(work, 'backups'))
+    set('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`)
+    ownerEmail = `own-database-${randomUUID()}@example.test`
+    ownerId = (await prisma.user.create({ data: { email: ownerEmail, name: 'own database fixture' }, select: { id: true } })).id
+  })
+
+  afterAll(async () => {
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { dropRetiredSchemas, DROP_AFTER_MS } = await import('@/lib/postgrest/retire-schema')
+    for (const id of made) {
+      if (await prisma.project.findUnique({ where: { id }, select: { id: true } })) await deleteProjectCompletely(id).catch(() => {})
+    }
+    await dropRetiredSchemas(REGION, new Date(Date.now() + DROP_AFTER_MS + 1_000)).catch(() => {})
+    await prisma.workspaceBackup.deleteMany({ where: { projectId: { in: made } } }).catch(() => {})
+    await prisma.apiKey.deleteMany({ where: { projectId: { in: made } } }).catch(() => {})
+    if (made.length) {
+      await prisma.backgroundJob
+        .deleteMany({
+          where: {
+            type: { in: ['purge_project', 'drop_retired_schemas'] },
+            OR: made.map((id) => ({ payload: { path: ['projectId'], equals: id } })),
+          },
+        })
+        .catch(() => {})
+    }
+    await prisma.auditLog
+      .deleteMany({
+        where: {
+          action: { in: ['PROJECT_DATABASE_CREATED', 'PROJECT_DATABASE_ORPHAN_DROPPED'] },
+          metadata: { path: ['region'], equals: REGION },
+        },
+      })
+      .catch(() => {})
+    for (const id of [ownerId, staffUserId].filter(Boolean)) {
+      await prisma.project.deleteMany({ where: { userId: id } }).catch(() => {})
+      await prisma.user.deleteMany({ where: { id } }).catch(() => {})
+    }
+    if (staffRoleId) await prisma.role.deleteMany({ where: { id: staffRoleId } }).catch(() => {})
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+
+  it('is given a database of its own by its region’s switch: cloned by the creator, closed to every login it does not name, its workspace inside', async () => {
+    const before = await creatorDatabases()
+    const project = await createProvisionedProject({ name: `own database ${randomUUID()}`, userId: ownerId, region: REGION })
+    projectId = project.id
+    made.push(projectId)
+    schema = project.postgresSchema
+    expect(project.databaseTenancy).toBe('dedicated')
+    expect(project.dataPlaneRegistered).toBe(true)
+
+    const row = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { region: true, databaseTenancy: true, databaseName: true, databaseInstance: true },
+    })
+    expect(row).toMatchObject({ region: REGION, databaseTenancy: 'dedicated', databaseInstance: 'primary' })
+    database = row!.databaseName as string
+    expect(database).toMatch(/^p_[0-9a-f]{32}$/)
+    // Nothing in its name says whose it is.
+    expect(database).not.toContain(projectId.replace(/-/g, ''))
+    expect((await creatorDatabases()).filter((name) => !before.includes(name))).toEqual([database])
+
+    const [grants] = await rows(
+      superUrl(),
+      `SELECT pg_get_userbyid(datdba) AS owner,
+              has_database_privilege('public', $1, 'CONNECT') AS public_connect,
+              has_database_privilege('backenly_app', $1, 'CREATE') AS app,
+              has_database_privilege('backenly_backup', $1, 'CONNECT') AS backup,
+              has_database_privilege('backenly_authenticator', $1, 'CONNECT') AS authenticator,
+              has_database_privilege($2, $1, 'CONNECT WITH GRANT OPTION') AS administrator,
+              shobj_description(oid, 'pg_database') AS comment
+         FROM pg_database WHERE datname = $1`,
+      [database, ADMIN],
+    )
+    expect(grants).toEqual({ owner: 'backenly_dbcreator', public_connect: false, app: true, backup: true, authenticator: true, administrator: true, comment: null })
+
+    // The workspace is in it, the application's, served by its own registry and
+    // readable by the backup role; the region's database has none of it.
+    expect(await rows(superUrl(database), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([
+      { owner: 'backenly_app' },
+    ])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+    const [{ served }] = await rows<{ served: string }>(superUrl(database), `SELECT public.backenly_pgrst_current_schemas() AS served`)
+    expect(served.split(',')).toEqual([schema])
+    expect(await rows(superUrl(database), `SELECT has_schema_privilege('backenly_backup', $1, 'USAGE') AS usable`, [schema])).toEqual([
+      { usable: true },
+    ])
+    // Recorded before it was made: the orphan sweep's age.
+    const record = await prisma.auditLog.findFirst({
+      where: { action: 'PROJECT_DATABASE_CREATED', metadata: { path: ['database'], equals: database } },
+      select: { metadata: true, projectId: true },
+    })
+    expect(record).toMatchObject({ projectId: null, metadata: { region: REGION, database, projectId } })
+  })
+
+  it('is reached by the platform’s clients in its own database, while region work stays on the region’s', async () => {
+    const db = await workspaceRawClient(projectId)
+    expect(await db.$queryRawUnsafe(`SELECT current_database()::text AS db`)).toEqual([{ db: database }])
+    await db.$executeRawUnsafe(`CREATE TABLE "${schema}".notes (id integer PRIMARY KEY, body text NOT NULL)`)
+    await db.$executeRawUnsafe(`INSERT INTO "${schema}".notes VALUES (1, 'kept in its own database')`)
+    expect(new URL(await projectDatabaseUrl(projectId)).pathname).toBe(`/${database}`)
+    expect(await regionRawClient(REGION).$queryRawUnsafe(`SELECT current_database()::text AS db`)).toEqual([{ db: DB }])
+
+    // The region's passes reach it as a database of its own: its registry, its
+    // helpers, its extensions and its drift capture, each read there.
+    const target = { region: REGION, database } as const
+    const [{ unregisteredSchemas, postgrestRegistryInstalled }, { functionRoleHelperInstalled }, { runDriftEventUpkeep }] = await Promise.all([
+      import('@/lib/postgrest/registration'),
+      import('@/lib/services/ai-functions/function-db-role'),
+      import('@/lib/autonomy/drift-event-upkeep'),
+    ])
+    expect(await postgrestRegistryInstalled(target)).toBe(true)
+    expect(await unregisteredSchemas(target)).toEqual([])
+    expect(await functionRoleHelperInstalled(target)).toBe(true)
+    resetCapabilityCache()
+    expect(await hasCapability('pg_stat_statements', target)).toMatchObject({ available: true, indeterminate: false })
+    const upkept = await runDriftEventUpkeep(new Date(), [REGION])
+    // The region's own database first, then each project database of the region.
+    expect(upkept[0].database).toBeUndefined()
+    expect(upkept.find((r) => r.database === database)).toMatchObject({
+      region: REGION,
+      health: { status: 'healthy' },
+      backlog: { pending: 0, orphaned: 0 },
+      errors: [],
+    })
+
+    // Its PostgREST is its own: with no host for the region it is refused,
+    // naming the variable, though the region's shared PostgREST is configured.
+    set('POSTGREST_URL_US_EAST_1', 'http://127.0.0.1:9')
+    set('POSTGREST_JWT_SECRET_US_EAST_1', SECRET)
+    set('PGRST_HOST_URL_US_EAST_1', undefined)
+    await expect(projectPostgrest(projectId)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED', variable: 'PGRST_HOST_URL_US_EAST_1' })
+  })
+
+  const withPostgrest = process.env.CI || postgrestRunnable() ? it : it.skip
+
+  withPostgrest('is read over v1 and v2 from its own PostgREST on the region’s host, and never from the region’s shared one', async () => {
+    const [{ createPgrstHost }, { readConfig }, { default: app }, { hashApiKey }] = await Promise.all([
+      import('@/services/pgrst-host/server'),
+      import('@/services/pgrst-host/config'),
+      import('@/server/app'),
+      import('@/server/lib/end-user-identity'),
+    ])
+    const host = createPgrstHost({
+      config: readConfig({
+        PGRST_HOST_JWT_SECRET: SECRET,
+        PGRST_HOST_DB_URI: url('backenly_authenticator', passwords.backenly_authenticator, 'postgres'),
+        PGRST_HOST_BINARY: POSTGREST_BINARY,
+      }),
+      log: () => {},
+    })
+    const hostPort = (await host.listen(0, '127.0.0.1')).port
+    // The region's shared PostgREST, counting whatever it is asked.
+    let sharedAsked = 0
+    const shared = http.createServer((_req, res) => {
+      sharedAsked++
+      res.writeHead(500).end()
+    })
+    await new Promise<void>((resolve) => shared.listen(0, '127.0.0.1', resolve))
+    set('POSTGREST_URL_US_EAST_1', `http://127.0.0.1:${(shared.address() as AddressInfo).port}`)
+    set('PGRST_HOST_URL_US_EAST_1', `http://127.0.0.1:${hostPort}`)
+    const server = http.createServer(app)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const raw = `proj_live_${randomBytes(24).toString('hex')}`
+    await prisma.apiKey.create({
+      data: {
+        name: 'own database reads',
+        keyPrefix: raw.slice(0, 16),
+        keyHash: hashApiKey(raw),
+        permissions: ['read'],
+        capabilities: [],
+        userId: ownerId,
+        projectId,
+        keyType: 'public',
+        scope: 'runtime',
+        serviceRole: true,
+        rateLimit: 1000,
+      },
+    })
+    const get = async (route: string) => {
+      const res = await fetch(`${base}${route}`, { headers: { 'x-api-key': raw }, signal: AbortSignal.timeout(30_000) })
+      return { status: res.status, text: await res.text() }
+    }
+    try {
+      const v1 = await get(`/api/v1/${projectId}/db/notes`)
+      expect(v1).toMatchObject({ status: 200 })
+      expect(v1.text).toContain('kept in its own database')
+      const v2 = await get(`/api/v2/${projectId}/notes?select=body`)
+      expect(v2.status).toBe(200)
+      expect(JSON.parse(v2.text)).toEqual([{ body: 'kept in its own database' }])
+      // Served by a process of its own, on its own database.
+      expect(host.registry.state(projectId, database)).toMatchObject({ state: 'ready', database })
+      expect(sharedAsked).toBe(0)
+    } finally {
+      await prisma.apiKey.deleteMany({ where: { projectId } })
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await new Promise<void>((resolve) => shared.close(() => resolve()))
+      await host.close()
+      set('PGRST_HOST_URL_US_EAST_1', undefined)
+    }
+    // The child's sessions end with it; the database creator may not end them for it.
+    await untilNoSessions(database, 'backenly_authenticator')
+  })
+
+  it('is snapshotted from its own database and restored into it, readable by the backup role again', async () => {
+    const backups = await import('@/lib/services/workspace-backup')
+    expect(await backups.backupWorkspace(projectId)).toMatchObject({ success: true })
+    await (await workspaceRawClient(projectId)).$executeRawUnsafe(`INSERT INTO "${schema}".notes VALUES (2, 'after the snapshot')`)
+
+    expect(await backups.restoreWorkspace(projectId)).toMatchObject({ success: true })
+
+    expect(await (await workspaceRawClient(projectId)).$queryRawUnsafe(`SELECT body FROM "${schema}".notes ORDER BY id`)).toEqual([
+      { body: 'kept in its own database' },
+    ])
+    expect(await rows(superUrl(database), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([
+      { owner: 'backenly_app' },
+    ])
+    expect(await rows(superUrl(), `SELECT nspname FROM pg_namespace WHERE left(nspname, length($1)) = $1`, [schema])).toEqual([])
+    expect(await rows(superUrl(database), `SELECT has_schema_privilege('backenly_backup', $1, 'USAGE') AS usable`, [schema])).toEqual([
+      { usable: true },
+    ])
+    expect(await backups.backupWorkspace(projectId)).toMatchObject({ success: true })
+    expect(await prisma.workspaceBackup.count({ where: { projectId, status: 'completed' } })).toBe(2)
+  })
+
+  it('takes CONNECT on its database from its logins when its deletion is asked for, and gives it back when it is restored', async () => {
+    const { provisionFunctionRole, functionRolePassword } = await import('@/lib/services/ai-functions/function-db-role')
+    const { role: fn } = await provisionFunctionRole(projectId)
+    const { ro } = directAccessRoleNames(projectId)
+    const roPassword = generatePassword()
+    await rows(appIn(database), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, roPassword, schema])
+    const logins: Array<[string, string]> = [
+      [fn, functionRolePassword(schema)],
+      [ro, roPassword],
+    ]
+    for (const [login, password] of logins) expect(await refusal(url(login, password, database), 'SELECT 1')).toBeNull()
+
+    const { requestProjectDeletion, restoreDeletedProject } = await import('@/lib/projects/deletion')
+    const actor = { kind: 'system', label: 'own database lifecycle' } as const
+    expect(await requestProjectDeletion(projectId, actor)).toMatchObject({ requested: true })
+    for (const [login, password] of logins) {
+      expect(await canConnect(login, database)).toBe(false)
+      expect(await refusal(url(login, password, database), 'SELECT 1')).toMatch(/permission denied for database/)
+    }
+    // The administrator keeps what it converges the database with, and can give CONNECT through the helpers again.
+    expect(await rows(superUrl(), `SELECT has_database_privilege($1, $2, 'CONNECT WITH GRANT OPTION') AS ok`, [ADMIN, database])).toEqual([
+      { ok: true },
+    ])
+
+    expect(await restoreDeletedProject(projectId, actor)).toEqual({ restored: true })
+    for (const [login, password] of logins) {
+      expect(await canConnect(login, database)).toBe(true)
+      expect(await refusal(url(login, password, database), 'SELECT 1')).toBeNull()
+    }
+  })
+
+  it('is purged: its database dropped, then its logins, and nothing of either left on the instance', async () => {
+    const { functionRoleName } = await import('@/lib/services/ai-functions/function-db-role')
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { dropProjectDatabase } = await import('@/lib/data-plane/project-databases')
+    const logins = [functionRoleName(schema), directAccessRoleNames(projectId).ro].sort()
+    const oids = (await rows<{ oid: string }>(superUrl(), `SELECT oid::text AS oid FROM pg_roles WHERE rolname = ANY($1)`, [logins])).map((r) => r.oid)
+    expect(oids).toHaveLength(2)
+
+    const result = await deleteProjectCompletely(projectId)
+
+    expect(result.schemasDropped).toContain(schema)
+    expect(result.schemasRetired).toEqual([])
+    expect(result.retiredLogins).toEqual([])
+    expect(result.loginsDroppedLater).toEqual([])
+    expect(await databaseExists(database)).toBe(false)
+    expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_shdepend WHERE refobjid = ANY($1::oid[])`, [oids])).toEqual([])
+    expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
+    // Dropping it again is no error: it is gone.
+    expect(await dropProjectDatabase({ region: REGION, database })).toEqual({ existed: false })
+  })
+
+  it('is dropped again when the platform row that would name it cannot be written', async () => {
+    const before = await creatorDatabases()
+    const since = new Date()
+    // An owner that does not exist: the platform transaction fails on its foreign key.
+    await expect(createProvisionedProject({ name: `no owner ${randomUUID()}`, userId: randomUUID(), region: REGION })).rejects.toThrow()
+    expect(await creatorDatabases()).toEqual(before)
+    const records = await prisma.auditLog.findMany({
+      where: { action: 'PROJECT_DATABASE_CREATED', timestamp: { gte: since }, metadata: { path: ['region'], equals: REGION } },
+      select: { metadata: true },
+    })
+    expect(records).toHaveLength(1)
+    const attempted = (records[0].metadata as { database: string }).database
+    expect(attempted).toMatch(/^p_[0-9a-f]{32}$/)
+    expect(await databaseExists(attempted)).toBe(false)
+  })
+
+  it('gives one only to the platform’s own administrators while the switch says staff', async () => {
+    set('BACKENLY_DEDICATED_DATABASES_US_EAST_1', 'staff')
+    const { isStaffAccount } = await import('@/lib/projects/database-tenancy')
+    const customer = await createProvisionedProject({ name: `customer ${randomUUID()}`, userId: ownerId, region: REGION })
+    made.push(customer.id)
+    expect(customer.databaseTenancy).toBe('shared')
+    expect(await rows(superUrl(), `SELECT 1 AS here FROM pg_namespace WHERE nspname = $1`, [customer.postgresSchema])).toEqual([{ here: 1 }])
+
+    staffRoleId = (await prisma.role.create({ data: { name: 'admin', description: 'platform administrators (fixture)' }, select: { id: true } })).id
+    staffUserId = (
+      await prisma.user.create({
+        data: { email: `own-database-staff-${randomUUID()}@example.test`, name: 'staff fixture', roleId: staffRoleId },
+        select: { id: true },
+      })
+    ).id
+    expect(await isStaffAccount(staffUserId)).toBe(true)
+    expect(await isStaffAccount(ownerId)).toBe(false)
+    const own = await createProvisionedProject({ name: `staff ${randomUUID()}`, userId: staffUserId, region: REGION })
+    made.push(own.id)
+    staffProjectId = own.id
+    expect(own.databaseTenancy).toBe('dedicated')
+
+    // The founder's account is the platform's too, as requireAdmin admits it.
+    set('FOUNDER_EMAIL', ownerEmail.toUpperCase())
+    expect(await isStaffAccount(ownerId)).toBe(true)
+    set('FOUNDER_EMAIL', undefined)
+    set('BACKENLY_DEDICATED_DATABASES_US_EAST_1', 'new')
+  })
+
+  it('sweeps only the databases no project names, once their creation is an hour old', async () => {
+    const { createProjectDatabase, dropProjectDatabase, sweepOrphanProjectDatabases } = await import('@/lib/data-plane/project-databases')
+    const old = await createProjectDatabase({ region: REGION, projectId: randomUUID() })
+    const young = await createProjectDatabase({ region: REGION, projectId: randomUUID() })
+    await prisma.auditLog.updateMany({
+      where: { action: 'PROJECT_DATABASE_CREATED', metadata: { path: ['database'], equals: old.database } },
+      data: { timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+    })
+    // One the creator made with no record of it, and one another role made: neither is the sweep's.
+    const unrecorded = `p_${randomUUID().replace(/-/g, '')}`
+    await rows(creatorUrl(), `CREATE DATABASE "${unrecorded}" TEMPLATE ${TEMPLATE}`)
+    const notTheCreators = `p_${randomUUID().replace(/-/g, '')}`
+    await rows(superUrl('postgres'), `CREATE DATABASE "${notTheCreators}"`)
+    const named = (await prisma.project.findUnique({ where: { id: staffProjectId }, select: { databaseName: true } }))?.databaseName as string
+    expect(named).toMatch(/^p_[0-9a-f]{32}$/)
+    try {
+      const [report] = await sweepOrphanProjectDatabases({ regions: [REGION] })
+      expect(report.error).toBeUndefined()
+      expect(report.failed).toEqual([])
+      expect(report.dropped).toEqual([old.database])
+      expect(report.tooRecent).toEqual([young.database])
+      expect(report.unrecorded).toContain(unrecorded)
+      expect(report.unrecorded).not.toContain(named)
+      expect(await databaseExists(old.database)).toBe(false)
+      for (const kept of [young.database, unrecorded, notTheCreators, named]) expect(await databaseExists(kept)).toBe(true)
+      expect(await prisma.auditLog.count({ where: { action: 'PROJECT_DATABASE_ORPHAN_DROPPED', metadata: { path: ['database'], equals: old.database } } })).toBe(1)
+    } finally {
+      for (const leftover of [young.database, unrecorded]) await dropProjectDatabase({ region: REGION, database: leftover }).catch(() => {})
+      await rows(superUrl('postgres'), `DROP DATABASE IF EXISTS "${notTheCreators}"`).catch(() => {})
+    }
   })
 })
 
