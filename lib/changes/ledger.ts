@@ -8,8 +8,11 @@
  *
  *   1. takes the project's change lock, so the change is the only thing
  *      altering the schema from its checkpoint until it is verified, and, if it
- *      fails, recovered (lib/changes/lock.ts);
- *   2. reads the catalog: the CHECKPOINT, taken before the first statement;
+ *      fails, recovered (lib/changes/lock.ts). The lock is taken in the
+ *      database holding the project's data, its own database when it has one,
+ *      on a connection the steps below read and write on;
+ *   2. reads the catalog on that connection: the CHECKPOINT, taken before the
+ *      first statement, of the database the change runs against;
  *   3. opens a BackendChange row, status `applying`, so a change interrupted by
  *      a crash is still on record with its checkpoint;
  *   4. runs the change, capturing every mutating statement it sends
@@ -368,12 +371,14 @@ export async function withGovernedChange<T>(
   if (currentChange(projectId)) return { result: await fn(), change: null }
   if (!ledgerEnabled(projectId)) return { result: await fn(), change: null }
 
-  // The statements are captured where they are sent: the home client, and the
-  // client of the project's own region, which is a different one for a project
-  // kept outside the home region (lib/data-plane/regional.ts).
+  // The statements are captured where they are sent: the platform client, and
+  // the workspace client of the project's database, on which
+  // lib/data-plane/regional.ts installs the recorder as it creates it. That
+  // client is pinned for the whole change, so a project with a database of its
+  // own keeps one client from the first statement to the last.
   installSqlRecorder(prisma as any)
-  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
-  installSqlRecorder((await workspaceRawClient(projectId)) as any)
+  const { pinWorkspaceClient } = await import('@/lib/data-plane/regional')
+  const unpin = await pinWorkspaceClient(projectId)
 
   return withChangeLock(projectId, async (client) => {
     const { resolveWorkspaceSchema } = await import('@/lib/services/workspace-pool')
@@ -381,6 +386,8 @@ export async function withGovernedChange<T>(
     const attr: ChangeAttribution = currentAttribution() ?? { source: 'system' }
     const kind = input.kind ?? 'change'
 
+    // On the lock's connection, so in the database holding the project's data:
+    // never the region's when the project has a database of its own.
     const before = await readCatalogOn(client, schema)
     const platform = await readPlatformState(projectId)
     // The rest of the backend, as the catalog is: read before, read after, the
@@ -586,5 +593,5 @@ export async function withGovernedChange<T>(
 
     if (thrown) throw thrown
     return { result: result as T, change: closed }
-  })
+  }).finally(unpin)
 }

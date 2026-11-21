@@ -21,7 +21,13 @@ import { assertEditionCompositionOrExit } from '../lib/edition/cloud-extension'
 import { assertTrustedProxiesParse } from '../lib/security/client-ip'
 import { installProcessSafetyNet } from './lib/async-route'
 import { startUsageLedger, usageLedger } from '../lib/usage/ledger'
+import { noteProcessKind } from '../lib/data-plane/process-kind'
 import app from './app'
+
+// The runtime keeps its own, smaller share of connections to each data instance
+// (DATA_POOL_PROCESS_CAP, lib/data-plane/regional.ts). Read when a connection is
+// first opened, which is after this line.
+noteProcessKind('runtime')
 
 // Before the socket, not after. This process serves every /api/v1/* request in
 // production, so a cloud deployment that is missing its private half must die

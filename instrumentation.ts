@@ -690,14 +690,12 @@ export async function register() {
         try {
           const { collectBaseline } = await import('./lib/autonomy/baseline/collector')
           const { getFleetScheduler } = await import('./lib/edition')
+          const { allSettledBounded } = await import('./lib/scheduler/bounded')
 
           const projects = await getFleetScheduler().activeTargets()
 
-          const CONCURRENCY = 5
-          for (let i = 0; i < projects.length; i += CONCURRENCY) {
-            const batch = projects.slice(i, i + CONCURRENCY)
-            await Promise.allSettled(batch.map(p => collectBaseline(p.id)))
-          }
+          // A few databases at a time, whichever database each project's data is in.
+          await allSettledBounded(projects, p => collectBaseline(p.id))
           console.log(`[Baseline] sampled ${projects.length} project(s)`)
         } catch (err: any) {
           console.error('[Baseline] Cron error:', err?.message)

@@ -48,10 +48,15 @@ describe('the dashboard reads workspace rows as the owner, not as nobody (P1)', 
     const pool = read('lib/services/workspace-pool.ts')
     const fn = pool.slice(pool.indexOf('export async function queryWorkspaceAsOwner'))
     const body = fn.slice(0, 2200)
-    expect(body).toContain("client.query('BEGIN')")
-    expect(body).toContain("client.query('COMMIT')")
-    expect(body).toContain('ROLLBACK')
+    // Set inside the query's own transaction, which every workspace query
+    // runs in (search_path and the statement timeout are SET LOCAL there too).
+    expect(body).toContain('return inWorkspaceTransaction(projectId, async (client) => {')
     expect(body).toContain('isServiceRole: true')
+    const tx = pool.slice(pool.indexOf('async function inWorkspaceTransaction'))
+    const txBody = tx.slice(0, tx.indexOf('\n}\n'))
+    expect(txBody).toMatch(/client\.query\(`BEGIN; /)
+    expect(txBody).toContain("client.query('COMMIT')")
+    expect(txBody).toContain("client.query('ROLLBACK')")
   })
 
   it('the generic queryWorkspace is NOT silently elevated', () => {

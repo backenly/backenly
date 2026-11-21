@@ -13,13 +13,27 @@
  * Solution: Dedicated Pool per project (up to MAX_POOLS total) with a
  * LRU eviction policy so idle projects don't waste connections.
  *
- * Each pool connects to the database in the project's own region
+ * Each pool connects to the database holding the project's data
  * (lib/data-plane/regional.ts). A project whose region this process has no
  * connection for is refused with RegionNotConfiguredError, never served from
- * another region's database.
+ * another region's database. A project with a database of its own is served
+ * from a small pool on that database (projectPool: at most 2 connections, and
+ * counted against the data instance's DATA_POOL_PROCESS_CAP, waiting up to 5 s
+ * for room and then refused with DatabaseBusyError, 503, retryable), not from
+ * the per-project pools below, which keep shared projects exactly as before.
+ *
+ * SETTINGS LAST ONE TRANSACTION. Every query runs in a transaction of its own,
+ * opened with `SET LOCAL search_path` and `SET LOCAL statement_timeout`, so the
+ * settings end with it: a pooled connection never carries one project's
+ * search_path or timeout to its next borrower, and the same SQL is correct
+ * behind a transaction pooler, which hands each transaction whatever server
+ * connection is free. Nothing here relies on a session setting surviving
+ * between two statements. Work that needs a session of its own (CREATE INDEX
+ * CONCURRENTLY, a session advisory lock) uses withWorkspaceSession, on a
+ * connection that is closed afterwards and never handed to anyone else.
  *
  * Pool parameters (can be overridden via env):
- *   WORKSPACE_POOL_MAX        — max connections per project (default: 5)
+ *   WORKSPACE_POOL_MAX        — max connections per project (default: 5; at most 2 on a project's own database)
  *   WORKSPACE_POOL_IDLE_MS    — idle timeout per connection (default: 10s)
  *   WORKSPACE_POOL_MAX_POOLS  — max simultaneous project pools (default: 50)
  *   WORKSPACE_STATEMENT_TIMEOUT_MS — per-query timeout (default: 5000ms)
@@ -31,7 +45,7 @@
 
 import { Pool, PoolClient, QueryResult } from 'pg'
 import { prisma } from '@/lib/db/prisma'
-import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { projectDatabase, projectDatabaseUrl, projectPool } from '@/lib/data-plane/regional'
 import { getWorkspaceDatabaseNames } from './databaseProvisioning'
 import { noteStatement } from '@/lib/execution/sql-recorder'
 
@@ -77,7 +91,7 @@ function getOrCreatePool(projectId: string, connectionString: string): Pool {
     connectionString,
     max: POOL_MAX,
     idleTimeoutMillis: POOL_IDLE_MS,
-    // Statement timeout is set per-query inside acquireWorkspaceClient()
+    // search_path and the statement timeout are set per transaction (SET LOCAL).
   })
 
   // Log pool errors so they surface in server logs without crashing
@@ -134,31 +148,106 @@ export async function resolveWorkspaceSchema(projectId: string): Promise<string>
 }
 
 /**
- * Acquire a client from the project pool, set the workspace search_path, and
- * apply the statement timeout.  The caller MUST release the client via
- * client.release() — use acquireWorkspaceClient() in a try/finally block or
- * prefer queryWorkspace() / executeWorkspace() helpers below.
+ * The pool serving this project's queries. A shared project's is its own
+ * per-project pool on its region's database, as always. A project with a
+ * database of its own gets the small pool on that database, under the data
+ * instance's cap.
+ */
+async function workspacePool(projectId: string): Promise<Pool> {
+  const placement = await projectDatabase(projectId)
+  if (placement.tenancy === 'dedicated') {
+    return projectPool(projectId, 'workspace', { max: POOL_MAX, idleTimeoutMillis: POOL_IDLE_MS })
+  }
+  // The project's own region, every time: a missing connection throws here,
+  // before any pool exists, rather than reaching for the home database.
+  return getOrCreatePool(projectId, await projectDatabaseUrl(projectId))
+}
+
+/**
+ * The workspace's search_path and statement timeout, for the transaction they
+ * are sent in and no longer. Only ever sent inside an open transaction:
+ * outside one, SET LOCAL does nothing.
+ */
+function workspaceSettingsSql(schemaName: string): string {
+  return `SET LOCAL search_path TO ${quotedSchema(schemaName)}, public; SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`
+}
+
+/**
+ * A workspace schema name as a quoted identifier, for the one place it is
+ * written into SQL text (SET search_path takes no parameters). Every name the
+ * platform gives is letters, digits, `_` and `-` (getWorkspaceDatabaseNames),
+ * so anything else is refused rather than escaped.
+ */
+const PLAIN_SCHEMA_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,62}$/
+
+function quotedSchema(schemaName: string): string {
+  if (!PLAIN_SCHEMA_NAME.test(schemaName)) {
+    throw new Error('The workspace schema name is not a plain identifier, so no query was sent.')
+  }
+  return `"${schemaName}"`
+}
+
+/**
+ * Run `fn` in a transaction of its own on a connection of the project's pool,
+ * with the workspace search_path and statement timeout set for that
+ * transaction alone. COMMIT on success, ROLLBACK on throw; a connection whose
+ * rollback fails is discarded rather than handed to the next borrower in an
+ * unknown state.
+ */
+async function inWorkspaceTransaction<T>(projectId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const schemaName = await resolveWorkspaceSchema(projectId)
+  const client = await (await workspacePool(projectId)).connect()
+  let discard = false
+  try {
+    // One round trip: the transaction block BEGIN opens continues after it.
+    await client.query(`BEGIN; ${workspaceSettingsSql(schemaName)}`)
+    const result = await fn(client)
+    await client.query('COMMIT')
+    return result
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {
+      discard = true
+    })
+    throw err
+  } finally {
+    client.release(discard)
+  }
+}
+
+/**
+ * A connection of the project's own, with the workspace search_path and
+ * statement timeout set for its whole session, for work that cannot run inside
+ * a transaction: CREATE INDEX CONCURRENTLY, a session advisory lock. The caller
+ * MUST release it; whatever it passes, the connection is then closed, never
+ * returned to the pool, so nothing set on it (its search_path, its timeouts,
+ * its advisory locks) reaches another borrower.
+ *
+ * It holds a session: it must be a direct connection, never one through a
+ * transaction pooler. Prefer withWorkspaceSession, which releases it.
  */
 export async function acquireWorkspaceClient(projectId: string): Promise<PoolClient> {
   const schemaName = await resolveWorkspaceSchema(projectId)
-  // The project's own region, every time: a missing connection throws here,
-  // before any pool exists, rather than reaching for the home database.
-  const pool = getOrCreatePool(projectId, await projectDatabaseUrl(projectId))
-  const client = await pool.connect()
-
+  const client = await (await workspacePool(projectId)).connect()
+  const release = client.release.bind(client)
+  // The pool sets release afresh on every checkout; this checkout's ends the connection.
+  client.release = () => release(true)
   try {
-    // Set search_path AND statement timeout for every acquired connection.
-    // Using SET (not SET LOCAL) so the setting persists for the lifetime of
-    // this pool connection — avoids re-sending it on every query.
-    await client.query(
-      `SET search_path TO "${schemaName}", public; SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`
-    )
+    await client.query(`SET search_path TO ${quotedSchema(schemaName)}, public; SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`)
   } catch (err) {
-    client.release(true) // destroy this connection — don't reuse with wrong state
+    client.release()
     throw err
   }
-
   return client
+}
+
+/** acquireWorkspaceClient, released (and so closed) once `fn` settles. */
+export async function withWorkspaceSession<T>(projectId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await acquireWorkspaceClient(projectId)
+  try {
+    return await fn(client)
+  } finally {
+    client.release()
+  }
 }
 
 /**
@@ -236,13 +325,10 @@ export async function queryWorkspace<T extends Record<string, unknown> = Record<
   params: unknown[] = []
 ): Promise<T[]> {
   assertParamArity(projectId, sql, params)
-  const client = await acquireWorkspaceClient(projectId)
-  try {
+  return inWorkspaceTransaction(projectId, async (client) => {
     const result: QueryResult<T> = await client.query(sql, params)
     return result.rows
-  } finally {
-    client.release()
-  }
+  })
 }
 
 /**
@@ -275,26 +361,17 @@ export async function queryWorkspaceAsOwner<T extends Record<string, unknown> = 
 ): Promise<T[]> {
   assertParamArity(projectId, sql, params)
   const { rlsSessionSql, rlsSessionParams } = await import('./rls-session')
-  const client = await acquireWorkspaceClient(projectId)
-  try {
-    // `set_config(..., true)` is transaction-local, so the elevated context
-    // cannot leak to the next borrower of this pooled connection.
-    await client.query('BEGIN')
-    try {
-      await client.query(
-        rlsSessionSql(),
-        rlsSessionParams({ userId: '', isServiceRole: true, userRole: 'service' }),
-      )
-      const result: QueryResult<T> = await client.query(sql, params)
-      await client.query('COMMIT')
-      return result.rows
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw err
-    }
-  } finally {
-    client.release()
-  }
+  // Inside the query's own transaction: `set_config(..., true)` is
+  // transaction-local, so the elevated context ends with it and cannot leak to
+  // the next borrower of this pooled connection.
+  return inWorkspaceTransaction(projectId, async (client) => {
+    await client.query(
+      rlsSessionSql(),
+      rlsSessionParams({ userId: '', isServiceRole: true, userRole: 'service' }),
+    )
+    const result: QueryResult<T> = await client.query(sql, params)
+    return result.rows
+  })
 }
 
 /**
@@ -312,13 +389,10 @@ export async function executeWorkspace(
   // dropped here was a removal no statement named, which verification reads as
   // a CASCADE side effect, and the change kept no SQL of what it ran.
   noteStatement(sql, params)
-  const client = await acquireWorkspaceClient(projectId)
-  try {
+  return inWorkspaceTransaction(projectId, async (client) => {
     const result = await client.query(sql, params)
     return result.rowCount ?? 0
-  } finally {
-    client.release()
-  }
+  })
 }
 
 /**
@@ -330,31 +404,22 @@ export async function withWorkspaceTransaction<T>(
   projectId: string,
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {
-  const client = await acquireWorkspaceClient(projectId)
-  // Every statement the callback sends is on the record, as executeWorkspace's are.
-  const noted = new Proxy(client, {
-    get(target, prop, receiver) {
-      if (prop === 'query') {
-        return (text: unknown, ...rest: unknown[]) => {
-          if (typeof text === 'string') noteStatement(text, Array.isArray(rest[0]) ? (rest[0] as unknown[]) : undefined)
-          return (target.query as (...args: unknown[]) => unknown)(text, ...rest)
+  return inWorkspaceTransaction(projectId, (client) => {
+    // Every statement the callback sends is on the record, as executeWorkspace's are.
+    const noted = new Proxy(client, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return (text: unknown, ...rest: unknown[]) => {
+            if (typeof text === 'string') noteStatement(text, Array.isArray(rest[0]) ? (rest[0] as unknown[]) : undefined)
+            return (target.query as (...args: unknown[]) => unknown)(text, ...rest)
+          }
         }
-      }
-      const value = Reflect.get(target, prop, receiver)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
+        const value = Reflect.get(target, prop, receiver)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    return fn(noted)
   })
-  try {
-    await client.query('BEGIN')
-    const result = await fn(noted)
-    await client.query('COMMIT')
-    return result
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    client.release()
-  }
 }
 
 /**

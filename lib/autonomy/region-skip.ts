@@ -56,7 +56,12 @@ export async function canReach(projectId: string, pass: string): Promise<boolean
 function summarize(unreachable: UnreachableProject[]): string {
   const groups = new Map<string, number>()
   for (const u of unreachable) {
-    const why = u.code === 'REGION_NOT_CONFIGURED' ? `${u.variable} is not set` : 'a region this build does not know'
+    const why =
+      u.code === 'REGION_NOT_CONFIGURED'
+        ? `${u.variable} is not set`
+        : u.code === 'UNKNOWN_PROJECT_DATABASE'
+          ? 'a database this build cannot use'
+          : 'a region this build does not know'
     const key = `${u.region} (${why})`
     groups.set(key, (groups.get(key) ?? 0) + 1)
   }

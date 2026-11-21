@@ -1,5 +1,5 @@
 /**
- * Realtime Listener Hub — one LISTEN connection per region, per process.
+ * Realtime Listener Hub — one LISTEN connection per database, per process.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -11,7 +11,7 @@
  * connections PER PROJECT. Those numbers are only physically possible when
  * the LISTEN fan-out is shared.
  *
- * This hub holds exactly ONE direct pg connection per region per process,
+ * This hub holds exactly ONE direct pg connection per database per process,
  * LISTENs on every channel that has at least one subscriber, and dispatches
  * NOTIFY payloads to in-process handlers. SSE responses are plain HTTP — they
  * no longer consume any database connection.
@@ -23,16 +23,25 @@
  * otherwise. The name never leaves the hub: subscribers are given the
  * stream's label (workspaceChannelName), which is all the SDK reads.
  *
- * REPAIR: while a region has streams, a pass about once a minute brings their
+ * REPAIR: while a listener has streams, a pass about once a minute brings their
  * schemas' notify and presence functions current (an older release running
  * beside this one, or a restore, can put an older body back) and follows any
- * channel that changed. Two queries per region when nothing needs doing.
+ * channel that changed. Two queries per listener when nothing needs doing.
  *
- * REGIONS: a project's channel is NOTIFYed by its own database, in the region
- * the project lives in (lib/data-plane/regional.ts), so it is LISTENed there and
- * nowhere else. A LISTEN on another region's database would succeed and then
- * never hear anything. Until a project lives outside the home region, the only
- * connection ever opened is the home one, exactly as before.
+ * DATABASES: a project's channel is NOTIFYed by the database holding its data
+ * (lib/data-plane/regional.ts), so it is LISTENed there and nowhere else. A
+ * LISTEN on another database would succeed and then never hear anything. A
+ * shared project's database is its region's own: one listener per region,
+ * keyed `${region}:control`, opened with the first stream in the region and
+ * kept, exactly as before. A project with a database of its own is heard on a
+ * listener of that database, keyed `${region}:${database}`: opened with the
+ * project's first stream in this process and closed
+ * REALTIME_LISTENER_IDLE_CLOSE_MS (60 s) after its last, so a database nobody
+ * is streaming from holds no connection. At most REALTIME_DATABASE_LISTENERS_MAX
+ * (20) of those are open per process; past that a listener waiting out its
+ * grace is closed early to make room, and when none is, the stream is refused
+ * with REALTIME_BUSY, which the client retries. Never a stream that would hear
+ * nothing.
  *
  * QUOTA: because nginx routes all /api/v1 traffic to a single runtime
  * process (and dev traffic to a single next dev process), the in-process
@@ -50,8 +59,13 @@
  */
 
 import { Client } from 'pg'
-import { projectRegion, regionDatabaseUrl, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
-import type { CloudRegionId } from '@/lib/regions'
+import {
+  regionDataInstanceUrl,
+  regionDatabaseUrl,
+  requireRegionDataInstanceUrl,
+  requireRegionDatabaseUrl,
+  withDatabase,
+} from '@/lib/data-plane/regional'
 import { workspaceChannelName, workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { enforceRealtimeConnection } from '@/lib/quota/kernel'
 import { isChannelControlFrame, isChannelName } from '@/lib/realtime/channel-sql'
@@ -61,14 +75,21 @@ import {
   channelsOfSchemas,
   currentProjectChannel,
   projectChannel,
-  realtimePool,
+  projectRealtimeDatabase,
+  realtimeDatabaseKey,
+  realtimeDatabasePool,
+  type RealtimeDatabase,
 } from '@/lib/realtime/channels'
 
 export type NotificationHandler = (payload: Record<string, unknown>) => void
 
 export type SubscribeResult =
   | { ok: true; channel: string; unsubscribe: () => void }
-  | { ok: false; code: 'PLAN_LIMIT_EXCEEDED' | 'INVALID_PROJECT'; message: string }
+  | { ok: false; code: 'PLAN_LIMIT_EXCEEDED' | 'INVALID_PROJECT' | 'REALTIME_BUSY'; message: string }
+
+/** What a stream refused for want of a listener is told. Retryable: the SDK reconnects with backoff. */
+export const REALTIME_BUSY_MESSAGE =
+  'This server is carrying as many realtime databases as it can right now, so the stream was not opened. Try again shortly.'
 
 const RECONNECT_BASE_MS = 500
 const RECONNECT_MAX_MS = 15_000
@@ -79,6 +100,25 @@ const PING_INTERVAL_MS = 4 * 60_000
 const REPAIR_INTERVAL_MS = 60_000
 /** How long a new stream waits for its project's functions to be checked. */
 const FUNCTION_CHECK_WAIT_MS = 2_000
+/** How long a project database's listener stays open after its last stream, unless set. */
+const IDLE_CLOSE_MS = 60_000
+/** How many project databases' listeners one process keeps open, unless set. */
+const DATABASE_LISTENERS_MAX = 20
+
+function positiveFromEnv(variable: string, fallback: number, min: number): number {
+  const parsed = Number.parseInt(process.env[variable] ?? '', 10)
+  return Number.isInteger(parsed) && parsed >= min ? parsed : fallback
+}
+
+/** REALTIME_LISTENER_IDLE_CLOSE_MS: read when a listener's last stream goes. */
+function idleCloseMs(): number {
+  return positiveFromEnv('REALTIME_LISTENER_IDLE_CLOSE_MS', IDLE_CLOSE_MS, 0)
+}
+
+/** REALTIME_DATABASE_LISTENERS_MAX: read when a project database's listener is to be opened. */
+function databaseListenersMax(): number {
+  return positiveFromEnv('REALTIME_DATABASE_LISTENERS_MAX', DATABASE_LISTENERS_MAX, 1)
+}
 
 function errorText(err: unknown): unknown {
   return err instanceof Error ? err.message : err
@@ -112,7 +152,7 @@ async function bringFunctionsCurrentBriefly(projectId: string): Promise<void> {
   if (timer) clearTimeout(timer)
 }
 
-/** A project's subscribers in one region, and the channel they hear. */
+/** A project's subscribers in one database, and the channel they hear. */
 interface Stream {
   readonly projectId: string
   readonly schema: string
@@ -126,8 +166,12 @@ interface Stream {
   dropped: boolean
 }
 
-/** One region's LISTEN connection and the streams it carries. */
-class RegionListener {
+/**
+ * One database's LISTEN connection and the streams it carries: a region's own
+ * database (target.database null), kept for the life of the process, or a
+ * project's own, closed once nobody has streamed from it for a while.
+ */
+class DatabaseListener {
   private client: Client | null = null
   private connectPromise: Promise<void> | null = null
   private readonly streams = new Map<string, Stream>() // projectId → stream
@@ -142,21 +186,53 @@ class RegionListener {
   /** Function failures already logged, so a lasting one is said once. */
   private readonly reported = new Set<string>()
   private destroyed = false
+  /** Subscribes under way here: none of them may find the listener closed. */
+  private joining = 0
+  private idleTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(readonly region: CloudRegionId) {}
+  readonly key: string
+  readonly region: RealtimeDatabase['region']
+
+  constructor(
+    readonly target: RealtimeDatabase,
+    /** Called once the listener has closed itself, so the hub forgets it. */
+    private readonly onClosed: (listener: DatabaseListener) => void = () => {},
+  ) {
+    this.key = realtimeDatabaseKey(target)
+    this.region = target.region
+  }
 
   get channelCount(): number {
     return this.listening.size
   }
 
+  /** A project's own database: closed after its last stream. A region's own is kept. */
+  get closesWhenIdle(): boolean {
+    return this.target.database !== null
+  }
+
+  /** No stream and no subscribe under way: only waiting out its grace before it closes. */
+  get idle(): boolean {
+    return this.streams.size === 0 && this.joining === 0
+  }
+
+  get closed(): boolean {
+    return this.destroyed
+  }
+
   /**
    * LISTEN needs a direct connection — PgBouncer transaction mode drops it.
-   * The region's direct connection, else its application one, as
-   * DIRECT_URL || DATABASE_URL always was at home. Never another region's: an
-   * unconfigured region throws REGION_NOT_CONFIGURED.
+   * A region's own database: its direct connection, else its application one,
+   * as DIRECT_URL || DATABASE_URL always was at home. A project's own database:
+   * the data instance's direct connection, else its application one
+   * (DATA_DIRECT_URL || DATA_DATABASE_URL at home), with the project's
+   * database. Never another region's: an unconfigured region throws
+   * REGION_NOT_CONFIGURED.
    */
   private connectionString(): string {
-    return regionDatabaseUrl(this.region, 'direct') ?? requireRegionDatabaseUrl(this.region, 'app')
+    const { region, database } = this.target
+    if (database === null) return regionDatabaseUrl(region, 'direct') ?? requireRegionDatabaseUrl(region, 'app')
+    return withDatabase(regionDataInstanceUrl(region, 'direct') ?? requireRegionDataInstanceUrl(region, 'app'), database)
   }
 
   /**
@@ -164,6 +240,20 @@ class RegionListener {
    * stop, and whether this call opened the project's stream in this process.
    */
   async listen(projectId: string, handler: NotificationHandler): Promise<{ stop: () => void; opened: boolean }> {
+    if (this.destroyed) throw new Error('This realtime listener has closed')
+    // Counted from here, so the listener is not closed under a subscribe that
+    // is still connecting.
+    this.joining++
+    this.cancelIdleClose()
+    try {
+      return await this.join(projectId, handler)
+    } finally {
+      this.joining--
+      this.closeLaterIfIdle()
+    }
+  }
+
+  private async join(projectId: string, handler: NotificationHandler): Promise<{ stop: () => void; opened: boolean }> {
     // Checked on every subscribe, as workspaceRawClient checks on every call:
     // a region whose connection was removed is refused even while a listener
     // opened earlier is still up.
@@ -243,7 +333,53 @@ class RegionListener {
       this.letGo(stream.channel)
       stream.channel = null
     }
-    if (this.streams.size === 0) this.stopRepairs()
+    if (this.streams.size === 0) {
+      this.stopRepairs()
+      this.closeLaterIfIdle()
+    }
+  }
+
+  // ── Closing a project database's listener ───────────────────────────────────
+
+  private cancelIdleClose(): void {
+    if (!this.idleTimer) return
+    clearTimeout(this.idleTimer)
+    this.idleTimer = null
+  }
+
+  /** A project database's listener with nobody on it closes after its grace, unless someone arrives first. */
+  private closeLaterIfIdle(): void {
+    if (!this.closesWhenIdle || this.destroyed || !this.idle || this.idleTimer) return
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null
+      if (this.idle) this.close()
+    }, idleCloseMs())
+    this.idleTimer.unref?.()
+  }
+
+  /**
+   * Close the connection and every timer, for good. Only ever with no stream
+   * and no subscribe under way: a stream is never left on a listener that can
+   * no longer hear.
+   */
+  close(): void {
+    if (this.destroyed || !this.idle) return
+    this.destroyed = true
+    this.cancelIdleClose()
+    this.stopRepairs()
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer)
+      this.pingTimer = null
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    const client = this.client
+    this.client = null
+    this.listening.clear()
+    client?.end().catch(() => {})
+    this.onClosed(this)
   }
 
   /**
@@ -311,7 +447,7 @@ class RegionListener {
     this.repairTimer = null
   }
 
-  /** One pass over this region's streams; a pass already running is shared. */
+  /** One pass over this listener's streams; a pass already running is shared. */
   repair(): Promise<void> {
     if (!this.repairing) {
       this.repairing = this.runRepair().finally(() => {
@@ -328,7 +464,7 @@ class RegionListener {
 
     // 1. Functions that are not the current ones are replaced.
     try {
-      const { failures } = await bringFunctionsCurrent(realtimePool(this.region), schemas)
+      const { failures } = await bringFunctionsCurrent(await realtimeDatabasePool(this.target), schemas)
       for (const { schema, error } of failures) {
         const key = `${schema}:${(error as { code?: string } | null)?.code ?? 'error'}`
         if (this.reported.has(key)) continue
@@ -341,7 +477,7 @@ class RegionListener {
 
     // 2. A channel that was replaced, or whose row is gone, is read again.
     try {
-      const channels = await channelsOfSchemas(this.region, schemas)
+      const channels = await channelsOfSchemas(this.target, schemas)
       for (const stream of streams) {
         if (!stream.dropped && channels.get(stream.schema) !== stream.channel) this.recheck(stream)
       }
@@ -396,6 +532,11 @@ class RegionListener {
     })
 
     await client.connect()
+    if (this.destroyed) {
+      // Closed while connecting: nobody is left to hear on it.
+      client.end().catch(() => {})
+      return
+    }
     this.client = client
     this.reconnectAttempt = 0
 
@@ -436,7 +577,7 @@ class RegionListener {
 }
 
 class ListenerHub {
-  private regions = new Map<CloudRegionId, RegionListener>()
+  private listeners = new Map<string, DatabaseListener>() // realtimeDatabaseKey → listener
   private counts = new Map<string, number>() // projectId → live subscriber count
 
   /** Live subscriber count for a project (exposed for status/verification). */
@@ -444,20 +585,25 @@ class ListenerHub {
     return this.counts.get(projectId) ?? 0
   }
 
-  /** Total channels currently LISTENed, across regions (for verification). */
+  /** Total channels currently LISTENed, across databases (for verification). */
   channelCount(): number {
     let total = 0
-    for (const listener of this.regions.values()) total += listener.channelCount
+    for (const listener of this.listeners.values()) total += listener.channelCount
     return total
   }
 
+  /** The databases this process holds a listener on, by key (for status/verification). */
+  listenerKeys(): string[] {
+    return [...this.listeners.keys()]
+  }
+
   /**
-   * Run the repair pass in every region now, and wait for it: functions
+   * Run the repair pass on every listener now, and wait for it: functions
    * brought current, replaced channels followed. The timer does the same
    * about once a minute.
    */
   async repairNow(): Promise<void> {
-    await Promise.all([...this.regions.values()].map((listener) => listener.repair()))
+    await Promise.all([...this.listeners.values()].map((listener) => listener.repair()))
   }
 
   /**
@@ -504,8 +650,13 @@ class ListenerHub {
         }
       }
 
-      // The channel is NOTIFYed by the project's own database, in its region.
-      const { stop: stopListening, opened } = await this.listenerFor(await projectRegion(projectId)).listen(projectId, handler)
+      // The channel is NOTIFYed by the database holding the project's data.
+      const listener = this.listenerFor(await projectRealtimeDatabase(projectId))
+      if (!listener) {
+        release()
+        return { ok: false, code: 'REALTIME_BUSY', message: REALTIME_BUSY_MESSAGE }
+      }
+      const { stop: stopListening, opened } = await listener.listen(projectId, handler)
       // Once per stream this process opens; the repair pass keeps it so after.
       if (opened) await bringFunctionsCurrentBriefly(projectId)
 
@@ -521,12 +672,30 @@ class ListenerHub {
     }
   }
 
-  private listenerFor(region: CloudRegionId): RegionListener {
-    let listener = this.regions.get(region)
-    if (!listener) {
-      listener = new RegionListener(region)
-      this.regions.set(region, listener)
+  /**
+   * The listener for `target`, opened if need be. A region's own database's is
+   * always given. A project database's is null when this process already keeps
+   * as many as it may and none of them is idle enough to close for it.
+   */
+  private listenerFor(target: RealtimeDatabase): DatabaseListener | null {
+    const key = realtimeDatabaseKey(target)
+    const existing = this.listeners.get(key)
+    if (existing && !existing.closed) return existing
+
+    if (target.database !== null) {
+      const open = [...this.listeners.values()].filter((listener) => listener.closesWhenIdle && !listener.closed)
+      if (open.length >= databaseListenersMax()) {
+        // One nobody is streaming from, waiting out its grace, makes room.
+        const spare = open.find((listener) => listener.idle)
+        if (!spare) return null
+        spare.close()
+      }
     }
+
+    const listener = new DatabaseListener(target, (closed) => {
+      if (this.listeners.get(closed.key) === closed) this.listeners.delete(closed.key)
+    })
+    this.listeners.set(key, listener)
     return listener
   }
 }

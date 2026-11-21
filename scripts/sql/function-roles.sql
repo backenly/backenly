@@ -90,6 +90,19 @@ BEGIN
   EXECUTE format('ALTER ROLE %I SET statement_timeout = %L', fn_role, '15s');
   EXECUTE format('ALTER ROLE %I SET idle_in_transaction_session_timeout = %L', fn_role, '30s');
 
+  -- A project's own database lets no login connect through PUBLIC
+  -- (tools/managed-db/regional/sql/project-db.sql), so the login is given
+  -- CONNECT on it by name, and on no other project's database. Where PUBLIC
+  -- may connect, as on a database several projects share, nothing is granted.
+  -- A GRANT the definer cannot make may only warn, so the result is read back.
+  IF NOT has_database_privilege('public', current_database(), 'CONNECT') THEN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), fn_role);
+    IF NOT has_database_privilege(fn_role, current_database(), 'CONNECT') THEN
+      RAISE EXCEPTION 'backenly_fn_role_sync: % could not be given CONNECT on database %; the role that owns this function needs CONNECT on it WITH GRANT OPTION (scripts/sql/project-database-acl.sql)',
+        fn_role, current_database();
+    END IF;
+  END IF;
+
   EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', p_schema, fn_role);
   EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO %I', p_schema, fn_role);
   EXECUTE format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, fn_role);
