@@ -125,8 +125,8 @@ export function MoveLedger({
 
       <p className="border-t border-white/[0.06] px-4 py-3 text-[12px] leading-[18px] text-faint [text-wrap:pretty] sm:px-5">
         {plan.source === 'postgres'
-          ? 'Read-only access. Nothing in the source database changes.'
-          : `Read-only access. Nothing in ${plan.project} on ${from} changes.`}
+          ? 'Backenly only reads the source database. Nothing there changes.'
+          : `Backenly only reads ${from}. Nothing there changes.`}
         {plan.staysBehind && ` Its ${plan.staysBehind.count} ${plan.staysBehind.word} stay on ${from} for your agent to rebuild.`}
       </p>
     </div>
