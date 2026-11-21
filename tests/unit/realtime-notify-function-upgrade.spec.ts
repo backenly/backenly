@@ -35,6 +35,10 @@ jest.mock('@/lib/realtime/channels', () => ({
   bringFunctionsCurrent: jest.fn(async () => ({ states: new Map(), failures: [] })),
   bringProjectFunctionsCurrent: (...args: unknown[]) => mockEnsure(...args),
   realtimePool: jest.fn(),
+  realtimeDatabasePool: jest.fn(async () => ({})),
+  // A shared project: its region's own database, as every project here is.
+  projectRealtimeDatabase: jest.fn(async () => ({ region: 'home', database: null })),
+  realtimeDatabaseKey: (target: { region: string; database: string | null }) => `${target.region}:${target.database ?? 'control'}`,
 }))
 // Off, the hub checks a project id as it does in production. On, any value
 // passes, which is what CodeQL assumes of an id read from a request.

@@ -66,9 +66,10 @@ import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { installSqlRecorder } from '@/lib/execution/sql-recorder'
 import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
-import { DatabaseBusyError, DatabaseRegistry, type UseTracker } from './database-registry'
+import { ConnectionBudget, DatabaseBusyError, DatabaseRegistry, ROOM_WAIT_MS, whenRoom, type Admission, type UseTracker } from './database-registry'
 import { DriftEventStore } from './drift-events'
 import { EpochBehindError, EpochCache } from './epoch-cache'
+import { processKind, type ProcessKind } from './process-kind'
 import { withoutStatementCache } from './statement-cache'
 
 export { DatabaseBusyError } from './database-registry'
@@ -672,6 +673,7 @@ export type WorkspaceRawClient = Pick<
 const globalForWorkspace = globalThis as unknown as {
   backenlyWorkspaceClients?: Map<CloudRegionId, PrismaClient>
   backenlyDatabaseClients?: DatabaseRegistry<PrismaClient>
+  backenlyDataInstanceBudgets?: Map<string, ConnectionBudget>
 }
 const workspaceClients = (globalForWorkspace.backenlyWorkspaceClients ??= new Map<CloudRegionId, PrismaClient>())
 
@@ -750,6 +752,52 @@ function capFromEnv(variable: string, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback
 }
 
+/**
+ * THE CONNECTIONS ONE PROCESS KEEPS TO A DATA INSTANCE. Every client and pool
+ * this module opens on a project's own database counts against one cap per
+ * data instance, DATA_POOL_PROCESS_CAP connections, whichever registry opened
+ * it: a client its PROJECT_DATABASE_CONNECTION_LIMIT, a pool its `max`. At the
+ * cap the least recently used idle one, client or pool, is let go to make room;
+ * when none is idle, a caller waits up to ROOM_WAIT_MS (5 s) for one to come
+ * free and is then refused with DatabaseBusyError (503, retryable). However
+ * many projects a process serves, it never opens more than that to one
+ * instance through these.
+ *
+ * Unset, the web keeps up to 60 and the runtime up to 30
+ * (lib/data-plane/process-kind.ts); any other process up to 30. The connections
+ * that hold a session of their own (the change lock, realtime LISTEN) are
+ * counted apart, by their own caps (lib/changes/lock.ts,
+ * lib/realtime/listener-hub.ts).
+ */
+export const DATA_POOL_PROCESS_CAP_DEFAULTS: Readonly<Record<ProcessKind, number>> = { web: 60, runtime: 30, other: 30 }
+
+/** DATA_POOL_PROCESS_CAP, or the default for this kind of process. Never below one pool's worth. */
+export function dataPoolProcessCap(env: Env = process.env, kind: ProcessKind = processKind(env)): number {
+  const parsed = Number.parseInt(env.DATA_POOL_PROCESS_CAP ?? '', 10)
+  if (Number.isInteger(parsed) && parsed >= PROJECT_DATABASE_CONNECTION_LIMIT) return parsed
+  return DATA_POOL_PROCESS_CAP_DEFAULTS[kind]
+}
+
+const dataInstanceBudgets = (globalForWorkspace.backenlyDataInstanceBudgets ??= new Map<string, ConnectionBudget>())
+
+/**
+ * The cap on this process's connections to a region's data instance. The cap
+ * is read each time it is applied, so a changed setting takes effect at once.
+ */
+export function dataInstanceBudget(region: CloudRegionId, instance: string = PRIMARY_DATA_INSTANCE): ConnectionBudget {
+  const key = `${region}/${instance}`
+  let budget = dataInstanceBudgets.get(key)
+  if (!budget) {
+    budget = new ConnectionBudget({ cap: () => dataPoolProcessCap(), what: `connections to project databases in ${region}` })
+    dataInstanceBudgets.set(key, budget)
+  }
+  return budget
+}
+
+function admitted(region: CloudRegionId, weight: number): Admission {
+  return { budget: dataInstanceBudget(region), weight }
+}
+
 const databaseClients = (globalForWorkspace.backenlyDatabaseClients ??= new DatabaseRegistry<PrismaClient>({
   max: capFromEnv('PROJECT_DATABASE_CLIENTS_MAX', PROJECT_DATABASE_CLIENTS_MAX),
   minIdleMs: PROJECT_DATABASE_CLIENT_MIN_IDLE_MS,
@@ -790,7 +838,11 @@ function newDatabaseClient(dataInstanceUrl: string, database: string, tracker: U
 /** The open client for a project database, checked against configuration on every use. */
 function liveDatabaseClient(region: CloudRegionId, database: string, projectId?: string): PrismaClient {
   const url = requireRegionDataInstanceUrl(region, 'app', { projectId })
-  return databaseClients.get(clientKey(region, database), (tracker) => newDatabaseClient(url, database, tracker))
+  return databaseClients.get(
+    clientKey(region, database),
+    (tracker) => newDatabaseClient(url, database, tracker),
+    admitted(region, PROJECT_DATABASE_CONNECTION_LIMIT),
+  )
 }
 
 function refuseBadName(database: string): void {
@@ -850,29 +902,44 @@ export function databaseClient(region: CloudRegionId, database: string, projectI
 export function pinDatabaseClient(region: CloudRegionId, database: string, projectId?: string): () => void {
   refuseBadName(database)
   const url = requireRegionDataInstanceUrl(region, 'app', { projectId })
-  return databaseClients.pin(clientKey(region, database), (tracker) => newDatabaseClient(url, database, tracker))
+  return databaseClients.pin(
+    clientKey(region, database),
+    (tracker) => newDatabaseClient(url, database, tracker),
+    admitted(region, PROJECT_DATABASE_CONNECTION_LIMIT),
+  )
 }
 
 /**
  * pinDatabaseClient for the database holding a project's data. A shared
  * project's is its region's client, which is never closed to make room: it is
  * opened here (and an unreachable region refused, as workspaceRawClient would)
- * and nothing more is held.
+ * and nothing more is held. A project database's waits up to ROOM_WAIT_MS for
+ * room under the data instance's cap.
  */
 export async function pinWorkspaceClient(projectId: string): Promise<() => void> {
   const placement = await projectDatabase(projectId)
-  if (placement.tenancy === 'dedicated') return pinDatabaseClient(placement.region, placement.database as string, projectId)
+  if (placement.tenancy === 'dedicated') {
+    return whenRoom(() => pinDatabaseClient(placement.region, placement.database as string, projectId), ROOM_WAIT_MS)
+  }
   regionClient(placement.region, projectId)
   return () => {}
 }
 
 /**
  * Raw SQL against the database holding a project's data: its region's own for
- * a shared project, exactly as before, or its own (databaseClient).
+ * a shared project, exactly as before, or its own (databaseClient). For a
+ * project database the client is opened here, waiting up to ROOM_WAIT_MS for
+ * room under the data instance's cap, so the first statement does not find the
+ * cap full and refuse at once.
  */
 export async function workspaceRawClient(projectId: string): Promise<WorkspaceRawClient> {
   const placement = await projectDatabase(projectId)
-  if (placement.tenancy === 'dedicated') return databaseClient(placement.region, placement.database as string, projectId)
+  if (placement.tenancy === 'dedicated') {
+    const database = placement.database as string
+    const handle = databaseClient(placement.region, database, projectId)
+    await whenRoom(() => liveDatabaseClient(placement.region, database, projectId), ROOM_WAIT_MS)
+    return handle
+  }
   return regionRawClient(placement.region, projectId)
 }
 
@@ -983,10 +1050,13 @@ export function regionPool(
  * idle connections closed after PROJECT_DATABASE_POOL_IDLE_MS, and at most
  * PROJECT_DATABASE_POOLS_MAX (64 unless set) kept per process, least recently
  * used out first among those with nothing checked out and nobody waiting.
+ * Every one counts against its data instance's DATA_POOL_PROCESS_CAP, with the
+ * clients above.
  *
  * A pool let go to make room is not ended: a caller that resolved it a moment
  * ago may still send on it. It holds idle connections only, which close on
- * their own, and disconnectRegionalClients ends it.
+ * their own, and disconnectRegionalClients ends it. Until they have closed they
+ * still count against the cap.
  */
 const PROJECT_DATABASE_POOL_MAX = 2
 const PROJECT_DATABASE_POOL_IDLE_MS = 10_000
@@ -1003,10 +1073,12 @@ const databasePools = new DatabaseRegistry<Pool>({
   max: capFromEnv('PROJECT_DATABASE_POOLS_MAX', PROJECT_DATABASE_POOLS_MAX),
   idle: (pool) => pool.totalCount === pool.idleCount && pool.waitingCount === 0,
   close: (pool) => retirePool(pool),
+  held: (pool) => pool.totalCount,
   what: 'project database pools',
 })
 
-function databasePool(
+/** The pool for one database and subsystem, opened if need be; refused at once when the caps leave no room. */
+function databasePoolNow(
   region: CloudRegionId,
   database: string,
   name: string,
@@ -1015,18 +1087,43 @@ function databasePool(
 ): Pool {
   refuseBadName(database)
   const url = requireRegionDataInstanceUrl(region, 'app', { projectId })
-  return databasePools.get(`${region}/${database}/${name}`, () => {
-    const pool = new Pool({
-      ...config,
-      max: Math.min(config.max ?? PROJECT_DATABASE_POOL_MAX, PROJECT_DATABASE_POOL_MAX),
-      idleTimeoutMillis: config.idleTimeoutMillis ?? PROJECT_DATABASE_POOL_IDLE_MS,
-      allowExitOnIdle: true,
-      connectionString: withDatabase(url, database),
-    })
-    // An idle client's error is emitted on the pool; unhandled, it ends the process.
-    pool.on('error', (err) => console.error(`[regional] ${name} pool on a project database in ${region}:`, err.message))
-    return pool
-  })
+  const max = Math.min(config.max ?? PROJECT_DATABASE_POOL_MAX, PROJECT_DATABASE_POOL_MAX)
+  return databasePools.get(
+    `${region}/${database}/${name}`,
+    () => {
+      const pool = new Pool({
+        ...config,
+        max,
+        idleTimeoutMillis: config.idleTimeoutMillis ?? PROJECT_DATABASE_POOL_IDLE_MS,
+        allowExitOnIdle: true,
+        connectionString: withDatabase(url, database),
+      })
+      // An idle client's error is emitted on the pool; unhandled, it ends the process.
+      pool.on('error', (err) => console.error(`[regional] ${name} pool on a project database in ${region}:`, err.message))
+      return pool
+    },
+    admitted(region, max),
+  )
+}
+
+/**
+ * A small pool on a project's own database, one per subsystem (`name`), for
+ * work about that database rather than through a project id (the realtime
+ * listener's pass over the streams it carries). Waits up to ROOM_WAIT_MS for
+ * room under the data instance's cap, then is refused with DatabaseBusyError.
+ * Asked for on every use: a pool let go to make room keeps working, but is no
+ * longer the one handed out.
+ */
+export async function databasePool(
+  region: CloudRegionId,
+  database: string,
+  name: string,
+  config: Omit<PoolConfig, 'connectionString'> = {},
+  projectId?: string,
+): Promise<Pool> {
+  refuseBadName(database)
+  requireRegionDataInstanceUrl(region, 'app', { projectId })
+  return whenRoom(() => databasePoolNow(region, database, name, config, projectId), ROOM_WAIT_MS)
 }
 
 /**

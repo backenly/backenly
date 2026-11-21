@@ -8,8 +8,11 @@
  *
  *   1. takes the project's change lock, so the change is the only thing
  *      altering the schema from its checkpoint until it is verified, and, if it
- *      fails, recovered (lib/changes/lock.ts);
- *   2. reads the catalog: the CHECKPOINT, taken before the first statement;
+ *      fails, recovered (lib/changes/lock.ts). The lock is taken in the
+ *      database holding the project's data, its own database when it has one,
+ *      on a connection the steps below read and write on;
+ *   2. reads the catalog on that connection: the CHECKPOINT, taken before the
+ *      first statement, of the database the change runs against;
  *   3. opens a BackendChange row, status `applying`, so a change interrupted by
  *      a crash is still on record with its checkpoint;
  *   4. runs the change, capturing every mutating statement it sends
@@ -383,6 +386,8 @@ export async function withGovernedChange<T>(
     const attr: ChangeAttribution = currentAttribution() ?? { source: 'system' }
     const kind = input.kind ?? 'change'
 
+    // On the lock's connection, so in the database holding the project's data:
+    // never the region's when the project has a database of its own.
     const before = await readCatalogOn(client, schema)
     const platform = await readPlatformState(projectId)
     // The rest of the backend, as the catalog is: read before, read after, the
