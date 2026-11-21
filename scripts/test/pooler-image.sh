@@ -12,20 +12,30 @@
 #
 # Shown, on both ports unless said otherwise:
 #   - a connection without TLS is refused;
-#   - a login in backenly_pooler.logins connects with verify-full and runs a
-#     query, and the pooler's own connection to the server is TLS;
+#   - a login in backenly_pooler.logins connects to its own project database
+#     with verify-full and runs a query, and the pooler's own connection to
+#     the server is TLS;
 #   - a wrong password, a login on the server but not in the table, and an
 #     inactive login are refused;
 #   - postgres, the administrator, backenly_app and backenly_pooler_auth are
 #     refused, each with its correct password and a database it may use;
-#   - the pgbouncer console database and the backenly_pooler database are
-#     refused;
+#   - a valid customer login asking for any database but its own project's is
+#     refused, though the server itself admits it to most of them: the
+#     region's shared database, postgres, template1, backenly_pooler, the
+#     pgbouncer console database, and another project's database (which the
+#     server refuses too, since CONNECT is granted by name); and the server's
+#     own connection log shows the pooler never signed in as that login to
+#     any of them;
+#   - a project database created after the pooler started is served within
+#     the refresh interval, and is no longer served once its last login is
+#     turned off;
 #   - the two processes really pool differently, and a named prepared
 #     statement survives moving to another server connection in transaction
 #     mode;
 #   - extra_float_digits in options is ignored, search_path in options is
 #     applied, and any other setting in options is refused;
-#   - nothing the containers log contains a secret.
+#   - nothing the containers log contains a secret;
+#   - docker stop ends each pooler cleanly rather than by a kill.
 #
 #   POOLER_IMAGE_REQUIRE=1 PG_BINDIR=/usr/lib/postgresql/16/bin bash scripts/test/pooler-image.sh
 #
@@ -72,7 +82,7 @@ finish() {
   if [ "$status" -ne 0 ] || [ "$FAILURES" -ne 0 ]; then
     for mode in session transaction; do
       echo "── pooler-$mode logs ──"
-      docker logs "pooler-$mode-$TAG" 2>&1 | tail -60 || true
+      docker logs "pooler-$mode-$TAG" 2>&1 | tail -80 || true
     done
     echo "── server log ──"
     tail -40 "$WORK/server.log" 2>/dev/null || true
@@ -92,7 +102,14 @@ AUTH_PW="$(secret)"
 LOGIN_PW="$(secret)"
 ABSENT_PW="$(secret)"
 INACTIVE_PW="$(secret)"
+OTHER_PW="$(secret)"
+NEW_PW="$(secret)"
 PROJECT_DB="p_$(openssl rand -hex 16)"
+OTHER_DB="p_$(openssl rand -hex 16)"
+NEW_DB="p_$(openssl rand -hex 16)"
+# Stands in for a region's own shared database, which any login may CONNECT to.
+SHARED_DB=backenly_regional
+REFRESH_SECONDS=2
 
 # ── Certificates ────────────────────────────────────────────────────────────
 echo "certificates"
@@ -148,6 +165,7 @@ ssl_cert_file = '$WORK/server.pem'
 ssl_key_file = '$WORK/server.key'
 ssl_min_protocol_version = 'TLSv1.2'
 fsync = off
+log_connections = on
 EOF
 cat > "$WORK/data/pg_hba.conf" <<EOF
 hostssl all all 127.0.0.1/32 scram-sha-256
@@ -165,12 +183,13 @@ db() {
 # Verifiers from lib/data-plane/scram.ts, one per line, in this order.
 mapfile -t V < <(
   PW_APP="$APP_PW" PW_AUTH="$AUTH_PW" PW_LOGIN="$LOGIN_PW" PW_ABSENT="$ABSENT_PW" PW_INACTIVE="$INACTIVE_PW" \
+  PW_OTHER="$OTHER_PW" PW_NEW="$NEW_PW" \
     node_modules/.bin/tsx -e "
       const { scramSha256Verifier } = require('./lib/data-plane/scram');
-      for (const k of ['APP', 'AUTH', 'LOGIN', 'ABSENT', 'INACTIVE']) console.log(scramSha256Verifier(process.env['PW_' + k]));
+      for (const k of ['APP', 'AUTH', 'LOGIN', 'ABSENT', 'INACTIVE', 'OTHER', 'NEW']) console.log(scramSha256Verifier(process.env['PW_' + k]));
     "
 )
-[ "${#V[@]}" -eq 5 ] || { echo "scram.ts did not produce five verifiers"; exit 1; }
+[ "${#V[@]}" -eq 7 ] || { echo "scram.ts did not produce seven verifiers"; exit 1; }
 
 # An administrator like the RDS master, which is not a superuser.
 db postgres "$SUPER_PW" postgres -c "CREATE ROLE pooler_admin LOGIN CREATEROLE CREATEDB PASSWORD '$ADMIN_PW'"
@@ -180,32 +199,56 @@ CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT PASSWORD '${V[1]}';
 CREATE ROLE bkn_ci_login LOGIN PASSWORD '${V[2]}';
 CREATE ROLE bkn_ci_absent LOGIN PASSWORD '${V[3]}';
 CREATE ROLE bkn_ci_inactive LOGIN PASSWORD '${V[4]}';
+CREATE ROLE bkn_ci_other LOGIN PASSWORD '${V[5]}';
+CREATE ROLE bkn_ci_new LOGIN PASSWORD '${V[6]}';
 CREATE DATABASE backenly_pooler;
+-- Created with PostgreSQL's default grants, as a region's shared database
+-- still is: CONNECT for PUBLIC.
+CREATE DATABASE $SHARED_DB;
 CREATE DATABASE $PROJECT_DB;
+CREATE DATABASE $OTHER_DB;
 SQL
 db pooler_admin "$ADMIN_PW" "$PROJECT_DB" <<SQL
 REVOKE ALL ON DATABASE $PROJECT_DB FROM PUBLIC;
+REVOKE ALL ON DATABASE $OTHER_DB FROM PUBLIC;
 -- backenly_app may connect too, so the pooler refusing it is the pooler's doing.
 GRANT CONNECT ON DATABASE $PROJECT_DB TO bkn_ci_login, bkn_ci_absent, bkn_ci_inactive, backenly_app;
 GRANT CREATE ON DATABASE $PROJECT_DB TO bkn_ci_login;
+GRANT CONNECT ON DATABASE $OTHER_DB TO bkn_ci_other;
 SQL
 db bkn_ci_login "$LOGIN_PW" "$PROJECT_DB" -c "CREATE SCHEMA ci_schema"
 db pooler_admin "$ADMIN_PW" backenly_pooler -f tools/managed-db/regional/sql/pooler.sql
 db backenly_app "$APP_PW" backenly_pooler <<SQL
 INSERT INTO backenly_pooler.logins (rolname, verifier, database, active) VALUES
   ('bkn_ci_login', '${V[2]}', '$PROJECT_DB', true),
-  ('bkn_ci_inactive', '${V[4]}', '$PROJECT_DB', false);
+  ('bkn_ci_inactive', '${V[4]}', '$PROJECT_DB', false),
+  ('bkn_ci_other', '${V[5]}', '$OTHER_DB', true);
 SQL
 
 # The control: straight to the server, each of these logs in. Whatever the
 # pooler refuses below, it refuses on its own account.
 for pair in "bkn_ci_absent:$ABSENT_PW:$PROJECT_DB" "bkn_ci_inactive:$INACTIVE_PW:$PROJECT_DB" \
             "backenly_app:$APP_PW:$PROJECT_DB" "backenly_pooler_auth:$AUTH_PW:backenly_pooler" \
-            "pooler_admin:$ADMIN_PW:postgres" "postgres:$SUPER_PW:$PROJECT_DB"; do
+            "pooler_admin:$ADMIN_PW:postgres" "postgres:$SUPER_PW:$PROJECT_DB" \
+            "bkn_ci_login:$LOGIN_PW:$SHARED_DB" "bkn_ci_login:$LOGIN_PW:postgres" "bkn_ci_login:$LOGIN_PW:template1"; do
   IFS=: read -r user password database <<< "$pair"
   [ "$(db "$user" "$password" "$database" -c 'SELECT current_user')" = "$user" ] ||
     { echo "control failed: $user cannot log in to $database on the server itself"; exit 1; }
 done
+# And the server's own answer to another project's database.
+if db bkn_ci_login "$LOGIN_PW" "$OTHER_DB" -c 'SELECT 1' >/dev/null 2>&1; then
+  echo "control failed: the server admits bkn_ci_login to another project's database"; exit 1
+fi
+
+# server_logins DATABASE: how often the server has let bkn_ci_login past its
+# password into DATABASE (logged before the CONNECT check, so a login the
+# server then refuses is counted too).
+server_logins() { grep -c "connection authorized: user=bkn_ci_login database=$1 " "$WORK/server.log" || true; }
+OFF_LIMITS=("$SHARED_DB" postgres template1 backenly_pooler "$OTHER_DB")
+declare -A BEFORE=()
+for database in "${OFF_LIMITS[@]}"; do BEFORE[$database]="$(server_logins "$database")"; done
+[ "${BEFORE[$SHARED_DB]}" -ge 1 ] && [ "${BEFORE[$OTHER_DB]}" -ge 1 ] ||
+  { echo "control failed: the server log does not record logins (log_connections)"; exit 1; }
 
 # ── The image ───────────────────────────────────────────────────────────────
 echo "image"
@@ -221,13 +264,14 @@ for mode in session transaction; do
   docker run -d --name "pooler-$mode-$TAG" --network host --read-only \
     --tmpfs /run/pooler:rw,uid=10001,gid=10001,mode=0700 --ulimit nofile=65536:65536 \
     -e POOLER_MODE="$mode" -e POOLER_SERVER_HOST=localhost -e POOLER_SERVER_PORT="$DBPORT" \
+    -e POOLER_DATABASE_REFRESH_SECONDS="$REFRESH_SECONDS" \
     -e POOLER_SERVER_CA_PEM -e POOLER_TLS_CERT_PEM -e POOLER_TLS_KEY_PEM -e POOLER_AUTH_PASSWORD \
     "$IMAGE" >/dev/null
 done
 unset POOLER_SERVER_CA_PEM POOLER_TLS_CERT_PEM POOLER_TLS_KEY_PEM POOLER_AUTH_PASSWORD
 
 for port in "$SESSION_PORT" "$TRANSACTION_PORT"; do
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 90); do
     (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
     for mode in session transaction; do
       [ "$(docker inspect -f '{{.State.Running}}' "pooler-$mode-$TAG")" = true ] ||
@@ -266,9 +310,9 @@ for port in "$SESSION_PORT" "$TRANSACTION_PORT"; do
   out="$(via "$port" bkn_ci_login "$LOGIN_PW" "$PROJECT_DB" verify-full \
     "SELECT current_user || '|' || current_database() || '|' || CASE WHEN ssl THEN 'tls' ELSE 'plain' END FROM pg_stat_ssl WHERE pid = pg_backend_pid()")" || true
   if [ "$out" = "bkn_ci_login|$PROJECT_DB|tls" ]; then
-    ok "a login in the table connects with verify-full and runs a query, over TLS to the server too"
+    ok "a login in the table connects to its own database with verify-full and runs a query, over TLS to the server too"
   else
-    fail "a login in the table could not run a query: $out"
+    fail "a login in the table could not run a query in its own database: $out"
   fi
 
   refused "a wrong password is refused" "authentication failed" \
@@ -279,18 +323,69 @@ for port in "$SESSION_PORT" "$TRANSACTION_PORT"; do
     "$port" bkn_ci_inactive "$INACTIVE_PW" "$PROJECT_DB" verify-full 'SELECT 1'
   refused "postgres is refused" "no such user|authentication failed" \
     "$port" postgres "$SUPER_PW" "$PROJECT_DB" verify-full 'SELECT 1'
-  refused "the administrator is refused" "no such user|authentication failed" \
+  refused "the administrator is refused" "no such database|no such user|authentication failed" \
     "$port" pooler_admin "$ADMIN_PW" postgres verify-full 'SELECT 1'
   refused "backenly_app is refused" "no such user|authentication failed" \
     "$port" backenly_app "$APP_PW" "$PROJECT_DB" verify-full 'SELECT 1'
   refused "backenly_pooler_auth is refused, even with its password" "rejected|no authentication method|not allowed" \
     "$port" backenly_pooler_auth "$AUTH_PW" "$PROJECT_DB" verify-full 'SELECT 1'
-  refused "the pgbouncer console database is refused, to a login that works" "rejected|not allowed|no authentication method|no such user" \
+
+  # A valid customer login, asking for a database that is not its own. An
+  # unlisted name fails as a wrong password would (PgBouncer's mock login).
+  for database in "$SHARED_DB" postgres template1; do
+    refused "a customer login asking for $database is refused" "authentication failed|no such database" \
+      "$port" bkn_ci_login "$LOGIN_PW" "$database" verify-full 'SELECT 1'
+  done
+  refused "a customer login asking for backenly_pooler is refused" "rejected|no such user|no authentication method" \
+    "$port" bkn_ci_login "$LOGIN_PW" backenly_pooler verify-full 'SELECT 1'
+  refused "a customer login asking for the pgbouncer console database is refused" "rejected|not allowed|no authentication method|no such user" \
     "$port" bkn_ci_login "$LOGIN_PW" pgbouncer verify-full 'SHOW POOLS'
   refused "the pgbouncer console database is refused to the lookup role" "rejected|not allowed|no authentication method" \
     "$port" backenly_pooler_auth "$AUTH_PW" pgbouncer verify-full 'SHOW POOLS'
-  refused "the backenly_pooler database is refused" "rejected|no authentication method|not allowed" \
-    "$port" bkn_ci_login "$LOGIN_PW" backenly_pooler verify-full 'SELECT 1'
+  refused "a customer login asking for another project's database is refused" "no such user|authentication failed|permission denied" \
+    "$port" bkn_ci_login "$LOGIN_PW" "$OTHER_DB" verify-full 'SELECT 1'
+  out="$(via "$port" bkn_ci_other "$OTHER_PW" "$OTHER_DB" verify-full 'SELECT current_database()')" || true
+  [ "$out" = "$OTHER_DB" ] && ok "that other project's own login reaches it" || fail "the other project's login could not reach its database: $out"
+done
+
+echo "the server's view"
+for database in "${OFF_LIMITS[@]}"; do
+  after="$(server_logins "$database")"
+  [ "$after" = "${BEFORE[$database]}" ] && ok "the pooler never signed in as the customer login to $database" ||
+    fail "the server logged $((after - BEFORE[$database])) login(s) as bkn_ci_login to $database through the pooler"
+done
+
+# ── A project database created while the pooler runs ───────────────────────
+echo "a new project database (list refreshed every ${REFRESH_SECONDS}s)"
+db pooler_admin "$ADMIN_PW" postgres -c "CREATE DATABASE $NEW_DB"
+db pooler_admin "$ADMIN_PW" "$NEW_DB" <<SQL
+REVOKE ALL ON DATABASE $NEW_DB FROM PUBLIC;
+GRANT CONNECT ON DATABASE $NEW_DB TO bkn_ci_new;
+SQL
+db backenly_app "$APP_PW" backenly_pooler -c \
+  "INSERT INTO backenly_pooler.logins (rolname, verifier, database) VALUES ('bkn_ci_new', '${V[6]}', '$NEW_DB')"
+
+# until_through PORT EXPECTED-PATTERN DESCRIPTION: poll the new login through the pooler.
+until_through() {
+  local port="$1" pattern="$2" description="$3" out=""
+  for _ in $(seq 1 $((REFRESH_SECONDS * 10 + 10))); do
+    out="$(via "$port" bkn_ci_new "$NEW_PW" "$NEW_DB" verify-full 'SELECT current_database()')" || true
+    if grep -qE "$pattern" <<< "$out"; then ok "$description"; return 0; fi
+    sleep 1
+  done
+  fail "$description: last answer $out"
+}
+for port in "$SESSION_PORT" "$TRANSACTION_PORT"; do
+  until_through "$port" "^$NEW_DB\$" "port $port serves the new project database"
+done
+db backenly_app "$APP_PW" backenly_pooler -c \
+  "UPDATE backenly_pooler.logins SET active = false, updated_at = now() WHERE rolname = 'bkn_ci_new'"
+# The lookup answers "no such user" at once; the expected answer is the one
+# for a database that is no longer on the list (the mock login fails as a
+# wrong password would), which shows the list itself changed.
+for port in "$SESSION_PORT" "$TRANSACTION_PORT"; do
+  until_through "$port" "authentication failed|no such database" \
+    "port $port drops the database from its list once its last login is turned off"
 done
 
 # ── Startup parameters ──────────────────────────────────────────────────────
@@ -367,11 +462,21 @@ echo "logs"
 for mode in session transaction; do
   logs="$(docker logs "pooler-$mode-$TAG" 2>&1)"
   grep -q "pooler: $mode pooling on port" <<< "$logs" && ok "$mode: the start line names the mode" || fail "$mode: no start line"
-  leaked=0
+  grep -q "pooler: serving 2 project database(s)" <<< "$logs" && ok "$mode: the start listed the two project databases" ||
+    fail "$mode: the project database list was not logged at start"
+  found=0
   for value in "$AUTH_PW" "$LOGIN_PW" "$(sed -n 2p "$WORK/pooler.key")" "$(sed -n 2p "$WORK/pooler.pem")"; do
-    if grep -qF -- "$value" <<< "$logs"; then leaked=1; fi
+    if grep -qF -- "$value" <<< "$logs"; then found=1; fi
   done
-  [ "$leaked" = 0 ] && ok "$mode: no secret in the logs" || fail "$mode: a secret value appears in the logs"
+  [ "$found" = 0 ] && ok "$mode: no secret in the logs" || fail "$mode: a secret value appears in the logs"
+done
+
+# ── Stopping ────────────────────────────────────────────────────────────────
+echo "stopping"
+for mode in session transaction; do
+  docker stop -t 30 "pooler-$mode-$TAG" >/dev/null
+  code="$(docker inspect -f '{{.State.ExitCode}}' "pooler-$mode-$TAG")"
+  [ "$code" != 137 ] && ok "$mode: docker stop ends it cleanly (exit $code)" || fail "$mode: it had to be killed"
 done
 
 echo

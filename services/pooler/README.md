@@ -18,8 +18,36 @@ PgBouncer itself terminates TLS.
 A client names the project's database (`p_<32 hex>`) and the project's login
 (`bkn_...`). The pooler checks the password with SCRAM-SHA-256 and signs in to
 the database server as that login, using the keys from the client's own proof.
-Logins that are not a project's (Backenly's own roles, the server
+Only project databases are served, and each login only for its own project's
+database. Logins that are not a project's (Backenly's own roles, the server
 administrator, PostgREST's roles) are never served.
+
+## Which databases are served
+
+PgBouncer's `pg_hba.conf` matches database names exactly (it has no pattern
+form), and its `auth_query` is given the user name only, so neither can limit
+a login to databases named `p_<32 hex>`. The pooler therefore has no `*`
+fallback entry at all. It lists project databases explicitly, in
+`/run/pooler/<mode>/databases.ini`, which `pgbouncer.ini` includes:
+
+- The list is `backenly_pooler.databases()`: every existing project database
+  with at least one active login. The entrypoint reads it before PgBouncer
+  starts (and does not start PgBouncer until it has), and again every
+  `POOLER_DATABASE_REFRESH_SECONDS`. When it changes, PgBouncer reloads: a new
+  project's database is served within that interval, and a database whose last
+  login was turned off is closed, its clients disconnected.
+- A login to any database not on the list (the region's shared database,
+  `postgres`, `template1`, or any other name) fails inside PgBouncer,
+  which runs no lookup and opens no server connection for it. It answers as it
+  would a wrong password, so which databases exist is not revealed.
+- Each listed database carries its own `auth_query`, with its name written in:
+  `backenly_pooler.lookup($1, 'p_...')` returns a verifier only for a login of
+  that database. A login asking for another project's database is refused by
+  the pooler before the server is asked; the server would refuse it too, since
+  `CONNECT` on a project database is granted to its own logins by name.
+
+If the list cannot be read later (the server restarting, say), the last list
+stays in force and the failure is logged on each attempt.
 
 ## How a login is checked
 
@@ -27,14 +55,17 @@ administrator, PostgREST's roles) are never served.
    (`lib/data-plane/scram.ts`), sets it on the server with
    `ALTER ROLE <login> PASSWORD '<verifier>'`, and writes the same string to
    `backenly_pooler.logins` in the `backenly_pooler` database on that server
-   (`tools/managed-db/regional/sql/pooler.sql`).
-2. A client connects over TLS. `pg_hba.conf` in the container turns away the
+   (`tools/managed-db/regional/sql/pooler.sql`), with the database it belongs
+   to.
+2. A client connects over TLS and names a database. A name not on the list
+   fails there (above). `pg_hba.conf` in the container turns away the
    `pgbouncer` console database, the `backenly_pooler` database, replication
-   connections and the lookup role before any password is asked for.
-3. PgBouncer runs its `auth_query` as `backenly_pooler_auth`, which may do
-   nothing on the server but call `backenly_pooler.lookup($1)`. That returns
-   the verifier only for an active login whose role can log in now, and no row
-   for anything else, so the login fails.
+   connections and the lookup role.
+3. PgBouncer runs that database's `auth_query` as `backenly_pooler_auth`,
+   which may do nothing on the server but call `backenly_pooler.lookup` and
+   `backenly_pooler.databases`. The lookup returns the verifier only for an
+   active login of that database whose role can log in now, and no row for
+   anything else, so the login fails.
 4. The client's proof is checked against that verifier, and PgBouncer opens
    the server connection with the keys the proof carried. This works because
    the server holds the identical verifier.
@@ -81,6 +112,7 @@ injected from AWS Secrets Manager by the task definition.
 | `POOLER_MAX_DB_CLIENT_CONNECTIONS` | 0 (no limit) | Client connections per database. When set, at least `POOLER_MAX_DB_CONNECTIONS` and at most `POOLER_MAX_CLIENT_CONN`. |
 | `POOLER_QUERY_TIMEOUT` | 900 | Seconds a query may run before the pooler cancels it; 0 turns it off. |
 | `POOLER_MAX_PREPARED_STATEMENTS` | 200 | Protocol-level prepared statements tracked per server connection in transaction mode; 0 turns the support off. |
+| `POOLER_DATABASE_REFRESH_SECONDS` | 10 | How often the list of project databases is read again (1 to 3600). A new project's database is served at most this long after its first login is written. |
 
 The image trusts the RDS root certificates of every Backenly Cloud region
 (`docker/certs`, the same pinned copies the web and runtime images use), so on
@@ -104,7 +136,6 @@ may run several tasks, so a database can receive up to
 | `idle_transaction_timeout` | 300 s | A client idle inside an open transaction this long is disconnected, so a forgotten `BEGIN` cannot hold a server connection. |
 | `client_login_timeout` | 10 s | A client that has not finished logging in by then is disconnected. |
 | `server_idle_timeout` | 60 s | Idle server connections are closed after a minute, so quiet projects hold none. |
-| `autodb_idle_timeout` | 300 s | A database's pool entry is freed five minutes after its last client. |
 | `max_prepared_statements` | `POOLER_MAX_PREPARED_STATEMENTS` | Lets clients use named prepared statements in transaction mode. |
 | `tcp_keepidle` / `tcp_keepintvl` / `tcp_keepcnt` | 240 / 30 / 4 | Keepalives inside the network load balancer's 350 s idle timeout, so a quiet session is not cut. |
 
@@ -113,11 +144,17 @@ socket; no admin or stats users, so the `pgbouncer` console database cannot be
 used; `ignore_startup_parameters = extra_float_digits` (below).
 
 `pooler-entrypoint check` prints the exact `pgbouncer.ini` and `pg_hba.conf`
-the current environment would run, and exits:
+the current environment would run, and exits; `pooler-entrypoint databases`
+prints the `[databases]` list it would write for the names on standard input:
 
 ```bash
 docker run --rm --env-file pooler.env backenly-pooler check
 ```
+
+The entrypoint stays the container's first process: it starts PgBouncer,
+keeps the database list current beside it, hands the stop signal to PgBouncer
+and exits with PgBouncer's status. The image needs `psql` for the list, and
+the lookup role reads it over the same TLS settings PgBouncer uses.
 
 ## Client compatibility
 
@@ -157,8 +194,9 @@ A self-hosted install runs the same image against its own PostgreSQL 16:
    `tools/managed-db/regional/sql/pooler.sql` in it. The header of that file
    lists the steps exactly.
 2. For each login customers should reach through the pooler, set its verifier
-   on the server and insert the same verifier into `backenly_pooler.logins`
-   (as `backenly_app`).
+   on the server, grant it `CONNECT` on its own database only, and insert the
+   same verifier and that database into `backenly_pooler.logins` (as
+   `backenly_app`). Databases must be named `p_<32 hex>`.
 3. Run one container per mode:
 
 ```bash

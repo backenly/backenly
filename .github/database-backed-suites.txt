@@ -801,10 +801,12 @@ tests/integration/regional-bootstrap.spec.ts
 # their real names): the verifier is stored byte for byte and the plain
 # password logs in through node-postgres and libpq; and
 # tools/managed-db/regional/sql/pooler.sql, run twice by psql as an
-# administrator that is not a superuser, leaves lookup() answering only for
-# active logins, backenly_pooler_auth able to do nothing else, backenly_app
-# able to write the logins and nothing more, and PUBLIC nothing. Needs
-# PostgreSQL 16 server binaries (PG_BINDIR); fails rather than skips in CI.
+# administrator that is not a superuser, leaves lookup() answering only for an
+# active login of the database asked about, databases() listing only existing
+# project databases with an active login (the only names the pooler serves),
+# backenly_pooler_auth able to do nothing else, backenly_app able to write the
+# logins and nothing more, and PUBLIC nothing. Needs PostgreSQL 16 server
+# binaries (PG_BINDIR); fails rather than skips in CI.
 tests/integration/pooler-auth.spec.ts
 
 # ── Credential rotation ─────────────────────────────────────────────────────

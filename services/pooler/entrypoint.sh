@@ -2,15 +2,31 @@
 #
 # THE CONNECTION POOLER'S ENTRYPOINT
 # ==================================
-# Renders PgBouncer's configuration from the environment, then runs PgBouncer
-# in the foreground as this container's only process. POOLER_MODE picks the
-# pooling mode, and with it the default port: session on 5432, transaction on
-# 6543. services/pooler/README.md describes every variable.
+# Renders PgBouncer's configuration from the environment and runs PgBouncer,
+# one process per container. POOLER_MODE picks the pooling mode, and with it
+# the default port: session on 5432, transaction on 6543.
+# services/pooler/README.md describes every variable.
 #
-#   pooler-entrypoint          check the settings, write the configuration
-#                              under /run/pooler/<mode>, run PgBouncer
-#   pooler-entrypoint check    check the settings, print the pgbouncer.ini and
-#                              pg_hba.conf that would run, keep no file
+#   pooler-entrypoint            check the settings, write the configuration
+#                                under /run/pooler/<mode>, run PgBouncer
+#   pooler-entrypoint check      check the settings, print the pgbouncer.ini
+#                                and pg_hba.conf that would run, keep no file
+#   pooler-entrypoint databases  check the settings, print the [databases]
+#                                list for the project database names on
+#                                standard input, keep no file
+#
+# ONLY PROJECT DATABASES ARE SERVED. There is no "*" entry: PgBouncer knows
+# exactly the databases named in /run/pooler/<mode>/databases.ini. A client
+# asking for any other name gets a login that fails, decided inside PgBouncer
+# (it runs no lookup and opens no server connection for it, and answers as it
+# would a wrong password, so which databases exist is not revealed). The list
+# is every existing p_<32 hex> database with an active login, read from
+# backenly_pooler.databases() before PgBouncer starts and again every
+# POOLER_DATABASE_REFRESH_SECONDS, and PgBouncer reloads it when it changes.
+# Each listed database's auth_query names that database, so a login is checked
+# only for its own project's database (tools/managed-db/regional/sql/pooler.sql).
+# PgBouncer's pg_hba.conf has no pattern form and its auth_query sees only the
+# user name, so an explicit list is the one way it can serve p_* names alone.
 #
 # A setting that is missing, empty, malformed or unknown stops the container
 # with exit status 2 and one line saying which, before anything is written.
@@ -26,6 +42,7 @@ readonly AUTH_USER=backenly_pooler_auth
 readonly AUTH_DB=backenly_pooler
 readonly IMAGE_SERVER_CA=/etc/ssl/rds/rds-ca-cloud-regions.pem
 readonly RUN_ROOT=/run/pooler
+readonly PROJECT_DATABASE='^p_[0-9a-f]{32}$'
 
 refuse() {
   printf 'pooler: refusing to start: %s\n' "$*" >&2
@@ -33,10 +50,10 @@ refuse() {
 }
 
 ACTION="${1:-run}"
-[ "$#" -le 1 ] || refuse "expected no argument, or check"
+[ "$#" -le 1 ] || refuse "expected no argument, check, or databases"
 case "$ACTION" in
-  run | check) ;;
-  *) refuse "expected no argument, or check" ;;
+  run | check | databases) ;;
+  *) refuse "expected no argument, check, or databases" ;;
 esac
 
 # ── Every POOLER_ variable is one this file reads ─────────────────────────────
@@ -45,7 +62,7 @@ readonly KNOWN=" POOLER_MODE POOLER_LISTEN_PORT POOLER_SERVER_HOST POOLER_SERVER
 POOLER_SERVER_TLS_MODE POOLER_SERVER_CA_PEM POOLER_TLS_CERT_PEM POOLER_TLS_KEY_PEM \
 POOLER_AUTH_PASSWORD POOLER_MAX_CLIENT_CONN POOLER_DEFAULT_POOL_SIZE \
 POOLER_MAX_DB_CONNECTIONS POOLER_MAX_DB_CLIENT_CONNECTIONS POOLER_QUERY_TIMEOUT \
-POOLER_MAX_PREPARED_STATEMENTS "
+POOLER_MAX_PREPARED_STATEMENTS POOLER_DATABASE_REFRESH_SECONDS "
 while IFS= read -r name; do
   case "$KNOWN" in
     *" $name "*) ;;
@@ -100,6 +117,7 @@ esac
 if [ "$POOLER_SERVER_TLS_MODE" = disable ] && [ -n "${POOLER_SERVER_CA_PEM+x}" ]; then
   refuse "POOLER_SERVER_CA_PEM is set, but POOLER_SERVER_TLS_MODE is disable"
 fi
+whole POOLER_DATABASE_REFRESH_SECONDS 10 1 3600
 
 # ── Limits ────────────────────────────────────────────────────────────────────
 whole POOLER_MAX_CLIENT_CONN 5000 1 100000
@@ -136,12 +154,12 @@ case "$password" in
 esac
 
 command -v openssl >/dev/null || refuse "openssl is not installed; it checks the certificate and key"
+if [ "$ACTION" = run ]; then
+  command -v psql >/dev/null || refuse "psql is not installed; it reads the project database list"
+fi
 
 CONF_DIR="$RUN_ROOT/$POOLER_MODE"
-if [ "$ACTION" = check ]; then
-  WORK="$(mktemp -d)"
-  trap 'rm -rf "$WORK"' EXIT
-else
+if [ "$ACTION" = run ]; then
   [ -d "$RUN_ROOT" ] && [ -w "$RUN_ROOT" ] ||
     refuse "$RUN_ROOT is not a writable directory (with a read-only root filesystem, mount a writable volume there)"
   rm -rf "$CONF_DIR"
@@ -150,6 +168,9 @@ else
   # Any temporary file bash makes stays here too, so a read-only root needs
   # no writable /tmp.
   export TMPDIR="$CONF_DIR"
+else
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "$WORK"' EXIT
 fi
 
 pem_to POOLER_TLS_CERT_PEM "$WORK/client-tls.crt"
@@ -180,6 +201,9 @@ if [ "$POOLER_SERVER_TLS_MODE" != disable ]; then
 fi
 
 printf '"%s" "%s"\n' "$AUTH_USER" "$password" >"$WORK/userlist.txt"
+# The same password for psql, which reads the project database list. In a
+# password file ":" separates fields, so it is escaped.
+printf '*:*:%s:%s:%s\n' "$AUTH_DB" "$AUTH_USER" "${password//:/\\:}" >"$WORK/pgpass"
 unset password
 
 # ── pgbouncer.ini ─────────────────────────────────────────────────────────────
@@ -189,11 +213,11 @@ render_ini() {
 ;; services/pooler/README.md explains every value.
 
 [databases]
-;; The lookup database is named so it never depends on the fallback below.
+;; The lookup database, so PgBouncer can run auth_query. Clients asking for it
+;; are turned away by pg_hba.conf. Project databases are listed in the file
+;; included at the end; there is deliberately no "*" entry, so a login to any
+;; other database name fails inside PgBouncer and never reaches the server.
 ${AUTH_DB} = host=${POOLER_SERVER_HOST} port=${POOLER_SERVER_PORT} dbname=${AUTH_DB}
-;; Every other database name a client asks for (a project's p_<32 hex>) is
-;; that database on the same server; the server decides who may connect to it.
-* = host=${POOLER_SERVER_HOST} port=${POOLER_SERVER_PORT}
 
 [pgbouncer]
 pool_mode = ${POOLER_MODE}
@@ -204,15 +228,16 @@ unix_socket_dir =
 
 ;; Logins: SCRAM-SHA-256 against the verifier backenly_pooler.lookup() returns
 ;; (tools/managed-db/regional/sql/pooler.sql), passed through to the server.
-;; pg_hba.conf turns away the lookup role, the lookup database, replication
-;; and the console database before a password is asked for. admin_users and
+;; Each project database's own auth_query names it; this one, for anything
+;; else, finds no login. pg_hba.conf turns away the lookup role, the lookup
+;; database, replication and the console database. admin_users and
 ;; stats_users are deliberately not set, so no login may use the console.
 auth_type = hba
 auth_hba_file = ${CONF_DIR}/pg_hba.conf
 auth_file = ${CONF_DIR}/userlist.txt
 auth_user = ${AUTH_USER}
 auth_dbname = ${AUTH_DB}
-auth_query = SELECT usename, passwd FROM backenly_pooler.lookup(\$1)
+auth_query = SELECT usename, passwd FROM backenly_pooler.lookup(\$1, NULL)
 
 ;; Clients: TLS 1.2 or 1.3 is required; a plaintext connection is closed.
 client_tls_sslmode = require
@@ -244,7 +269,6 @@ query_timeout = ${POOLER_QUERY_TIMEOUT}
 idle_transaction_timeout = 300
 client_login_timeout = 10
 server_idle_timeout = 60
-autodb_idle_timeout = 300
 
 ;; Startup parameters: PgBouncer refuses any it does not track. JDBC always
 ;; sends extra_float_digits, which PostgreSQL 12 and later no longer need.
@@ -262,6 +286,10 @@ tcp_keepcnt = 4
 log_connections = 1
 log_disconnections = 1
 log_pooler_errors = 1
+
+;; The project databases: last, because the file opens its own [databases]
+;; section.
+%include ${CONF_DIR}/databases.ini
 EOF
 }
 
@@ -279,16 +307,87 @@ hostssl  all              all             all  scram-sha-256
 EOF
 }
 
+# ── databases.ini ─────────────────────────────────────────────────────────────
+# render_databases: the [databases] list for the names on standard input, one
+# per line. Every name must be a project database's, or nothing is rendered.
+# The auth_query of each names its own database, so a login is checked only
+# for the database it belongs to.
+render_databases() {
+  local name
+  local -a names=()
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! [[ "$name" =~ $PROJECT_DATABASE ]]; then
+      printf 'pooler: "%s" is not a project database name; the list was not changed\n' "${name:0:80}" >&2
+      return 1
+    fi
+    names+=("$name")
+  done
+  printf ';; Rendered by services/pooler/entrypoint.sh from backenly_pooler.databases().\n'
+  printf '[databases]\n'
+  if ((${#names[@]} > 0)); then
+    while IFS= read -r name; do
+      printf "%s = host=%s port=%s dbname=%s auth_query='SELECT usename, passwd FROM backenly_pooler.lookup(\$1, ''%s'')'\n" \
+        "$name" "$POOLER_SERVER_HOST" "$POOLER_SERVER_PORT" "$name" "$name"
+    done < <(printf '%s\n' "${names[@]}" | sort -u)
+  fi
+}
+
 if [ "$ACTION" = check ]; then
   printf '# %s/pgbouncer.ini\n' "$CONF_DIR"
   render_ini
   printf '\n# %s/pg_hba.conf\n' "$CONF_DIR"
   render_hba
+  printf '\n# %s/databases.ini is read from backenly_pooler.databases() at start and every %s s\n' \
+    "$CONF_DIR" "$POOLER_DATABASE_REFRESH_SECONDS"
   exit 0
+fi
+if [ "$ACTION" = databases ]; then
+  render_databases
+  exit $?
 fi
 
 render_ini >"$CONF_DIR/pgbouncer.ini"
 render_hba >"$CONF_DIR/pg_hba.conf"
+
+# ── The project database list ─────────────────────────────────────────────────
+list_conninfo="host=$POOLER_SERVER_HOST port=$POOLER_SERVER_PORT dbname=$AUTH_DB user=$AUTH_USER"
+list_conninfo+=" connect_timeout=10 application_name=backenly-pooler-list sslmode=$POOLER_SERVER_TLS_MODE"
+if [ -n "$server_ca" ]; then list_conninfo+=" sslrootcert=$server_ca"; fi
+
+# refresh_databases: read the list and write databases.ini. Returns 0 when the
+# file changed, 2 when it did not, 1 when the list could not be read, in which
+# case the last list stays in place.
+refresh_databases() {
+  local names
+  if ! names="$(PGPASSFILE="$CONF_DIR/pgpass" psql -X -q -At -v ON_ERROR_STOP=1 -d "$list_conninfo" \
+    -c 'SELECT d FROM backenly_pooler.databases() AS d' 2>"$CONF_DIR/list.err")"; then
+    printf 'pooler: could not read the project database list: %s\n' "$(head -n 1 "$CONF_DIR/list.err")" >&2
+    return 1
+  fi
+  render_databases <<<"$names" >"$CONF_DIR/databases.ini.next" || return 1
+  if [ -f "$CONF_DIR/databases.ini" ] && cmp -s "$CONF_DIR/databases.ini.next" "$CONF_DIR/databases.ini"; then
+    rm -f "$CONF_DIR/databases.ini.next"
+    return 2
+  fi
+  mv -f "$CONF_DIR/databases.ini.next" "$CONF_DIR/databases.ini"
+  printf 'pooler: serving %s project database(s)\n' "$(grep -c '^p_' "$CONF_DIR/databases.ini" || true)"
+  return 0
+}
+
+# The first list must be read before PgBouncer starts: a pooler that cannot
+# read it (a wrong lookup password, an unreachable server) stops here, where
+# the deployment sees it, instead of refusing every login forever.
+for attempt in $(seq 1 30); do
+  rc=0
+  refresh_databases || rc=$?
+  [ "$rc" -eq 1 ] || break
+  if [ "$attempt" -eq 30 ]; then
+    printf 'pooler: cannot start: the project database list could not be read for a minute\n' >&2
+    exit 1
+  fi
+  sleep 2
+done
 
 # ── Open files ────────────────────────────────────────────────────────────────
 # Each client is a socket, and so is each server connection it is paired with.
@@ -300,10 +399,39 @@ if [ "$soft" != unlimited ] && ((soft < need)); then
   refuse "the open-file limit is $soft, and POOLER_MAX_CLIENT_CONN=$POOLER_MAX_CLIENT_CONN needs $need; raise the container's nofile ulimit"
 fi
 
-printf 'pooler: %s pooling on port %s for %s:%s (server TLS %s); max_client_conn=%s default_pool_size=%s max_db_connections=%s max_db_client_connections=%s query_timeout=%ss max_prepared_statements=%s\n' \
+printf 'pooler: %s pooling on port %s for %s:%s (server TLS %s); max_client_conn=%s default_pool_size=%s max_db_connections=%s max_db_client_connections=%s query_timeout=%ss max_prepared_statements=%s database_refresh=%ss\n' \
   "$POOLER_MODE" "$POOLER_LISTEN_PORT" "$POOLER_SERVER_HOST" "$POOLER_SERVER_PORT" "$POOLER_SERVER_TLS_MODE" \
   "$POOLER_MAX_CLIENT_CONN" "$POOLER_DEFAULT_POOL_SIZE" "$POOLER_MAX_DB_CONNECTIONS" \
-  "$POOLER_MAX_DB_CLIENT_CONNECTIONS" "$POOLER_QUERY_TIMEOUT" "$POOLER_MAX_PREPARED_STATEMENTS"
+  "$POOLER_MAX_DB_CLIENT_CONNECTIONS" "$POOLER_QUERY_TIMEOUT" "$POOLER_MAX_PREPARED_STATEMENTS" \
+  "$POOLER_DATABASE_REFRESH_SECONDS"
 
+# ── PgBouncer, and the list kept current ──────────────────────────────────────
 unset POOLER_TLS_CERT_PEM POOLER_TLS_KEY_PEM POOLER_SERVER_CA_PEM POOLER_AUTH_PASSWORD
-exec /usr/sbin/pgbouncer "$CONF_DIR/pgbouncer.ini"
+
+/usr/sbin/pgbouncer "$CONF_DIR/pgbouncer.ini" &
+pgbouncer_pid=$!
+
+(
+  while sleep "$POOLER_DATABASE_REFRESH_SECONDS"; do
+    rc=0
+    refresh_databases || rc=$?
+    # SIGHUP is PgBouncer's reload: new databases appear, and a database no
+    # longer listed (its last active login turned off) is closed.
+    if [ "$rc" -eq 0 ]; then kill -HUP "$pgbouncer_pid" 2>/dev/null || exit 0; fi
+  done
+) &
+refresher_pid=$!
+
+# This shell stays as the container's first process: it hands the stop signal
+# to PgBouncer (SIGINT, the image's STOPSIGNAL, is its safe shutdown) and exits
+# with PgBouncer's status.
+trap 'kill -INT "$pgbouncer_pid" 2>/dev/null || true' INT
+trap 'kill -TERM "$pgbouncer_pid" 2>/dev/null || true' TERM
+trap 'kill -QUIT "$pgbouncer_pid" 2>/dev/null || true' QUIT
+status=0
+while :; do
+  if wait "$pgbouncer_pid"; then status=0; else status=$?; fi
+  kill -0 "$pgbouncer_pid" 2>/dev/null || break
+done
+kill "$refresher_pid" 2>/dev/null || true
+exit "$status"

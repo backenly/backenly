@@ -16,18 +16,32 @@
 --                                 the database it belongs to, and whether the
 --                                 pooler serves it. backenly_app writes it, and
 --                                 sets updated_at = now() when it changes a row.
---   backenly_pooler.lookup(text)  what PgBouncer's auth_query calls, as
---                                 backenly_pooler_auth:
---                                   SELECT usename, passwd FROM backenly_pooler.lookup($1)
---                                 It returns the login and its verifier for an
---                                 active row whose role can log in now, and no
---                                 row for any other name. Roles that are not
---                                 customer logins (backenly_app, the
---                                 administrator, PostgREST's roles) can never
---                                 have a row, so the pooler never serves them.
---                                 The argument is text, not name: a name
---                                 argument would cut a longer login name to 63
---                                 bytes before comparing it.
+--   backenly_pooler.databases()   the project databases the pooler lists: every
+--                                 existing p_<32 hex> database with an active
+--                                 login. The pooler reads it at start and every
+--                                 few seconds after, and serves no other
+--                                 database name: a client asking for the
+--                                 region's shared database, postgres or
+--                                 template1 is refused inside the pooler,
+--                                 which never signs in to the server as that
+--                                 login for it (and this database is refused
+--                                 to every client).
+--   backenly_pooler.lookup(login, database)
+--                                 what each listed database's auth_query
+--                                 calls, as backenly_pooler_auth, with that
+--                                 database's own name written into the query:
+--                                   SELECT usename, passwd FROM backenly_pooler.lookup($1, 'p_...')
+--                                 It returns the login and its verifier only
+--                                 for an active row of THAT database whose role
+--                                 can log in now, so a login is not even
+--                                 checked for another project's database (the
+--                                 server refuses that too: CONNECT is granted
+--                                 by name). Roles that are not customer logins
+--                                 (backenly_app, the administrator,
+--                                 PostgREST's roles) can never have a row, so
+--                                 the pooler never serves them. Both arguments
+--                                 are text, not name: a name argument would cut
+--                                 a longer value to 63 bytes before comparing.
 --
 -- Turning a login off: active = false stops new logins through the pooler at
 -- once. A client already signed in keeps its keys, and in transaction mode
@@ -155,14 +169,14 @@ REVOKE ALL ON TABLE backenly_pooler.logins FROM PUBLIC;
 REVOKE ALL ON TABLE backenly_pooler.logins FROM backenly_app, backenly_pooler_auth;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE backenly_pooler.logins TO backenly_app;
 
--- ── The lookup ──────────────────────────────────────────────────────────────
+-- ── The lookup and the list ─────────────────────────────────────────────────
 -- SECURITY DEFINER so backenly_pooler_auth reads no table itself, and a fixed
 -- search_path (pg_catalog first; operators and functions are never looked up
 -- in pg_temp) with every table qualified, so nothing in a caller's session can
--- change what it reads. Joined to pg_roles so a login whose role is gone,
--- cannot log in, has expired (VALID UNTIL) or is a superuser is not served even
--- while its row says active.
-CREATE OR REPLACE FUNCTION backenly_pooler.lookup(text)
+-- change what they read. lookup is joined to pg_roles so a login whose role is
+-- gone, cannot log in, has expired (VALID UNTIL) or is a superuser is not
+-- served even while its row says active.
+CREATE OR REPLACE FUNCTION backenly_pooler.lookup(login text, database text)
 RETURNS TABLE (usename name, passwd text)
 LANGUAGE sql
 STABLE
@@ -173,15 +187,35 @@ AS $lookup$
     FROM backenly_pooler.logins AS l
     JOIN pg_catalog.pg_roles AS r ON r.rolname = l.rolname::name
    WHERE l.rolname = $1
+     AND l.database = $2
      AND l.active
      AND r.rolcanlogin
      AND NOT r.rolsuper
      AND (r.rolvaliduntil IS NULL OR r.rolvaliduntil > now())
 $lookup$;
 
-REVOKE ALL ON FUNCTION backenly_pooler.lookup(text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION backenly_pooler.lookup(text) FROM backenly_app, backenly_pooler_auth;
-GRANT EXECUTE ON FUNCTION backenly_pooler.lookup(text) TO backenly_pooler_auth;
+-- Only databases that exist, so the pooler never lists a name the server
+-- would answer "does not exist" for after a login.
+CREATE OR REPLACE FUNCTION backenly_pooler.databases()
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $databases$
+  SELECT DISTINCT l.database
+    FROM backenly_pooler.logins AS l
+    JOIN pg_catalog.pg_database AS d ON d.datname = l.database::name
+   WHERE l.active
+   ORDER BY 1
+$databases$;
+
+REVOKE ALL ON FUNCTION backenly_pooler.lookup(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION backenly_pooler.lookup(text, text) FROM backenly_app, backenly_pooler_auth;
+GRANT EXECUTE ON FUNCTION backenly_pooler.lookup(text, text) TO backenly_pooler_auth;
+REVOKE ALL ON FUNCTION backenly_pooler.databases() FROM PUBLIC;
+REVOKE ALL ON FUNCTION backenly_pooler.databases() FROM backenly_app, backenly_pooler_auth;
+GRANT EXECUTE ON FUNCTION backenly_pooler.databases() TO backenly_pooler_auth;
 
 -- ── What this file declares, checked ───────────────────────────────────────
 DO $$
@@ -190,21 +224,23 @@ DECLARE
   problems text[] := '{}';
   c record;
 BEGIN
-  -- One lookup, so auth_query's lookup($1) can never be ambiguous.
-  IF (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'backenly_pooler' AND p.proname = 'lookup') <> 1 THEN
-    problems := problems || 'backenly_pooler.lookup has more than one signature'::text;
+  -- Exactly these functions, so a call can never resolve to another signature.
+  IF (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'backenly_pooler') IS DISTINCT FROM
+     ARRAY['backenly_pooler.databases()', 'backenly_pooler.lookup(text,text)'] THEN
+    problems := problems || 'backenly_pooler holds functions other than databases() and lookup(text, text)'::text;
   END IF;
-  fn := 'backenly_pooler.lookup(text)'::regprocedure;
-  IF NOT (SELECT prosecdef FROM pg_proc WHERE oid = fn) THEN
-    problems := problems || 'lookup is not SECURITY DEFINER'::text;
-  END IF;
-  IF (SELECT proconfig FROM pg_proc WHERE oid = fn) IS DISTINCT FROM ARRAY['search_path=pg_catalog, pg_temp'] THEN
-    problems := problems || 'lookup does not fix its search_path'::text;
-  END IF;
-  IF (SELECT proowner FROM pg_proc WHERE oid = fn) <> (SELECT relowner FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass) THEN
-    problems := problems || 'lookup and logins have different owners, so lookup may not read logins'::text;
-  END IF;
+  FOREACH fn IN ARRAY ARRAY['backenly_pooler.lookup(text,text)'::regprocedure, 'backenly_pooler.databases()'::regprocedure]::oid[] LOOP
+    IF NOT (SELECT prosecdef FROM pg_proc WHERE oid = fn) THEN
+      problems := problems || format('%s is not SECURITY DEFINER', fn::regprocedure);
+    END IF;
+    IF (SELECT proconfig FROM pg_proc WHERE oid = fn) IS DISTINCT FROM ARRAY['search_path=pg_catalog, pg_temp'] THEN
+      problems := problems || format('%s does not fix its search_path', fn::regprocedure);
+    END IF;
+    IF (SELECT proowner FROM pg_proc WHERE oid = fn) <> (SELECT relowner FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass) THEN
+      problems := problems || format('%s and logins have different owners, so it may not read logins', fn::regprocedure);
+    END IF;
+  END LOOP;
 
   IF (SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END,
                         ', ' ORDER BY attnum)
@@ -229,13 +265,15 @@ BEGIN
       ('public',               'CREATE on schema public',                  has_schema_privilege('public', 'public', 'CREATE'), false),
       ('public',               'USAGE on schema backenly_pooler',          has_schema_privilege('public', 'backenly_pooler', 'USAGE'), false),
       ('public',               'any privilege on logins',                  has_table_privilege('public', 'backenly_pooler.logins', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), false),
-      ('public',               'EXECUTE on lookup',                        has_function_privilege('public', 'backenly_pooler.lookup(text)', 'EXECUTE'), false),
+      ('public',               'EXECUTE on lookup',                        has_function_privilege('public', 'backenly_pooler.lookup(text, text)', 'EXECUTE'), false),
+      ('public',               'EXECUTE on databases',                     has_function_privilege('public', 'backenly_pooler.databases()', 'EXECUTE'), false),
       ('backenly_pooler_auth', 'CONNECT on the database',                  has_database_privilege('backenly_pooler_auth', 'backenly_pooler', 'CONNECT'), true),
       ('backenly_pooler_auth', 'TEMPORARY or CREATE on the database',      has_database_privilege('backenly_pooler_auth', 'backenly_pooler', 'TEMPORARY, CREATE'), false),
       ('backenly_pooler_auth', 'USAGE on schema backenly_pooler',          has_schema_privilege('backenly_pooler_auth', 'backenly_pooler', 'USAGE'), true),
       ('backenly_pooler_auth', 'CREATE on any schema here',                has_schema_privilege('backenly_pooler_auth', 'backenly_pooler', 'CREATE') OR has_schema_privilege('backenly_pooler_auth', 'public', 'CREATE'), false),
       ('backenly_pooler_auth', 'any privilege on logins',                  has_table_privilege('backenly_pooler_auth', 'backenly_pooler.logins', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), false),
-      ('backenly_pooler_auth', 'EXECUTE on lookup',                        has_function_privilege('backenly_pooler_auth', 'backenly_pooler.lookup(text)', 'EXECUTE'), true),
+      ('backenly_pooler_auth', 'EXECUTE on lookup',                        has_function_privilege('backenly_pooler_auth', 'backenly_pooler.lookup(text, text)', 'EXECUTE'), true),
+      ('backenly_pooler_auth', 'EXECUTE on databases',                     has_function_privilege('backenly_pooler_auth', 'backenly_pooler.databases()', 'EXECUTE'), true),
       ('backenly_app',         'CONNECT on the database',                  has_database_privilege('backenly_app', 'backenly_pooler', 'CONNECT'), true),
       ('backenly_app',         'TEMPORARY or CREATE on the database',      has_database_privilege('backenly_app', 'backenly_pooler', 'TEMPORARY, CREATE'), false),
       ('backenly_app',         'USAGE on schema backenly_pooler',          has_schema_privilege('backenly_app', 'backenly_pooler', 'USAGE'), true),
@@ -245,7 +283,8 @@ BEGIN
       ('backenly_app',         'UPDATE on logins',                         has_table_privilege('backenly_app', 'backenly_pooler.logins', 'UPDATE'), true),
       ('backenly_app',         'DELETE on logins',                         has_table_privilege('backenly_app', 'backenly_pooler.logins', 'DELETE'), true),
       ('backenly_app',         'TRUNCATE, REFERENCES or TRIGGER on logins', has_table_privilege('backenly_app', 'backenly_pooler.logins', 'TRUNCATE, REFERENCES, TRIGGER'), false),
-      ('backenly_app',         'EXECUTE on lookup',                        has_function_privilege('backenly_app', 'backenly_pooler.lookup(text)', 'EXECUTE'), false)
+      ('backenly_app',         'EXECUTE on lookup',                        has_function_privilege('backenly_app', 'backenly_pooler.lookup(text, text)', 'EXECUTE'), false),
+      ('backenly_app',         'EXECUTE on databases',                     has_function_privilege('backenly_app', 'backenly_pooler.databases()', 'EXECUTE'), false)
     ) AS v(who, what, actual, expected)
   LOOP
     IF c.actual IS DISTINCT FROM c.expected THEN
@@ -256,7 +295,7 @@ BEGIN
   IF cardinality(problems) > 0 THEN
     RAISE EXCEPTION 'pooler.sql did not reach its declared state: %', array_to_string(problems, '; ');
   END IF;
-  RAISE NOTICE 'backenly_pooler: logins table, lookup and privileges as declared';
+  RAISE NOTICE 'backenly_pooler: logins table, lookup, databases and privileges as declared';
 END $$;
 
 COMMIT;

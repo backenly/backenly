@@ -11,9 +11,11 @@
  *     node-postgres and through libpq (psql); a wrong password is refused;
  *   - tools/managed-db/regional/sql/pooler.sql, run by psql as an
  *     administrator that is NOT a superuser (like the RDS master), twice:
- *     lookup() answers only for active logins whose role can log in,
- *     backenly_pooler_auth can do nothing but call it, backenly_app can write
- *     the logins and nothing more, and PUBLIC can do nothing at all.
+ *     lookup(login, database) answers only for an active login of that very
+ *     database whose role can log in, databases() lists only existing project
+ *     databases with an active login (the only names the pooler serves),
+ *     backenly_pooler_auth can do nothing but call the two, backenly_app can
+ *     write the logins and nothing more, and PUBLIC can do nothing at all.
  *
  * A throwaway cluster of its own (initdb), because roles are cluster-wide and
  * this creates backenly_app and backenly_pooler_auth by their real names; in
@@ -55,6 +57,9 @@ const POOLER_SQL = path.join(ROOT, 'tools/managed-db/regional/sql/pooler.sql')
 const ADMIN = 'pooler_admin'
 const POOLER_DB = 'backenly_pooler'
 const PROJECT_DB = `p_${randomBytes(16).toString('hex')}`
+// Another project's database, and a project name with no database behind it.
+const OTHER_DB = `p_${randomBytes(16).toString('hex')}`
+const MISSING_DB = `p_${randomBytes(16).toString('hex')}`
 
 const pw = () => randomBytes(24).toString('hex')
 const SUPER_PW = pw()
@@ -143,10 +148,10 @@ async function declared(): Promise<unknown> {
 }
 
 /** A customer login on the server, with a verifier from scram.ts. */
-async function createLogin(name: string, password: string, extra = ''): Promise<string> {
+async function createLogin(name: string, password: string, extra = '', database = PROJECT_DB): Promise<string> {
   const verifier = scramSha256Verifier(password)
   await rows(adminUrl(), `CREATE ROLE ${name} LOGIN ${extra} PASSWORD '${verifier}'`)
-  await rows(adminUrl(), `GRANT CONNECT ON DATABASE ${PROJECT_DB} TO ${name}`)
+  await rows(adminUrl(), `GRANT CONNECT ON DATABASE ${database} TO ${name}`)
   return verifier
 }
 
@@ -180,8 +185,10 @@ beforeAll(async () => {
   await rows(adminUrl(), `CREATE ROLE backenly_app LOGIN PASSWORD '${scramSha256Verifier(APP_PW)}'`)
   await rows(adminUrl(), `CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT PASSWORD '${scramSha256Verifier(AUTH_PW)}'`)
   await rows(adminUrl(), `CREATE DATABASE ${POOLER_DB}`)
-  await rows(adminUrl(), `CREATE DATABASE ${PROJECT_DB}`)
-  await rows(adminUrl(PROJECT_DB), `REVOKE ALL ON DATABASE ${PROJECT_DB} FROM PUBLIC`)
+  for (const db of [PROJECT_DB, OTHER_DB]) {
+    await rows(adminUrl(), `CREATE DATABASE ${db}`)
+    await rows(adminUrl(db), `REVOKE ALL ON DATABASE ${db} FROM PUBLIC`)
+  }
 })
 
 afterAll(() => {
@@ -258,7 +265,7 @@ suite('pooler.sql', () => {
 
   it('runs as an administrator that is not a superuser, and again without changing anything', async () => {
     const first = runPoolerSql(adminUrl(POOLER_DB))
-    expect(first.output).toContain('backenly_pooler: logins table, lookup and privileges as declared')
+    expect(first.output).toContain('backenly_pooler: logins table, lookup, databases and privileges as declared')
     expect(first.status).toBe(0)
     const before = await declared()
 
@@ -266,16 +273,26 @@ suite('pooler.sql', () => {
     expect(again.status).toBe(0)
     expect(await declared()).toEqual(before)
 
-    const [owner] = await rows<{ owner: string }>(
+    const owners = await rows<{ fn: string; owner: string }>(
       superUrl(POOLER_DB),
-      `SELECT pg_get_userbyid(proowner) AS owner FROM pg_proc WHERE oid = 'backenly_pooler.lookup(text)'::regprocedure`,
+      `SELECT p.oid::regprocedure::text AS fn, pg_get_userbyid(p.proowner) AS owner
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'backenly_pooler' ORDER BY 1`,
     )
-    expect(owner.owner).toBe(ADMIN)
+    expect(owners).toEqual([
+      { fn: 'backenly_pooler.databases()', owner: ADMIN },
+      { fn: 'backenly_pooler.lookup(text,text)', owner: ADMIN },
+    ])
   })
 
-  describe('the lookup PgBouncer runs as backenly_pooler_auth', () => {
-    const lookup = (name: string) =>
-      rows<{ usename: string; passwd: string }>(authUrl(), 'SELECT usename, passwd FROM backenly_pooler.lookup($1)', [name])
+  describe('the lookup and the list PgBouncer reads as backenly_pooler_auth', () => {
+    const lookup = (name: string, database: string | null = PROJECT_DB) =>
+      rows<{ usename: string; passwd: string }>(authUrl(), 'SELECT usename, passwd FROM backenly_pooler.lookup($1, $2)', [
+        name,
+        database,
+      ])
+    const listed = async () =>
+      (await rows<{ d: string }>(authUrl(), 'SELECT d FROM backenly_pooler.databases() AS d ORDER BY 1')).map((r) => r.d)
 
     it('answers with the verifier of an active login whose role can log in, and nothing else', async () => {
       const active = login('active')
@@ -303,6 +320,13 @@ suite('pooler.sql', () => {
       expect(await lookup(active)).toEqual([{ usename: active, passwd: verifiers[active] }])
       for (const name of [inactive, nologin, expired, missing]) expect([name, await lookup(name)]).toEqual([name, []])
 
+      // Only for its own database: not another project's, not any other
+      // database, and not for no database (the pooler's query for every name
+      // that is not a listed project database).
+      for (const database of [OTHER_DB, MISSING_DB, 'postgres', 'template1', POOLER_DB, '', null]) {
+        expect([database, await lookup(active, database)]).toEqual([database, []])
+      }
+
       // Roles that are not customer logins have no row, whatever they are.
       for (const name of ['backenly_app', 'backenly_pooler_auth', 'postgres', ADMIN, '']) {
         expect([name, await lookup(name)]).toEqual([name, []])
@@ -310,12 +334,39 @@ suite('pooler.sql', () => {
 
       // Compared as text: a longer name is not cut to 63 bytes to match.
       expect(await lookup(`${active}${'x'.repeat(64)}`)).toEqual([])
+      expect(await lookup(active, `${PROJECT_DB}${'x'.repeat(64)}`)).toEqual([])
 
       // Turned off, it stops answering at once; on again, it answers.
       await rows(appUrl(), `UPDATE backenly_pooler.logins SET active = false, updated_at = now() WHERE rolname = $1`, [active])
       expect(await lookup(active)).toEqual([])
       await rows(appUrl(), `UPDATE backenly_pooler.logins SET active = true, updated_at = now() WHERE rolname = $1`, [active])
       expect(await lookup(active)).toHaveLength(1)
+    })
+
+    it('lists exactly the existing project databases that have an active login', async () => {
+      // PROJECT_DB has active logins from the case above.
+      expect(await listed()).toEqual([PROJECT_DB])
+
+      // A login for a database that does not exist puts nothing on the list.
+      const nowhere = login('nowhere')
+      await rows(appUrl(), `INSERT INTO backenly_pooler.logins (rolname, verifier, database) VALUES ($1, $2, $3)`, [
+        nowhere,
+        scramSha256Verifier(pw()),
+        MISSING_DB,
+      ])
+      expect(await listed()).toEqual([PROJECT_DB])
+
+      // Another project's database is listed while it has an active login, and
+      // leaves the list when its last one is turned off.
+      const other = login('other')
+      await rows(appUrl(), `INSERT INTO backenly_pooler.logins (rolname, verifier, database) VALUES ($1, $2, $3)`, [
+        other,
+        await createLogin(other, pw(), '', OTHER_DB),
+        OTHER_DB,
+      ])
+      expect(await listed()).toEqual([PROJECT_DB, OTHER_DB].sort())
+      await rows(appUrl(), `UPDATE backenly_pooler.logins SET active = false, updated_at = now() WHERE rolname = $1`, [other])
+      expect(await listed()).toEqual([PROJECT_DB])
     })
 
     it('is all backenly_pooler_auth can do', async () => {
@@ -348,7 +399,8 @@ suite('pooler.sql', () => {
 
       for (const sql of [
         'TRUNCATE backenly_pooler.logins',
-        `SELECT * FROM backenly_pooler.lookup('x')`,
+        `SELECT * FROM backenly_pooler.lookup('x', 'y')`,
+        'SELECT * FROM backenly_pooler.databases()',
         'CREATE TABLE backenly_pooler.t (id int)',
         'CREATE TABLE public.t (id int)',
         'CREATE TEMP TABLE t (id int)',
@@ -398,8 +450,16 @@ suite('pooler.sql', () => {
               has_schema_privilege('public', 'public', 'USAGE, CREATE') AS public_schema,
               has_schema_privilege('public', 'backenly_pooler', 'USAGE, CREATE') AS pooler_schema,
               has_table_privilege('public', 'backenly_pooler.logins', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AS logins,
-              has_function_privilege('public', 'backenly_pooler.lookup(text)', 'EXECUTE') AS lookup`,
+              has_function_privilege('public', 'backenly_pooler.lookup(text, text)', 'EXECUTE') AS lookup,
+              has_function_privilege('public', 'backenly_pooler.databases()', 'EXECUTE') AS databases`,
     )
-    expect(publicHas).toEqual({ database: false, public_schema: false, pooler_schema: false, logins: false, lookup: false })
+    expect(publicHas).toEqual({
+      database: false,
+      public_schema: false,
+      pooler_schema: false,
+      logins: false,
+      lookup: false,
+      databases: false,
+    })
   })
 })

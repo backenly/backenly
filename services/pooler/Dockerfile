@@ -24,8 +24,10 @@ FROM debian:bookworm-20261104-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f
 # tools/managed-db/regional/Dockerfile.bootstrap). The key is accepted only if
 # its fingerprint matches, apt verifies the package against the signed index,
 # and the exact build is asserted below. 1.26.1 is the first release with every
-# SCRAM fix this pooler's pass-through logins rely on.
+# SCRAM fix this pooler's pass-through logins rely on. psql 16 reads the list of
+# project databases the pooler serves (services/pooler/entrypoint.sh).
 ARG PGBOUNCER_VERSION=1.26.1-1.pgdg12+1
+ARG PG_CLIENT_MAJOR=16
 ARG PGDG_KEY_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 
 RUN apt-get update \
@@ -36,7 +38,7 @@ RUN apt-get update \
  && . /etc/os-release \
  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends "pgbouncer=${PGBOUNCER_VERSION}" openssl \
+ && apt-get install -y --no-install-recommends "pgbouncer=${PGBOUNCER_VERSION}" "postgresql-client-${PG_CLIENT_MAJOR}" openssl \
  && apt-get purge -y curl gnupg \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
@@ -45,6 +47,7 @@ RUN apt-get update \
  && rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem
 RUN dpkg-query -W -f '${Version}' pgbouncer | grep -qxF "${PGBOUNCER_VERSION}" \
  && pgbouncer --version | head -n 1 | grep -qiE '^pgbouncer 1\.26\.1( |$)' \
+ && psql --version | grep -qE "^psql \(PostgreSQL\) ${PG_CLIENT_MAJOR}\." \
  && test -z "$(ls -A /etc/ssl/private)"
 
 # The database server's roots: the RDS roots of every Backenly Cloud region,

@@ -45,6 +45,9 @@ describe('the pooler Dockerfile', () => {
     expect(docker).toContain('https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main')
     expect(docker).toMatch(/^ARG PGDG_KEY_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8$/m)
     expect(docker).toContain(`dpkg-query -W -f '\${Version}' pgbouncer | grep -qxF "\${PGBOUNCER_VERSION}"`)
+    // psql reads the list of project databases the pooler serves.
+    expect(docker).toMatch(/^ARG PG_CLIENT_MAJOR=16$/m)
+    expect(docker).toContain('"postgresql-client-${PG_CLIENT_MAJOR}"')
   })
 
   it('runs as uid 10001, exposes the two ports, and stops with PgBouncer’s safe shutdown', () => {
@@ -87,10 +90,11 @@ describe('the pooler Dockerfile', () => {
 // ── The entrypoint ────────────────────────────────────────────────────────────
 
 /** bash and openssl are on every CI runner, and in Git for Windows. */
-function sh(script: string, args: string[], env: Record<string, string> = {}, cwd = ROOT) {
+function sh(script: string, args: string[], env: Record<string, string> = {}, cwd = ROOT, input = '') {
   const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('POOLER_')))
   const result = spawnSync('bash', ['-c', script, 'bash', ...args], {
     cwd,
+    input,
     encoding: 'utf8',
     env: { ...base, ...env } as NodeJS.ProcessEnv,
     timeout: 60_000,
@@ -168,7 +172,7 @@ describe('the pooler entrypoint renders', () => {
       auth_file: '/run/pooler/session/userlist.txt',
       auth_user: 'backenly_pooler_auth',
       auth_dbname: 'backenly_pooler',
-      auth_query: 'SELECT usename, passwd FROM backenly_pooler.lookup($1)',
+      auth_query: 'SELECT usename, passwd FROM backenly_pooler.lookup($1, NULL)',
       client_tls_sslmode: 'require',
       client_tls_cert_file: '/run/pooler/session/client-tls.crt',
       client_tls_key_file: '/run/pooler/session/client-tls.key',
@@ -188,7 +192,6 @@ describe('the pooler entrypoint renders', () => {
       idle_transaction_timeout: '300',
       client_login_timeout: '10',
       server_idle_timeout: '60',
-      autodb_idle_timeout: '300',
       ignore_startup_parameters: 'extra_float_digits',
       tcp_keepalive: '1',
       tcp_keepidle: '240',
@@ -197,7 +200,11 @@ describe('the pooler entrypoint renders', () => {
     }
     for (const [key, value] of Object.entries(expected)) expect([key, setting(ini, key)]).toEqual([key, value])
     expect(ini).toContain('\nbackenly_pooler = host=db.example.internal port=5432 dbname=backenly_pooler\n')
-    expect(ini).toContain('\n* = host=db.example.internal port=5432\n')
+    // Only the listed project databases: no fallback entry for other names.
+    expect(ini).not.toMatch(/^\*\s*=/m)
+    const config = ini.slice(0, ini.indexOf('# /run/pooler/session/pg_hba.conf')).trimEnd().split('\n')
+    expect(config[config.length - 1]).toBe('%include /run/pooler/session/databases.ini')
+    expect(ini).not.toMatch(/autodb_idle_timeout/)
     // No console users of any kind.
     expect(ini).not.toMatch(/^(admin_users|stats_users)\s*=/m)
     expect(ini).not.toMatch(/^track_extra_parameters\s*=/m)
@@ -243,7 +250,8 @@ describe('the pooler entrypoint renders', () => {
     expect(setting(ini, 'max_db_client_connections')).toBe('400')
     expect(setting(ini, 'query_timeout')).toBe('0')
     expect(setting(ini, 'max_prepared_statements')).toBe('0')
-    expect(ini).toContain('\n* = host=db.example.internal port=6432\n')
+    expect(ini).toContain('\nbackenly_pooler = host=db.example.internal port=6432 dbname=backenly_pooler\n')
+    expect(ini).toContain('\n%include /run/pooler/transaction/databases.ini\n')
   })
 
   it('the image’s roots when no CA is given, and no server TLS when it is disabled', () => {
@@ -281,6 +289,55 @@ describe('the pooler entrypoint renders', () => {
   })
 })
 
+describe('the pooler entrypoint lists', () => {
+  const hex = (c: string) => c.repeat(32)
+  const databases = (input: string, env = valid()) =>
+    sh('exec bash "$1" databases', [path.join(ROOT, ENTRYPOINT)], env, ROOT, input)
+  const entries = (out: string) => out.split('\n').filter((l) => l && !l.startsWith(';;'))
+
+  it('each project database once, sorted, with an auth_query that names it', () => {
+    const result = databases(`p_${hex('b')}\np_${hex('a')}\n\np_${hex('b')}\n`, valid({ POOLER_SERVER_PORT: '6432' }))
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+    expect(entries(result.stdout)).toEqual([
+      '[databases]',
+      ...['a', 'b'].map(
+        (c) =>
+          `p_${hex(c)} = host=db.example.internal port=6432 dbname=p_${hex(c)} ` +
+          `auth_query='SELECT usename, passwd FROM backenly_pooler.lookup($1, ''p_${hex(c)}'')'`,
+      ),
+    ])
+  })
+
+  it('an empty section when no project has an active login', () => {
+    const result = databases('')
+    expect(result.status).toBe(0)
+    expect(entries(result.stdout)).toEqual(['[databases]'])
+  })
+
+  it.each([
+    ['the shared database', 'backenly_regional'],
+    ['postgres', 'postgres'],
+    ['template1', 'template1'],
+    ['the lookup database', 'backenly_pooler'],
+    ['a name in uppercase hex', `p_${'A'.repeat(32)}`],
+    ['a name one digit short', `p_${'a'.repeat(31)}`],
+    ['a name carrying another setting', `p_${'a'.repeat(32)} host=elsewhere`],
+  ])('nothing at all when the input holds %s', (_name, bad) => {
+    const result = databases(`p_${hex('a')}\n${bad}\n`)
+    expect(result.status).not.toBe(0)
+    expect(result.stdout).not.toContain('[databases]')
+    expect(result.stderr).toMatch(/is not a project database name; the list was not changed/)
+  })
+
+  it('and check says where the list comes from', () => {
+    const result = check(valid({ POOLER_DATABASE_REFRESH_SECONDS: '7' }))
+    expect(result.stdout).toContain(
+      '# /run/pooler/session/databases.ini is read from backenly_pooler.databases() at start and every 7 s',
+    )
+  })
+})
+
 describe('the pooler entrypoint refuses to start', () => {
   const cases: Array<[string, Record<string, string | undefined>, RegExp]> = [
     ['without a mode', { POOLER_MODE: undefined }, /POOLER_MODE is not set/],
@@ -299,6 +356,7 @@ describe('the pooler entrypoint refuses to start', () => {
     ['with an unknown server TLS mode', { POOLER_SERVER_TLS_MODE: 'require' }, /verify-full, verify-ca or disable/],
     ['with a CA and server TLS off', { POOLER_SERVER_TLS_MODE: 'disable' }, /POOLER_SERVER_CA_PEM is set, but POOLER_SERVER_TLS_MODE is disable/],
     ['with an unknown POOLER_ setting', { POOLER_MAX_CLIENT_CONNS: '100' }, /POOLER_MAX_CLIENT_CONNS is not a setting the pooler reads/],
+    ['with no refresh interval', { POOLER_DATABASE_REFRESH_SECONDS: '0' }, /POOLER_DATABASE_REFRESH_SECONDS must be from 1 to 3600/],
     ['without a certificate', { POOLER_TLS_CERT_PEM: undefined }, /POOLER_TLS_CERT_PEM is not set/],
     ['without a key', { POOLER_TLS_KEY_PEM: undefined }, /POOLER_TLS_KEY_PEM is not set/],
     ['without the lookup password', { POOLER_AUTH_PASSWORD: undefined }, /POOLER_AUTH_PASSWORD is not set/],
@@ -332,6 +390,6 @@ describe('the pooler entrypoint refuses to start', () => {
   it('with an argument it does not know', () => {
     const result = sh('exec bash "$1" render', [path.join(ROOT, ENTRYPOINT)], valid())
     expect(result.status).toBe(2)
-    expect(result.stderr).toMatch(/expected no argument, or check/)
+    expect(result.stderr).toMatch(/expected no argument, check, or databases/)
   })
 })
