@@ -27,6 +27,13 @@ BEGIN
     RAISE EXCEPTION 'refusing: % holds platform tables (public.projects or public._prisma_migrations). This procedure initialises a regional data-plane database only, never the home one.',
       current_database();
   END IF;
+  -- The region's own database, never a project's or the template they are
+  -- cloned from: those are reached from it (BOOTSTRAP_MODE=template and
+  -- project-dbs), and the steps for the region's database would make them shared.
+  IF current_database() = 'backenly_project_template' OR current_database() ~ '^p_[0-9a-f]{32}$' THEN
+    RAISE EXCEPTION 'refusing: % is a project database or their template. Name the region''s own database in DATABASE_URL; BOOTSTRAP_MODE=template and project-dbs reach the others from it',
+      current_database();
+  END IF;
   -- The rehearsal setting relaxes the extension refusals for a stock server.
   -- RDS is never one: a real regional database gets the full set or fails.
   IF current_setting('backenly.allow_missing_extensions')::boolean
