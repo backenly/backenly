@@ -23,8 +23,9 @@
  *   keys          API keys
  *   integrations  integration keys and which integrations are active
  *   frontends     the allowed origins (connected frontends): the CORS allowlist
- *   addresses     the addresses a project's direct Postgres logins may connect
- *                 from: its part of the region's network allowlist
+ *   addresses     the addresses a project's direct Postgres logins could
+ *                 connect from, a retired feature kept so its History entries
+ *                 can still be restored (./addresses.ts)
  *
  * ── What never comes back ───────────────────────────────────────────────────
  *

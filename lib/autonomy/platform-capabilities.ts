@@ -49,7 +49,25 @@
  */
 
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
-import { regionPool } from '@/lib/data-plane/regional'
+import { databasePool, regionPool } from '@/lib/data-plane/regional'
+
+/**
+ * The database a capability is asked of: a region's own (a region id alone),
+ * or a project's own database in it. Extensions are per database, so a project
+ * with a database of its own is answered for that database, which the
+ * template every such database is cloned from equips, and cached apart from its
+ * region's.
+ */
+export type CapabilityTarget = CloudRegionId | { region: CloudRegionId; database: string | null }
+
+function targetOf(target: CapabilityTarget): { region: CloudRegionId; database: string | null } {
+  return typeof target === 'string' ? { region: target, database: null } : target
+}
+
+/** The database holding a project's data, as hasCapability asks it: the region alone for a shared project. */
+export function capabilityTargetOf(placement: { region: CloudRegionId; tenancy: string; database: string | null }): CapabilityTarget {
+  return placement.tenancy === 'dedicated' && placement.database ? { region: placement.region, database: placement.database } : placement.region
+}
 
 export type PlatformCapability = 'pg_stat_statements' | 'pgstattuple' | 'statement_text'
 
@@ -119,11 +137,15 @@ const cache = new Map<string, CacheEntry>()
  */
 export async function hasCapability(
   cap: PlatformCapability,
-  region: CloudRegionId = HOME_REGION,
+  target: CapabilityTarget = HOME_REGION,
 ): Promise<CapabilityState> {
+  const { region, database } = targetOf(target)
   // Before the cache, so a cached answer never hides a missing connection.
-  const pool = regionPool(region, 'platform-capabilities', { max: 1 })
-  const key = `${region}:${cap}`
+  const pool =
+    database === null
+      ? regionPool(region, 'platform-capabilities', { max: 1 })
+      : await databasePool(region, database, 'platform-capabilities', { max: 1 })
+  const key = database === null ? `${region}:${cap}` : `${region}/${database}:${cap}`
   const hit = cache.get(key)
   if (hit && Date.now() - hit.at < TTL_MS) return hit.state
 

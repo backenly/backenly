@@ -25,13 +25,40 @@
 --                           is a member may not change the schema.
 --   backenly_dbcreator      creates the databases of projects that have one of
 --                           their own, by cloning backenly_project_template
---                           (sql/project-db.sql). LOGIN CREATEDB NOINHERIT, and
---                           otherwise the defaults: no other attribute, a member
---                           of no role, and no role the platform runs as is a
---                           member of it. Made only by a run that supplies its
---                           verifier, so a region with no use for it yet does
---                           not get it; once made, its password is kept like
---                           the others'.
+--                           (sql/project-db.sql), and drops them. LOGIN
+--                           CREATEDB NOINHERIT, and otherwise the defaults: no
+--                           other attribute, a member of pg_signal_backend and
+--                           of no other role, and no role the platform runs as
+--                           is a member of it. pg_signal_backend (with INHERIT,
+--                           without SET) because DROP DATABASE ... WITH (FORCE)
+--                           ends the sessions in the database only where the
+--                           role dropping it may signal them, and the logins of
+--                           a project's database are not the creator's. Made
+--                           only by a run that supplies its verifier, so a
+--                           region with no use for it yet does not get it; once
+--                           made, its password is kept like the others'.
+--   backenly_pooler_auth    the connection pooler's login (services/pooler): it
+--                           reads the verifier of a customer's login through
+--                           backenly_pooler.lookup in database backenly_pooler
+--                           (sql/pooler.sql grants it that and nothing else).
+--                           LOGIN NOINHERIT CONNECTION LIMIT 60, and otherwise
+--                           the defaults: no other attribute, a member of no
+--                           role, and no role the platform runs as is a member
+--                           of it. Made, like the database creator, only by a
+--                           run that supplies its verifier; the pooler's step
+--                           (bootstrap.sh) then makes its database. The
+--                           limit keeps the lookup's share of the server
+--                           small. Each PgBouncer process holds up to its
+--                           pool size (POOLER_DEFAULT_POOL_SIZE, 5 by
+--                           default) of lookup connections, and its list
+--                           refresh opens one more for a moment: six per
+--                           process. A production region runs two pooler
+--                           tasks of two processes each, 24 at most, and a
+--                           rolling deploy briefly runs the old and the new
+--                           tasks side by side, 4 x 2 x (5 + 1) = 48, so sixty
+--                           stays above that with room; a service of more
+--                           tasks or a larger pool needs it raised here and in
+--                           verify.sql together.
 --
 -- A region's database holds every project in the region, so it is shared, and
 -- on a shared database a read-write login changes rows only
@@ -80,6 +107,7 @@
 \getenv backup_verifier BACKENLY_BACKUP_VERIFIER
 \getenv authenticator_verifier BACKENLY_AUTHENTICATOR_VERIFIER
 \getenv dbcreator_verifier BACKENLY_DBCREATOR_VERIFIER
+\getenv pooler_auth_verifier BACKENLY_POOLER_AUTH_VERIFIER
 \getenv rotate BOOTSTRAP_ROTATE
 -- \getenv leaves a variable unset when the environment has none.
 \if :{?app_verifier}
@@ -98,6 +126,10 @@
 \else
   \set dbcreator_verifier ''
 \endif
+\if :{?pooler_auth_verifier}
+\else
+  \set pooler_auth_verifier ''
+\endif
 \if :{?rotate}
 \else
   \set rotate ''
@@ -109,13 +141,17 @@ SELECT set_config('backenly.app_verifier', :'app_verifier', false) AS a,
        set_config('backenly.backup_verifier', :'backup_verifier', false) AS b,
        set_config('backenly.authenticator_verifier', :'authenticator_verifier', false) AS c,
        set_config('backenly.rotate', :'rotate', false) AS d,
-       set_config('backenly.dbcreator_verifier', :'dbcreator_verifier', false) AS e
+       set_config('backenly.dbcreator_verifier', :'dbcreator_verifier', false) AS e,
+       set_config('backenly.pooler_auth_verifier', :'pooler_auth_verifier', false) AS f
 \gset _
 
 DO $$
 DECLARE
   verifier_shape constant text := '^SCRAM-SHA-256\$([0-9]+):[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$';
-  managed constant text[] := ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator'];
+  managed constant text[] := ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator',
+                                   'backenly_pooler_auth'];
+  -- Made only by a run that supplies the verifier; every other role, by the first.
+  optional constant text[] := ARRAY['backenly_dbcreator', 'backenly_pooler_auth'];
   rotate text[] := array_remove(string_to_array(regexp_replace(current_setting('backenly.rotate'), '\s+', '', 'g'), ','), '');
   to_set text[] := '{}';
   rname text;
@@ -154,7 +190,8 @@ BEGIN
         ('backenly_app',           current_setting('backenly.app_verifier')),
         ('backenly_backup',        current_setting('backenly.backup_verifier')),
         ('backenly_authenticator', current_setting('backenly.authenticator_verifier')),
-        ('backenly_dbcreator',     current_setting('backenly.dbcreator_verifier'))
+        ('backenly_dbcreator',     current_setting('backenly.dbcreator_verifier')),
+        ('backenly_pooler_auth',   current_setting('backenly.pooler_auth_verifier'))
       ) AS v(role_name, verifier)
       LEFT JOIN backenly_meta.bootstrap_credentials c ON c.role_name = v.role_name
   LOOP
@@ -172,8 +209,9 @@ BEGIN
       END IF;
       to_set := to_set || r.role_name;
     ELSIF NOT r.present THEN
-      -- The database creator is made only when asked for, by its verifier.
-      CONTINUE WHEN r.verifier = '' AND r.role_name = 'backenly_dbcreator';
+      -- The database creator and the pooler's login are made only when asked
+      -- for, by their verifiers.
+      CONTINUE WHEN r.verifier = '' AND r.role_name = ANY (optional);
       IF r.verifier = '' THEN
         RAISE EXCEPTION 'refusing: % does not exist yet, and the run that creates it must supply its verifier', r.role_name;
       END IF;
@@ -269,7 +307,14 @@ BEGIN
   -- ── backenly_dbcreator ────────────────────────────────────────────────────
   -- Made only by a run that supplies its verifier (decided above). CREATEDB is
   -- named because cloning needs it; the administrator holds it, which is what
-  -- lets it give it. Never granted to any role, and no role is granted to it.
+  -- lets it give it. Never granted to any role. The one role granted to it is
+  -- pg_signal_backend, so that DROP DATABASE ... WITH (FORCE) as the database's
+  -- owner can end the sessions of the project's logins in it: PostgreSQL ends
+  -- only sessions the dropping role may signal, and pg_signal_backend is what
+  -- lets a role signal another's (never a superuser's). With INHERIT, because
+  -- the role is NOINHERIT and the check reads inherited privileges; without
+  -- SET, so it can never become pg_signal_backend. Granting it needs the ADMIN
+  -- option on pg_signal_backend, which the RDS master holds.
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_dbcreator')
      AND 'backenly_dbcreator' = ANY (to_set) THEN
     CREATE ROLE backenly_dbcreator LOGIN NOINHERIT CREATEDB;
@@ -277,6 +322,34 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_dbcreator') THEN
     ALTER ROLE backenly_dbcreator WITH NOINHERIT NOCREATEROLE;
+    IF NOT pg_has_role('backenly_dbcreator', 'pg_signal_backend', 'USAGE') THEN
+      BEGIN
+        GRANT pg_signal_backend TO backenly_dbcreator WITH INHERIT TRUE, SET FALSE;
+      EXCEPTION WHEN insufficient_privilege THEN
+        RAISE EXCEPTION 'refusing: % cannot give backenly_dbcreator the privileges of pg_signal_backend; it needs the ADMIN option on pg_signal_backend. Grant it as a role that has it, then run this again',
+          current_user;
+      END;
+      RAISE NOTICE 'gave backenly_dbcreator the privileges of pg_signal_backend';
+    END IF;
+  END IF;
+
+  -- ── backenly_pooler_auth ──────────────────────────────────────────────────
+  -- Made only by a run that supplies its verifier (decided above). It is given
+  -- nothing here: sql/pooler.sql grants it CONNECT on database backenly_pooler
+  -- and EXECUTE on the lookup there, and refuses it any membership. Its
+  -- connection limit is only ever lowered to sixty, never raised: a lower one
+  -- an operator set is kept, and verify.sql reports it.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_pooler_auth')
+     AND 'backenly_pooler_auth' = ANY (to_set) THEN
+    CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 60;
+    RAISE NOTICE 'created role backenly_pooler_auth';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_pooler_auth') THEN
+    ALTER ROLE backenly_pooler_auth WITH NOINHERIT NOCREATEDB NOCREATEROLE;
+    IF (SELECT rolconnlimit FROM pg_roles WHERE rolname = 'backenly_pooler_auth') NOT BETWEEN 0 AND 60 THEN
+      ALTER ROLE backenly_pooler_auth WITH CONNECTION LIMIT 60;
+      RAISE NOTICE 'lowered the connection limit of backenly_pooler_auth to 60';
+    END IF;
   END IF;
 
   -- ── PostgREST, and the direct-access group ────────────────────────────────
@@ -324,6 +397,7 @@ BEGIN
       WHEN 'backenly_app' THEN 'backenly.app_verifier'
       WHEN 'backenly_backup' THEN 'backenly.backup_verifier'
       WHEN 'backenly_dbcreator' THEN 'backenly.dbcreator_verifier'
+      WHEN 'backenly_pooler_auth' THEN 'backenly.pooler_auth_verifier'
       ELSE 'backenly.authenticator_verifier' END));
     INSERT INTO backenly_meta.bootstrap_credentials AS c (role_name, set_at, set_by)
     VALUES (rname, now(), current_user)
@@ -338,5 +412,6 @@ SELECT set_config('backenly.app_verifier', '', false) AS a,
        set_config('backenly.backup_verifier', '', false) AS b,
        set_config('backenly.authenticator_verifier', '', false) AS c,
        set_config('backenly.rotate', '', false) AS d,
-       set_config('backenly.dbcreator_verifier', '', false) AS e
+       set_config('backenly.dbcreator_verifier', '', false) AS e,
+       set_config('backenly.pooler_auth_verifier', '', false) AS f
 \gset _
