@@ -442,7 +442,12 @@ jobs:
         run: npx tsc --noEmit -p tsconfig.json
 
       # The flagship proof. No edition, no overlay, no private repository.
+      # With the heap docker/web.Dockerfile gives the same build: next build
+      # type-checks the whole tree in one worker, which outgrows Node's default
+      # heap and dies before reporting anything.
       - name: Build
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm run build
 
   # dead database. They now use TEST_DATABASE_URL like everything else.
