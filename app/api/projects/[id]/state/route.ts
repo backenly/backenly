@@ -108,7 +108,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       const db = await workspaceRawClient(params.id)
       try {
         const workspaceSchema = `workspace_${params.id}`
-        const placeholders = tableNames.map((_, i) => `${i + 2}`).join(', ')
+        // $2, $3, ...: the table names are parameters, never text in the query.
+        const placeholders = tableNames.map((_, i) => `$${i + 2}`).join(', ')
         const rows = await db.$queryRawUnsafe<Array<{ table_name: string; col_count: string }>>(
           `SELECT table_name, COUNT(*) AS col_count
            FROM information_schema.columns
