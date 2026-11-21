@@ -41,7 +41,10 @@ function token(projectId: string, database: string | null, opts: { role?: 'anon'
   )
 }
 
-/** Children that echo what they were sent; /slow?ms= answers after a delay. */
+/** How long a test child takes to answer /slow. */
+const SLOW_CHILD_MS = 400
+
+/** Children that echo what they were sent; /slow answers after SLOW_CHILD_MS. */
 function echoLauncher() {
   const launches: LaunchSpec[] = []
   const servers: http.Server[] = []
@@ -69,8 +72,9 @@ function echoLauncher() {
           })
           res.end(body)
         }
-        const slow = /^\/slow\?ms=(\d+)/.exec(req.url ?? '')
-        if (slow) setTimeout(respond, Math.min(Number(slow[1]), 10_000))
+        // A fixed delay: the test only needs "slow", and a delay from the
+        // request would be an unbounded timer.
+        if ((req.url ?? '').startsWith('/slow')) setTimeout(respond, SLOW_CHILD_MS)
         else respond()
       })
     })
