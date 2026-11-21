@@ -2001,6 +2001,16 @@ tests/integration/project-deletion-change-ledger.spec.ts
 # triggers and notifications are the property, so it needs a real Postgres.
 tests/integration/postgrest-reload-on-drop.spec.ts
 
+# The PostgREST host runs one real postgrest process per project database
+# (the binary CI takes from the image services/pgrst-host/Dockerfile pins):
+# two projects in two databases of their own are served by two children, A's
+# token is refused on B's path by the host and by B's PostgREST, a NOTIFY pgrst
+# in one database reloads only its child, a killed child is started again, the
+# cap answers 503 DATA_PLANE_BUSY while every child is busy, and an idle child's
+# process is stopped. Prints each child's cold start and resident memory. The
+# databases and PostgREST are the property, so it needs a real Postgres.
+tests/integration/pgrst-host.spec.ts
+
 # A schema PostgREST serves stops being served at once and is dropped at least
 # two minutes later by the regional pass (a merge's, a discard's and a project
 # deletion's), never while it is served again: dropped at once, a cache rebuild
