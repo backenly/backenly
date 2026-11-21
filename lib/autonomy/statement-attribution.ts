@@ -70,6 +70,12 @@ export function statementRoles(schema: string, projectId?: string | null): { own
  * its text. `projectStatement` then reads that text as SQL. The arguments are
  * placeholders: the schema name, then the two arrays of statementRoles.
  *
+ * Only statements run in the database being read are kept (`s.dbid`):
+ * pg_stat_statements is the whole instance's, and every caller reads it on the
+ * database holding the project's data. A project with a database of its own
+ * shares its instance with other projects' databases, where the same platform
+ * roles run statements of their own.
+ *
  * `includeApplicationRole: false` leaves Backenly's own statements out, for a
  * reading of client traffic only.
  */
@@ -86,8 +92,9 @@ export function projectStatementScope(a: {
       ? `${a.r}.rolname = ANY(${a.platformRoles}::text[])`
       : `(${a.r}.rolname = ANY(${a.platformRoles}::text[]) OR ${a.r}.rolname = current_user)`
   return (
-    `(${a.r}.rolname = ANY(${a.ownRoles}::text[])` +
-    ` OR (${platform} AND position(${a.schema} in ${a.s}.query) > 0))`
+    `(${a.s}.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())` +
+    ` AND (${a.r}.rolname = ANY(${a.ownRoles}::text[])` +
+    ` OR (${platform} AND position(${a.schema} in ${a.s}.query) > 0)))`
   )
 }
 

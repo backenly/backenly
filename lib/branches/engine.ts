@@ -24,7 +24,7 @@
  * and one created before logging merges the older additive way.
  */
 
-import { projectPool, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { projectDatabase, projectPool, workspaceRawClient } from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
@@ -379,7 +379,14 @@ async function dropBranchSchema(projectId: string, schemaName: string): Promise<
   if ((await servedAmong(db, [schemaName])).length > 0) {
     const { scheduleSchemaDrop } = await import('@/lib/postgrest/retire-schema')
     await unregisterSchemaOn(db, schemaName)
-    await scheduleSchemaDrop(prisma, { projectId, region: await projectRegion(projectId), schemas: [schemaName] })
+    // Where the branch is: its project's own database, when it has one.
+    const placement = await projectDatabase(projectId)
+    await scheduleSchemaDrop(prisma, {
+      projectId,
+      region: placement.region,
+      schemas: [schemaName],
+      ...(placement.tenancy === 'dedicated' ? { database: placement.database } : {}),
+    })
     return
   }
   const pool = await branchPool(projectId)

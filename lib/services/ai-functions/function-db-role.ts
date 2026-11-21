@@ -26,7 +26,7 @@
 
 import { createHash, createHmac } from 'crypto'
 import { PrismaClient } from '@prisma/client'
-import { projectDatabaseUrl, regionRawClient, workspaceRawClient } from '@/lib/data-plane/regional'
+import { databaseClient, projectDatabaseUrl, regionRawClient, workspaceRawClient } from '@/lib/data-plane/regional'
 import { withoutStatementCache } from '@/lib/data-plane/statement-cache'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
@@ -130,11 +130,20 @@ async function syncRole(projectId: string, schema: string, password: string): Pr
 
 /**
  * Whether scripts/sql/function-roles.sql is installed in a region's database
- * (home by default; each region needs its own copy). A catalog probe, so
- * nothing logs an error.
+ * (home by default; each region needs its own copy), or in a project's own
+ * database (`{ region, database }`), which carries it from the template it was
+ * cloned from. A catalog probe, so nothing logs an error.
  */
-export async function functionRoleHelperInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
-  const rows = await regionRawClient(region).$queryRaw<Array<{ ok: boolean }>>`
+export async function functionRoleHelperInstalled(
+  target: CloudRegionId | { region: CloudRegionId; database: string | null } = HOME_REGION,
+): Promise<boolean> {
+  const db =
+    typeof target === 'string'
+      ? regionRawClient(target)
+      : target.database === null
+        ? regionRawClient(target.region)
+        : databaseClient(target.region, target.database)
+  const rows = await db.$queryRaw<Array<{ ok: boolean }>>`
     SELECT to_regprocedure('public.backenly_fn_role_sync(text, text)') IS NOT NULL AS ok
   `
   return rows[0]?.ok === true

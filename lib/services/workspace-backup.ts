@@ -62,12 +62,17 @@ import { libpqChildEnv } from '@/lib/services/libpq-env'
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import {
   RegionNotConfiguredError,
+  dataInstanceEnvName,
   isRegionError,
+  projectDatabase,
   projectRegion,
+  regionDataInstanceUrl,
   regionDatabaseUrl,
   regionEnvName,
-  regionRawClient,
   regionSetting,
+  requireRegionDataInstanceUrl,
+  workspaceRawClient,
+  type ProjectDatabase,
 } from '@/lib/data-plane/regional'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import { enqueueRegionalJob } from '@/lib/queue'
@@ -172,11 +177,30 @@ export function getBackupFilename(): string {
  * Discrete flags plus PGPASSWORD in the CHILD environment fixes the class of
  * bug, not just the symptom: there is no longer any string containing the
  * password for an error message to capture.
+ *
+ * `target` is a region, for a project in its region's own database, or a
+ * project's own database there (`{ region, database }`): then the region's
+ * data instance connections (DATA_BACKUP_DATABASE_URL, DATA_DATABASE_URL,
+ * DATA_DIRECT_URL, with the region appended outside the home region) are used,
+ * with the project's database as --dbname.
  */
+export type BackupTarget = CloudRegionId | { region: CloudRegionId; database: string | null }
+
+/** The target of a project's snapshots: its own database, or its region's. */
+function backupTargetOf(placement: ProjectDatabase): BackupTarget {
+  return placement.tenancy === 'dedicated' && placement.database
+    ? { region: placement.region, database: placement.database }
+    : placement.region
+}
+
 export function buildConnection(
   purpose: 'read' | 'write' = 'read',
-  region: CloudRegionId = HOME_REGION,
+  target: BackupTarget = HOME_REGION,
 ): { args: string[]; env: NodeJS.ProcessEnv } {
+  if (typeof target !== 'string' && target.database !== null) {
+    return buildProjectDatabaseConnection(purpose, target.region, target.database)
+  }
+  const region = typeof target === 'string' ? target : target.region
   // Only the DUMP wants BACKUP_DATABASE_URL. Restoring over that connection
   // makes the backup role the OWNER of the restored schema and every table in
   // it, because pg_dump runs with --no-owner and psql creates whatever it
@@ -231,6 +255,46 @@ export function buildConnection(
 }
 
 /**
+ * buildConnection for a project's own database: the region's data instance,
+ * read as its backup role and written as its application role, as for a
+ * region's own database, with that database as --dbname. A database name that
+ * is not a project database's is refused before anything is built.
+ */
+function buildProjectDatabaseConnection(
+  purpose: 'read' | 'write',
+  region: CloudRegionId,
+  database: string,
+): { args: string[]; env: NodeJS.ProcessEnv } {
+  if (!/^p_[0-9a-f]{32}$/.test(database)) {
+    throw new Error('The project database name is not one Backenly gives, so no dump or restore was run.')
+  }
+  const url =
+    (purpose === 'read' ? regionDataInstanceUrl(region, 'backup') : undefined) ||
+    regionDataInstanceUrl(region, 'app') ||
+    regionDataInstanceUrl(region, 'direct') ||
+    requireRegionDataInstanceUrl(region, 'app')
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error('The data instance connection string is not a valid connection URL')
+  }
+  const args = [
+    '--host', parsed.hostname,
+    '--port', parsed.port || '5432',
+    '--username', decodeURIComponent(parsed.username),
+    '--dbname', database,
+    '--no-password',
+  ]
+  const env: NodeJS.ProcessEnv = libpqChildEnv(process.env)
+  if (parsed.password) env.PGPASSWORD = decodeURIComponent(parsed.password)
+  const sslmode = parsed.searchParams.get('sslmode')
+  if (sslmode) env.PGSSLMODE = sslmode
+  return { args, env }
+}
+
+/**
  * Strip anything credential-shaped from a message before it is logged or stored.
  *
  * Defence in depth. With the password out of argv nothing should reach here,
@@ -242,10 +306,13 @@ export function sanitizeError(message: string): string {
   // postgres://user:secret@host -> postgres://user:***@host
   out = out.replace(/(\b[a-z]+:\/\/[^:\s/]+:)[^@\s]*(@)/gi, '$1***$2')
   // Any literal occurrence of a live password, however it got there: every
-  // region's, since a dump or restore may run on any of them.
-  const regional = CLOUD_REGIONS.flatMap((r) =>
-    (['backup', 'app', 'direct'] as const).map((role) => regionEnvName(r.id, role)),
-  )
+  // region's, since a dump or restore may run on any of them, its data
+  // instance's, and its database creator's.
+  const regional = CLOUD_REGIONS.flatMap((r) => [
+    ...(['backup', 'app', 'direct'] as const).map((role) => regionEnvName(r.id, role)),
+    ...(['backup', 'app', 'direct', 'admin'] as const).map((role) => dataInstanceEnvName(r.id, role)),
+    regionSetting('DBCREATOR_DATABASE_URL', r.id).variable,
+  ])
   for (const key of ['PGPASSWORD', ...regional]) {
     const raw = process.env[key]
     if (!raw) continue
@@ -263,8 +330,9 @@ export function sanitizeError(message: string): string {
  * instead of a bare pg_dump error, because the bare error gave no hint that the
  * cause was a missing role rather than a broken database.
  */
-function usingAppCredentialForBackup(region: CloudRegionId): boolean {
-  return !regionDatabaseUrl(region, 'backup')
+function usingAppCredentialForBackup(target: BackupTarget): boolean {
+  if (typeof target !== 'string' && target.database !== null) return !regionDataInstanceUrl(target.region, 'backup')
+  return !regionDatabaseUrl(typeof target === 'string' ? target : target.region, 'backup')
 }
 
 // ─── Core Backup ─────────────────────────────────────────────────────────────
@@ -368,15 +436,19 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
   const bucket = snapshotBucket()
   let uploadedTo: string | null = null
   // The schema is only in the database of the project's region, and its dump
-  // is taken and stored only there.
-  const region = await projectRegion(projectId)
+  // is taken and stored only there. A project with a database of its own is
+  // dumped from that database, schema for schema as any other: the dump moves
+  // between the two kinds of database unchanged.
+  const placement = await projectDatabase(projectId)
+  const region = placement.region
+  const target = backupTargetOf(placement)
   assertSnapshotsHere(projectId, region)
 
   try {
     // Ensure backup directory exists
     await fs.promises.mkdir(/*turbopackIgnore: true*/ backupDir, { recursive: true })
 
-    const conn = buildConnection('read', region)
+    const conn = buildConnection('read', target)
 
     // Dump only the workspace schema (data + structure, no roles).
     // execFile, not exec: no shell, no command string, nothing for an error to
@@ -445,7 +517,7 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     // logged and persisted, so nothing credential-shaped may survive it.
     const raw = sanitizeError(err?.message ?? '')
     const isRlsBlock = /row-level security policy/i.test(raw)
-    const message = isRlsBlock && usingAppCredentialForBackup(region)
+    const message = isRlsBlock && usingAppCredentialForBackup(target)
       ? `${raw} — pg_dump is running as the application role, which does not ` +
         `bypass RLS, and these tables use FORCE ROW LEVEL SECURITY (the owner is ` +
         `subject to policies too). Set BACKUP_DATABASE_URL to a read-only role with ` +
@@ -506,10 +578,13 @@ export async function restoreWorkspace(
   // is in the project's region. Resolved before anything is touched: replayed
   // over another region's connection, the dump would create the schema there
   // and the check would find it, reporting a restore of data that never moved.
-  // Its snapshots are stored in its region, and restored only there.
-  const region = await projectRegion(projectId)
+  // Its snapshots are stored in its region, and restored only there. A project
+  // with a database of its own is restored into that database.
+  const placement = await projectDatabase(projectId)
+  const region = placement.region
+  const target = backupTargetOf(placement)
   assertSnapshotsHere(projectId, region)
-  const db = regionRawClient(region, projectId)
+  const db = await workspaceRawClient(projectId)
 
   // Find the backup to restore from
   const backup = backupId
@@ -545,7 +620,7 @@ export async function restoreWorkspace(
   try {
     // 'write': restoring over BACKUP_DATABASE_URL would re-own the schema to
     // the backup role. See buildConnection.
-    const conn = buildConnection('write', region)
+    const conn = buildConnection('write', target)
 
     // Fetch (and checksum) the S3 copy BEFORE touching the live schema, for the
     // same reason as decompressing first: a snapshot that is missing, damaged
@@ -680,6 +755,12 @@ export async function restoreWorkspace(
     try {
       const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
       await syncDirectAccessGrants(projectId)
+      // In a project's own database the backup role's read is made there too,
+      // on the client the restore ran its checks on.
+      if (placement.tenancy === 'dedicated') {
+        const { grantBackupReadOn } = await import('@/lib/data-plane/project-databases')
+        await grantBackupReadOn(db, schemaName)
+      }
     } catch (grantErr: any) {
       console.warn(
         `[Restore] Restored ${projectId}, but its grants were not made again: ` +
