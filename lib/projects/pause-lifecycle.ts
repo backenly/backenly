@@ -31,7 +31,7 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { discardOutbox } from '@/lib/webhooks/capture'
-import { invalidateProjectServingState } from './serving-state'
+import { DELETED_PAUSE_REASON, MIGRATING_PAUSE_REASON, invalidateProjectServingState } from './serving-state'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 
 export type LifecycleTx = Prisma.TransactionClient
@@ -188,7 +188,14 @@ export async function applyResumeTransition(
   projectId: string,
 ): Promise<{ resumed: boolean }> {
   const { count } = await tx.project.updateMany({
-    where: { id: projectId, pausedAt: { not: null } },
+    // Never the pause of a move to a database of its own: that move ends it
+    // (applyMigrationThaw), and lifting it early would let the project serve
+    // from a database mid-copy.
+    where: {
+      id: projectId,
+      pausedAt: { not: null },
+      OR: [{ pauseReason: null }, { pauseReason: { not: MIGRATING_PAUSE_REASON } }],
+    },
     data: {
       pausedAt: null,
       pauseReason: null,
@@ -214,6 +221,92 @@ export async function afterResumeCommitted(projectId: string, actor: LifecycleAc
   await (await import('./paused-logins')).restoreDirectLogins(projectId, 'resumed')
   await ensureSchemaRegistered(projectId)
   await writeAudit(projectId, 'PROJECT_RESUMED', actor, 'Project resumed', {})
+}
+
+// ── The pause of a move to a database of its own ─────────────────────────────
+//
+// A move (lib/data-plane/tenancy-migration.ts) stops every door for a few
+// minutes while the project's data is copied, as any pause does, and then
+// lets it serve again. Unlike an inactivity pause it is not a decision about
+// the project: nothing is thrown away. The webhook outbox and the deliveries
+// waiting to go out are kept, so the events a project captured before the move
+// are delivered after it, from its new database. And it changes nothing else
+// on the row: ending it leaves the project exactly as it was before.
+
+/**
+ * Pause a project for a move to a database of its own, if it is serving: not
+ * paused for any reason, not deleted, not locked. Must be called inside
+ * withProjectLifecycleLock. `{ frozen: false }` is an ordinary answer: the
+ * move does not go ahead.
+ */
+export async function applyMigrationFreeze(tx: LifecycleTx, projectId: string): Promise<{ frozen: boolean }> {
+  const { count } = await tx.project.updateMany({
+    where: { id: projectId, pausedAt: null, deletedAt: null, lockedDownAt: null },
+    data: { pausedAt: new Date(), pauseReason: MIGRATING_PAUSE_REASON },
+  })
+  return { frozen: count > 0 }
+}
+
+/**
+ * End a move's pause. Must be called inside withProjectLifecycleLock. Only
+ * that pause: one with another reason is left alone. A project whose deletion
+ * was asked for during the move stays paused, as a deleted project
+ * (lib/projects/deletion.ts), rather than serving. Nothing else on the row is
+ * touched, so the inactivity clock is where it was.
+ */
+export async function applyMigrationThaw(tx: LifecycleTx, projectId: string): Promise<{ thawed: boolean; deleted: boolean }> {
+  const row = await tx.project.findUnique({ where: { id: projectId }, select: { pauseReason: true, pausedAt: true, deletedAt: true } })
+  if (!row || !row.pausedAt || row.pauseReason !== MIGRATING_PAUSE_REASON) return { thawed: false, deleted: false }
+  if (row.deletedAt) {
+    await tx.project.update({ where: { id: projectId }, data: { pauseReason: DELETED_PAUSE_REASON } })
+    return { thawed: false, deleted: true }
+  }
+  await tx.project.update({ where: { id: projectId }, data: { pausedAt: null, pauseReason: null } })
+  return { thawed: true, deleted: false }
+}
+
+/**
+ * The half of a move's pause outside the lifecycle transaction: this process's
+ * gates see it at once, the project's direct logins stop (their sessions end),
+ * and its region is told. The outbox and the deliveries are kept. Never throws
+ * once the pause has committed; what could not be done is in the answer.
+ */
+export async function afterMigrationFreezeCommitted(
+  projectId: string,
+  actor: LifecycleActor,
+): Promise<{ stoppedLogins: string[]; propagation: Propagation | null }> {
+  invalidateProjectServingState(projectId)
+  const stoppedLogins = await (await import('./paused-logins')).stopDirectLogins(projectId, MIGRATING_PAUSE_REASON)
+  const propagation = await confirmPropagation({ entity: 'project', entityId: projectId }).catch(() => null)
+  await writeAudit(projectId, 'PROJECT_PAUSED', actor, 'Project paused while it moves to a database of its own', {
+    reason: MIGRATING_PAUSE_REASON,
+    outboxKept: true,
+    stoppedLogins: stoppedLogins.length,
+    propagation,
+  }).catch(() => {})
+  return { stoppedLogins, propagation }
+}
+
+/**
+ * The half of ending a move's pause outside the lifecycle transaction, wherever
+ * the project's data now is: this process's gates, the direct logins back with
+ * their passwords in that database (lib/projects/paused-logins.ts), and its
+ * canonical schema served there. Never throws.
+ */
+export async function afterMigrationThawCommitted(
+  projectId: string,
+  actor: LifecycleActor,
+): Promise<{ restoredLogins: string[]; propagation: Propagation | null }> {
+  invalidateProjectServingState(projectId)
+  const restoredLogins = await (await import('./paused-logins')).restoreDirectLogins(projectId, 'move ended')
+  await ensureSchemaRegistered(projectId).catch(() => null)
+  const propagation = await confirmPropagation({ entity: 'project', entityId: projectId }).catch(() => null)
+  await writeAudit(projectId, 'PROJECT_RESUMED', actor, 'Project serving again after its move', {
+    reason: MIGRATING_PAUSE_REASON,
+    restoredLogins: restoredLogins.length,
+    propagation,
+  }).catch(() => {})
+  return { restoredLogins, propagation }
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────
