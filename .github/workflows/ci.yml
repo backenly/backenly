@@ -651,6 +651,45 @@ jobs:
           path: jest-integration.json
           if-no-files-found: ignore
 
+  # ── The connection pooler image ─────────────────────────────────────────────
+  # services/pooler is how customers connect psql and ORMs to their project's
+  # own database. Its unit suites read the Dockerfile and render the
+  # configuration; only running the image shows PgBouncer actually doing what
+  # the configuration says. This builds it and starts both containers as they
+  # ship (default ports, read-only root), against a PostgreSQL 16 that accepts
+  # TLS connections only, and checks every admission and refusal
+  # scripts/test/pooler-image.sh lists. A job of its own, with no service
+  # container, so the image's own ports 5432 and 6543 are free.
+  pooler:
+    name: connection pooler image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PG_BINDIR: /usr/lib/postgresql/16/bin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # tsx computes the logins' verifiers with lib/data-plane/scram.ts, and pg
+      # drives the pooling-mode checks.
+      - run: npm ci
+      - name: PostgreSQL 16 server binaries, and nothing listening on 5432
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/postgresql-common/createcluster.d
+          echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.d/no-main-cluster.conf
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends postgresql-16
+          sudo systemctl stop postgresql 2>/dev/null || true
+          "$PG_BINDIR/initdb" --version | grep -E '\(PostgreSQL\) 16\.'
+      - name: The pooler image against PostgreSQL 16
+        env:
+          # A skip here would be a green tick that checked nothing.
+          POOLER_IMAGE_REQUIRE: '1'
+        run: bash scripts/test/pooler-image.sh
+
   # The MCP acceptance matrix (scripts/mcp-acceptance). Runs no tests of its
   # own: each case names the tests that prove it, and this reads the results the
   # jobs above wrote. A case whose tests failed, were skipped, or did not run is
