@@ -346,6 +346,9 @@ export function availabilityOf(
   if (change.kind === 'snapshot_restore') {
     return { available: false, code: 'NOT_RESTORABLE', reason: 'A snapshot restore replaced the whole database. To go back, restore an earlier snapshot from Database → Snapshots.' }
   }
+  if (change.kind === 'tenancy_migration') {
+    return { available: false, code: 'NOT_RESTORABLE', reason: "Backenly moved this project's data, unchanged, into a database of its own. There is nothing to restore: every table is as it was." }
+  }
   if (change.status === 'recovering' || change.status === 'applying' || change.status === 'verifying') {
     return { available: false, code: 'IN_PROGRESS', reason: 'Backenly is still working on this change.' }
   }

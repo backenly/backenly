@@ -168,12 +168,17 @@ export async function provisionFunctionRole(projectId: string): Promise<{ role: 
 // One small client per project, kept while in use. Grants are re-synced at most
 // every SYNC_TTL_MS: tables the app role creates are covered at once by default
 // privileges, and this catches tables any other role created.
+//
+// Each client is kept with the database it was opened on, and used only while
+// the project's data is still there: a project whose data moved to a database
+// of its own (lib/data-plane/tenancy-migration.ts) gets a client on that one at
+// its next call, never the old client on the database it left.
 
 const MAX_CLIENTS = 16
 const SYNC_TTL_MS = 5 * 60 * 1000
 const IDLE_MS = 10 * 60 * 1000
 
-interface Entry { handle: FunctionDbHandle; syncedAt: number; usedAt: number }
+interface Entry { handle: FunctionDbHandle; syncedAt: number; usedAt: number; base: string }
 const clients = new Map<string, Entry>()
 /** A sync under way for a schema, which a call arriving meanwhile waits on. */
 const syncing = new Map<string, Promise<FunctionDbHandle>>()
@@ -204,7 +209,12 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
   }
 
   const now = Date.now()
-  const cached = clients.get(schema)
+  const base = await projectDatabaseUrl(projectId)
+  let cached = clients.get(schema)
+  if (cached && cached.base !== base) {
+    evict(schema)
+    cached = undefined
+  }
   if (cached && now - cached.syncedAt < SYNC_TTL_MS) {
     cached.usedAt = now
     return cached.handle
@@ -227,10 +237,10 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
 
     evictIdleAndOverflow()
     const client = new PrismaClient({
-      datasourceUrl: functionDatabaseUrl(role, password, await projectDatabaseUrl(projectId)),
+      datasourceUrl: functionDatabaseUrl(role, password, base),
     })
     const handle = { client, schema, role }
-    clients.set(schema, { handle, syncedAt: now, usedAt: now })
+    clients.set(schema, { handle, syncedAt: now, usedAt: now, base })
     return handle
   })()
   syncing.set(schema, run)
