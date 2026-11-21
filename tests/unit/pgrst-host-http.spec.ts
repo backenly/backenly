@@ -70,7 +70,7 @@ function echoLauncher() {
           res.end(body)
         }
         const slow = /^\/slow\?ms=(\d+)/.exec(req.url ?? '')
-        if (slow) setTimeout(respond, Number(slow[1]))
+        if (slow) setTimeout(respond, Math.min(Number(slow[1]), 10_000))
         else respond()
       })
     })

@@ -166,7 +166,9 @@ export function postgrestLauncher(config: HostConfig, log: LogLine): Launcher {
     while (admin === server) admin = await freePort()
 
     const env = childEnvironment(config, spec, { server, admin })
-    const proc: ChildProcess = spawn(config.binary, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    // The child's environment is built from scratch (childEnvironment), so it
+    // has no NODE_ENV; the cast only satisfies the repo's ProcessEnv typing.
+    const proc: ChildProcess = spawn(config.binary, [], { env: env as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'pipe'] })
 
     let hasExited = false
     const exited = new Promise<ChildExit>((resolve) => {
