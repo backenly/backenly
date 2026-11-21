@@ -460,7 +460,9 @@ describe('the role that creates project databases', () => {
     expect(await launch('apply', WITH_CREATOR, [], deps(fake, log))).toBe(0)
 
     const url = fake.current(WITH_CREATOR.secrets.dbcreator!)!
-    expect(url).toMatch(new RegExp(`^postgresql://backenly_dbcreator:[0-9a-f]{64}@${CONFIG.database.host}:5432/backenly\\?sslmode=require$`))
+    const [prefix, rest] = url.split('@')
+    expect(prefix).toMatch(/^postgresql:\/\/backenly_dbcreator:[0-9a-f]{64}$/)
+    expect(rest).toBe(`${CONFIG.database.host}:5432/backenly?sslmode=require`)
     expect(verifies(passwordOf(url), fake.db.roles.backenly_dbcreator!.verifier!)).toBe(true)
     // Only it: every other credential is as it was.
     for (const [key, role] of [['app', 'backenly_app'], ['backup', 'backenly_backup'], ['authenticator', 'backenly_authenticator']] as const) {
