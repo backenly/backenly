@@ -3,10 +3,12 @@
  *
  *   - Nothing is offered until the release publishes it (NEXT_PUBLIC_MIGRATION).
  *   - The ledger never shows more rows on Backenly than the source has, steps
- *     in the importer's batches of 500, and calls a table matched only once
- *     both counts are equal.
+ *     in whole batches (500 at a time in the picture; the importer sizes its
+ *     own, lib/import/pg-engine.ts), and calls a table matched only once both
+ *     counts are equal.
  *   - Matched tables only ever go up, and the move ends with every table
- *     matched and the access rules waiting for a person.
+ *     matched and, where the example has them (Supabase only: Firestore
+ *     rules are never translated), the access rules waiting for a person.
  */
 import { migrationPublished } from '@/components/migrate/flag'
 import { DEMO_PLANS, durationOf, progressAt, rowsTotal, type MovePlan } from '@/components/migrate/plan'
