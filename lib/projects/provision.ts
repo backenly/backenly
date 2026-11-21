@@ -36,7 +36,6 @@ import {
 import {
   createProjectDatabase,
   dropProjectDatabase,
-  grantBackupReadOn,
   requireRegionDbcreatorUrl,
   type CreatedProjectDatabase,
 } from '@/lib/data-plane/project-databases'
@@ -295,7 +294,7 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
 async function createOwnSchema(db: WorkspaceRawClient, schema: string, region: CloudRegionId, database: string): Promise<void> {
   await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)}`)
   try {
-    if (!(await grantBackupReadOn(db, schema))) {
+    if (!(await grantWorkspaceBackupAccess(region, schema, database))) {
       console.warn(`[provision] ${database} in ${region} has no grant helper, so the backup role was not granted read on ${schema}`)
     }
   } catch (err) {
