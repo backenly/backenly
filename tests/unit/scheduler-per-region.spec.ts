@@ -68,7 +68,6 @@ describe('instrumentation.ts', () => {
     'closePreviousPeriod',
     'pruneAppliedBatches',
     'purgeDeletedProjects',
-    'syncDirectAccessAllowlists',
     'reconcilePoolerLogins',
     'reconcileDirectConnectionLimits',
   ]

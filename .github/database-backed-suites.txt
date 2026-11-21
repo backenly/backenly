@@ -47,14 +47,6 @@ tests/integration/mcp-direct-access-url.spec.ts
 # N4).
 tests/integration/direct-postgres-only-where-reachable.spec.ts
 
-# Where a region's database endpoint admits only allowed addresses, each
-# project keeps its own (public IPv4, at most /16, the plan's number), every
-# add and remove is a History entry with a restore, and the region's prefix
-# list is kept equal to the union of every project's addresses there, never
-# dropping one another project still allows. EC2 is a stand-in; no AWS call.
-tests/integration/direct-postgres-allowed-addresses-history.spec.ts
-tests/integration/direct-postgres-allowlist-sync.spec.ts
-
 # Each login holds its plan's connections at once, set at creation and at every
 # read of its credentials and by the hourly pass, enforced by Postgres.
 tests/integration/direct-postgres-connection-limits.spec.ts

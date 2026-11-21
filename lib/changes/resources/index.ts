@@ -249,13 +249,6 @@ export async function afterCommitResources(projectId: string, ops: ResourceOp[])
     const { syncWebhookCapture } = await import('@/lib/webhooks/capture')
     await syncWebhookCapture(projectId).catch((err) => console.warn(`[ChangeResources] capture sync after restore failed for ${projectId}:`, err?.message ?? err))
   }
-  // The region's network allowlist is the union of every project's allowed
-  // addresses (lib/services/direct-access-allowlist.ts): a restore that put one
-  // back or took one off changes it, once for all of them. It never throws.
-  if (ops.some((o) => o.resource === 'addresses')) {
-    const { syncAllowlistForProject } = await import('@/lib/services/direct-access-allowlist')
-    await syncAllowlistForProject(projectId)
-  }
 }
 
 /**

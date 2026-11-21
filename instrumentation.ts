@@ -817,21 +817,6 @@ export async function register() {
         }
       })
 
-      // ── Direct Postgres allowlists — every 5 minutes, from home ───────────
-      // Each region's database endpoint admits only the addresses its projects
-      // allow, kept on a prefix list (lib/services/direct-access-allowlist.ts).
-      // Every change to a project's addresses syncs at once; this repairs what
-      // a failed sync, a purge or an edit made outside Backenly left. The
-      // addresses are platform records and the home web task holds every
-      // region's setting, so it runs once, at home. A no-op, said once, where
-      // no region has a prefix list (a self-hosted deployment).
-      cron.platform('*/5 * * * *', async () => {
-        const { syncDirectAccessAllowlists } = await import('./lib/services/direct-access-allowlist')
-        await syncDirectAccessAllowlists().catch((err: any) =>
-          console.error('[DirectDbAllowlist] Error:', err?.message)
-        )
-      })
-
       // ── Connection pooler logins — every 5 minutes, from home ─────────────
       // The pooler serves a project database's login from its row in that
       // data instance's backenly_pooler.logins (lib/data-plane/pooler.ts).
