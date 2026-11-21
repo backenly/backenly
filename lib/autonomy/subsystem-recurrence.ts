@@ -306,11 +306,7 @@ export async function evaluateSubsystemRecurrence(
       take: 200,
     }),
     // In the project's region, where they are captured.
-    projectDriftEvents(projectId).then((events) => events.findMany({
-      where: { projectId, capturedAt: { gte: since } },
-      select: { objectIdentity: true },
-      take: 500,
-    })),
+    projectDriftEvents(projectId).then((events) => events.capturedBetween(projectId, { from: since, take: 500 })),
   ])
 
   // ── Attribution coverage, measured on the repairs that matter ──────────────

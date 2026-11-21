@@ -23,8 +23,6 @@
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { randomUUID } from 'crypto'
-import { regionRawClient } from '@/lib/data-plane/regional'
-import { HOME_REGION } from '@/lib/regions'
 import {
   findingDetailsKeptHere,
   quotedError,
@@ -60,14 +58,14 @@ import {
 } from '@/lib/autonomy/maintenance/primitives/recovery-restore-policies'
 
 /**
- * The SQL recorder (lib/execution/sql-recorder.ts) on both home-region clients.
- * A home project's workspace SQL runs on the home workspace client, not the
- * platform client (lib/data-plane/regional.ts), and a repair's statements are
- * mostly that SQL.
+ * The SQL recorder (lib/execution/sql-recorder.ts) on the platform client. A
+ * project's workspace SQL, which most of a repair's statements are, runs on a
+ * workspace client, and lib/data-plane/regional.ts installs the recorder on
+ * every one of those as it creates it: each region's, and each project
+ * database's.
  */
-function installHomeSqlRecorders(): void {
+function installPlatformSqlRecorder(): void {
   installSqlRecorder(prisma as any)
-  installSqlRecorder(regionRawClient(HOME_REGION) as any)
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -692,7 +690,7 @@ export async function executeApprovedFix(
   // What the executor actually sent to PostgreSQL, for the audit row. Captured
   // at the driver rather than reported by each executor, so a new repair cannot
   // silently record nothing. See lib/execution/sql-recorder.ts.
-  installHomeSqlRecorders()
+  installPlatformSqlRecorder()
   let statements: RecordedStatement[] = []
 
   let changeIds: string[] = []
@@ -977,7 +975,7 @@ export async function executeApprovedProposal(input: {
     return notStarted('Backenly could not record the state Undo would restore, so nothing was changed.')
   }
 
-  installHomeSqlRecorders()
+  installPlatformSqlRecorder()
   let captured
   let changeIds: string[] = []
   try {
@@ -1709,7 +1707,7 @@ async function _executeAutoFix(
   })
 
   let result
-  installHomeSqlRecorders()
+  installPlatformSqlRecorder()
   let statements: RecordedStatement[] = []
   let changeIds: string[] = []
   try {

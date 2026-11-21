@@ -676,7 +676,7 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
     resolveWorkspaceSchema(projectId),
     prisma.databaseCredential.findMany({ where: { projectId }, orderBy: { mode: 'asc' } }),
     // Counted in the project's region, where the capture trigger records them.
-    projectDriftEvents(projectId).then((events) => events.count({ where: { projectId, status: 'pending' } })),
+    projectDriftEvents(projectId).then((events) => events.countPending(projectId)),
   ])
   let target: ConnectionTarget
   try {
