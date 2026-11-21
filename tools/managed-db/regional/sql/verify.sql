@@ -130,8 +130,8 @@ BEGIN
        OR NOT r.rolcanlogin THEN
       problems := problems || 'role backenly_pooler_auth must be LOGIN NOINHERIT, and NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'::text;
     END IF;
-    IF r.rolconnlimit <> 40 THEN
-      problems := problems || format('role backenly_pooler_auth must have CONNECTION LIMIT 40, not %s', r.rolconnlimit);
+    IF r.rolconnlimit <> 60 THEN
+      problems := problems || format('role backenly_pooler_auth must have CONNECTION LIMIT 60, not %s', r.rolconnlimit);
     END IF;
     IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid) THEN
       problems := problems || format('role backenly_pooler_auth is a member of %s; it may hold no role',

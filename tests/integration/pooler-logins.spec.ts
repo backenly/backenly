@@ -200,7 +200,7 @@ suite('a project database’s logins, through the application', () => {
 
     // The pooler's database and its lookup login, as the regional procedure makes them.
     await rows(superUrl(), `CREATE ROLE backenly_app LOGIN`)
-    await rows(superUrl(), `CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 40 PASSWORD '${scramSha256Verifier(AUTH_PW)}'`)
+    await rows(superUrl(), `CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 60 PASSWORD '${scramSha256Verifier(AUTH_PW)}'`)
     await rows(superUrl(), `CREATE DATABASE ${POOLER_DB} TEMPLATE template0`)
     psqlFile(superUrl(POOLER_DB), 'tools/managed-db/regional/sql/pooler.sql')
 

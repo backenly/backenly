@@ -59,7 +59,7 @@
 --      which launch.ts computes (secrets.poolerAuth in the region's launch
 --      config). The password is set only when the role is created or named in
 --      BOOTSTRAP_ROTATE, and recorded in backenly_meta.bootstrap_credentials:
---        CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 40;
+--        CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 60;
 --        ALTER ROLE backenly_pooler_auth PASSWORD '<verifier>';
 --      Every other attribute stays at its default (NOSUPERUSER NOCREATEDB
 --      NOCREATEROLE NOREPLICATION NOBYPASSRLS), and the role is granted no

@@ -494,7 +494,7 @@ suite('a region’s first database', () => {
     expect(result.status).not.toBe(0)
     expect(result.output).not.toContain('step postgrest: re-applied')
 
-    // It can log in, and do nothing else: no attribute, no role, forty connections.
+    // It can log in, and do nothing else: no attribute, no role, sixty connections.
     expect(
       await rows(
         superUrl(),
@@ -505,7 +505,7 @@ suite('a region’s first database', () => {
     ).toEqual([
       {
         rolcanlogin: true, rolinherit: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false,
-        rolreplication: false, rolbypassrls: false, rolconnlimit: 40,
+        rolreplication: false, rolbypassrls: false, rolconnlimit: 60,
       },
     ])
     expect(await rows(superUrl(), `SELECT 1 FROM pg_auth_members WHERE member = $1::regrole`, [POOLER_AUTH])).toEqual([])
@@ -601,15 +601,15 @@ suite('a region’s first database', () => {
 
   it('fails a check when the pooler’s login or its database is not as declared', async () => {
     await rows(superUrl(), `GRANT backenly_external TO ${POOLER_AUTH}`)
-    await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 50`)
+    await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 70`)
     try {
       const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
       expect(result.status).not.toBe(0)
       expect(result.output).toContain(`role ${POOLER_AUTH} is a member of backenly_external; it may hold no role`)
-      expect(result.output).toContain(`role ${POOLER_AUTH} must have CONNECTION LIMIT 40, not 50`)
+      expect(result.output).toContain(`role ${POOLER_AUTH} must have CONNECTION LIMIT 60, not 70`)
     } finally {
       await rows(superUrl(), `REVOKE backenly_external FROM ${POOLER_AUTH}`)
-      await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 40`)
+      await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 60`)
     }
 
     // In its own database, as its owner could make it.
