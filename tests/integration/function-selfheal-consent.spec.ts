@@ -183,9 +183,15 @@ describe('the runtime failure path honours the same consent', () => {
     expect(result.success).toBe(false)
     const healed = await pollCode(fn.id, (c) => c === GOOD)
     expect(healed).toBe(GOOD)
-    const audit = await prisma.auditLog.findFirst({
-      where: { projectId, action: 'AI_FUNCTION_SELF_HEALED', details: { contains: fn.id } },
-    })
+    // The heal runs after the run answers, and writes its audit row just after
+    // saving the code, so the row is waited for the way the code is.
+    let audit = null
+    for (const start = Date.now(); !audit && Date.now() - start < 4000; ) {
+      audit = await prisma.auditLog.findFirst({
+        where: { projectId, action: 'AI_FUNCTION_SELF_HEALED', details: { contains: fn.id } },
+      })
+      if (!audit) await new Promise((r) => setTimeout(r, 150))
+    }
     expect(audit).not.toBeNull()
   }, 60_000)
 })

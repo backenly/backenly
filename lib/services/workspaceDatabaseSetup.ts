@@ -2,13 +2,13 @@
  * Automatic Database Setup Service
  * 
  * This service automatically sets up workspace databases after AI generation:
- * 1. Provisions workspace database (PostgreSQL schema + MongoDB database)
+ * 1. Resolves the project's workspace schema (created with the project)
  * 2. Runs Prisma migrations to create tables in workspace schema
  * 3. Creates MongoDB collections if needed
  */
 
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
-import { provisionWorkspaceDatabase, getWorkspaceDatabaseNames } from './databaseProvisioning'
+import { getWorkspaceDatabaseNames } from './databaseProvisioning'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { Prisma } from '@prisma/client'
@@ -35,7 +35,7 @@ export interface DatabaseSetupResult {
  * Automatically set up workspace database from Prisma schema
  * 
  * This function:
- * 1. Provisions the workspace database (creates PostgreSQL schema and MongoDB database)
+ * 1. Resolves the workspace's PostgreSQL schema and recorded MongoDB database
  * 2. Extracts Prisma models from schema.prisma
  * 3. Creates tables in the workspace PostgreSQL schema
  * 4. Creates MongoDB collections if models use MongoDB
@@ -88,18 +88,27 @@ export async function setupWorkspaceDatabaseFromSchema(
       console.log('✅ Step 0: Skipping schema cleanup (bootstrap-created project with existing tables)')
     }
 
-    // 1. Provision workspace database
-    console.log('📦 Step 1: Provisioning workspace database...')
-    const provisioningResult = await provisionWorkspaceDatabase(workspaceId, projectId)
-    
-    if (!provisioningResult.success) {
+    // 1. The workspace the tables go into. Nothing is provisioned here: the
+    // schema was created with the project (lib/projects/provision.ts), or by
+    // step 0 above, and is always the project's own workspace schema. The
+    // MongoDB database is the one recorded on the workspace, if any.
+    console.log('📦 Step 1: Resolving the workspace...')
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { projectId: true, mongodbDatabase: true },
+    })
+    if (!workspace) {
+      return { success: false, error: `Workspace ${workspaceId} not found` }
+    }
+    if (workspace.projectId !== projectId) {
       return {
         success: false,
-        error: `Failed to provision database: ${provisioningResult.error}`,
+        error: `Project ID mismatch: workspace belongs to ${workspace.projectId}, not ${projectId}`,
       }
     }
 
-    const { postgresSchema, mongodbDatabase } = provisioningResult
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const mongodbDatabase = workspace.mongodbDatabase ?? undefined
 
     // 2. Get table plans from ProjectMetadata (AI-extracted from user prompt)
     console.log('🧠 Step 2: Loading AI-extracted table plans from metadata...')
