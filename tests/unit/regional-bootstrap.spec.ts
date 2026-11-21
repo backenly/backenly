@@ -8,7 +8,8 @@
  *     names, preload and probes alike;
  *   roles.sql never names an attribute the RDS master may not set, never
  *     widens an existing role, and never carries a password;
- *   the steps bootstrap.sh records are the steps verify.sql requires;
+ *   the steps bootstrap.sh records are the steps verify.sql requires, the
+ *     connection pooler's included where its login exists;
  *   the image carries every file the procedure reads, and trusts only the
  *     region's own RDS roots, from a pinned copy in the repository;
  *   the SCRAM verifier is byte for byte the one PostgreSQL computes.
@@ -20,6 +21,7 @@ import { createHash, X509Certificate } from 'crypto'
 import fs from 'fs'
 import path from 'path'
 
+import * as applicationScram from '@/lib/data-plane/scram'
 import { REQUIRED_EXTENSIONS } from '@/tools/managed-db/extension-spec'
 import { generatePassword, scramSha256Verifier } from '@/tools/managed-db/regional/scram'
 
@@ -76,10 +78,17 @@ describe('roles.sql', () => {
     expect(alters).toHaveLength(total)
     const widening = alters
       .filter((m) => m[2].startsWith('WITH'))
-      .flatMap((m) => m[2].replace(/^WITH\s+/, '').split(/\s+/))
+      // A connection limit is a number, checked below.
+      .flatMap((m) => m[2].replace(/^WITH\s+/, '').replace(/\bCONNECTION LIMIT$/, '').split(/\s+/).filter(Boolean))
       .filter((attr) => !['NOINHERIT', 'NOCREATEDB', 'NOCREATEROLE', 'NOLOGIN'].includes(attr))
     expect(widening).toEqual([])
-    expect(alters.filter((m) => m[2].startsWith('WITH')).length).toBeGreaterThanOrEqual(4)
+    expect(alters.filter((m) => m[2].startsWith('WITH')).length).toBeGreaterThanOrEqual(5)
+    // The one connection limit set on an existing role only ever lowers it:
+    // to ten, and only from above ten or from unlimited (-1).
+    expect(code.match(/CONNECTION LIMIT/g)).toHaveLength(2)
+    expect(code).toMatch(
+      /IF \(SELECT rolconnlimit FROM pg_roles WHERE rolname = 'backenly_pooler_auth'\) NOT BETWEEN 0 AND 10 THEN\s+ALTER ROLE backenly_pooler_auth WITH CONNECTION LIMIT 10;/,
+    )
   })
 
   it('carries no password, only verifiers read from the environment bootstrap.sh exports', () => {
@@ -92,6 +101,7 @@ describe('roles.sql', () => {
       'BACKENLY_AUTHENTICATOR_VERIFIER',
       'BACKENLY_BACKUP_VERIFIER',
       'BACKENLY_DBCREATOR_VERIFIER',
+      'BACKENLY_POOLER_AUTH_VERIFIER',
       'BOOTSTRAP_ROTATE',
     ])
   })
@@ -99,8 +109,11 @@ describe('roles.sql', () => {
   it('makes the database creator able to create databases and nothing else, and never grants it', () => {
     expect(code).toMatch(/CREATE ROLE backenly_dbcreator LOGIN NOINHERIT CREATEDB;/)
     expect(code.match(/CREATE ROLE backenly_dbcreator/g)).toHaveLength(1)
-    // Granted to no role, and no role granted to it, anywhere the procedure or
-    // the helpers it installs could do it.
+    // The one role granted to it: pg_signal_backend, inherited and never SET,
+    // so DROP DATABASE ... WITH (FORCE) can end the sessions in the database.
+    expect(code.match(/GRANT\s+pg_signal_backend\s+TO\s+backenly_dbcreator\s+WITH\s+INHERIT\s+TRUE,\s+SET\s+FALSE;/g)).toHaveLength(1)
+    // Granted to no role, and no other role granted to it, anywhere the
+    // procedure or the helpers it installs could do it.
     const everySql = [
       ...['roles.sql', 'project-db.sql', 'verify.sql', 'verify-project-db.sql'].map((f) => read(`${DIR}/sql/${f}`)),
       read('scripts/setup-direct-access.sql'),
@@ -110,8 +123,42 @@ describe('roles.sql', () => {
     ].map(withoutComments)
     for (const sql of everySql) {
       expect(sql).not.toMatch(/GRANT\s+backenly_dbcreator\b/i)
-      expect(sql).not.toMatch(/\bTO\s+backenly_dbcreator\b/i)
+      expect(sql.replace(/GRANT\s+pg_signal_backend\s+TO\s+backenly_dbcreator\b/g, '')).not.toMatch(/\bTO\s+backenly_dbcreator\b/i)
     }
+  })
+
+  it('makes the pooler’s login able to log in and nothing else, only when asked, and never grants it a role', () => {
+    expect(code).toMatch(/CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 10;/)
+    expect(code.match(/CREATE ROLE backenly_pooler_auth/g)).toHaveLength(1)
+    // Made only by a run given its verifier, like the database creator, and
+    // a rotation the procedure accepts.
+    expect(code).toContain(`optional constant text[] := ARRAY['backenly_dbcreator', 'backenly_pooler_auth'];`)
+    expect(code).toContain(`CONTINUE WHEN r.verifier = '' AND r.role_name = ANY (optional);`)
+    expect(code).toMatch(/managed constant text\[\] := ARRAY\[[^\]]*'backenly_pooler_auth'\]/)
+    expect(code).toContain(`WHEN 'backenly_pooler_auth' THEN 'backenly.pooler_auth_verifier'`)
+    // No role is granted to it and it to no role, anywhere the procedure or
+    // the helpers it installs could do it. pooler.sql grants it privileges on
+    // its own database only, by name.
+    const everySql = [
+      ...['roles.sql', 'pooler.sql', 'verify-pooler.sql', 'project-db.sql', 'verify.sql', 'verify-project-db.sql'].map((f) => read(`${DIR}/sql/${f}`)),
+      read('scripts/setup-direct-access.sql'),
+      read('scripts/sql/function-roles.sql'),
+      read('scripts/sql/postgrest-schema-registry.sql'),
+      read('scripts/sql/project-database-acl.sql'),
+    ].map(withoutComments)
+    for (const sql of everySql) {
+      expect(sql).not.toMatch(/GRANT\s+backenly_pooler_auth\b/i)
+      expect(sql).not.toMatch(/GRANT\s+[a-z_]+\s+TO\s+[^;]*\bbackenly_pooler_auth\b/i)
+    }
+    const grants = [...withoutComments(read(`${DIR}/sql/pooler.sql`)).matchAll(/GRANT\s+([A-Z, ]+)\s+ON\s+([^;]+?)\s+TO\s+([^;]+);/g)]
+      .filter((m) => m[3].includes('backenly_pooler_auth'))
+      .map((m) => `${m[1]} ON ${m[2]}`)
+    expect(grants).toEqual([
+      'CONNECT ON DATABASE backenly_pooler',
+      'USAGE ON SCHEMA backenly_pooler',
+      'EXECUTE ON FUNCTION backenly_pooler.lookup(text, text)',
+      'EXECUTE ON FUNCTION backenly_pooler.databases()',
+    ])
   })
 
   it('sets the application role’s createrole_self_grant for the role, which a clone keeps', () => {
@@ -127,6 +174,43 @@ describe('bootstrap.sh and verify.sql agree', () => {
     const required = [...block.matchAll(/'([a-z-]+)'/g)].map((m) => m[1])
     expect(steps).toEqual(['roles', 'postgrest', 'drift-events', 'regional-bodies', 'auth-projection', 'direct-access', 'extensions'])
     expect(required).toEqual(steps)
+  })
+
+  it('runs the pooler’s step right after the roles, only where its login exists, and verifies it there', () => {
+    const script = read(`${DIR}/bootstrap.sh`)
+    const roles = script.indexOf('\nstep roles "$HERE/sql/roles.sql"\n')
+    const pooler = script.indexOf('\nif pooler_role_exists; then\n')
+    const postgrest = script.indexOf('\nstep postgrest "$POSTGREST_FILES" postgrest_install\n')
+    expect(roles).toBeGreaterThan(0)
+    expect(pooler).toBeGreaterThan(roles)
+    expect(postgrest).toBeGreaterThan(pooler)
+    expect(script.slice(pooler, postgrest)).toContain('  step pooler "$POOLER_FILES" pooler_install\n')
+    expect(script).toContain('POOLER_FILES="$HERE/sql/pooler.sql|$HERE/sql/verify-pooler.sql"')
+    // Created by the administrator, outside a transaction, from template0.
+    expect(script).toContain('"${PSQL[@]}" -c "CREATE DATABASE $POOLER_DATABASE TEMPLATE template0"')
+    expect(script).toContain('POOLER_DATABASE=backenly_pooler\n')
+    // Every verification of the region verifies the pooler's database too.
+    expect(script.match(/"\$\{PSQL\[@\]\}" -f "\$HERE\/sql\/verify\.sql"/g)).toHaveLength(1)
+    expect(script.match(/^ +verify_region( \|\| verified=\$\?)?$/gm)).toHaveLength(3)
+    expect(script).toContain('pooler_psql -f "$HERE/sql/verify-pooler.sql" || return $?')
+    // verify.sql asks for the step only where the login exists.
+    const block = section(read(`${DIR}/sql/verify.sql`), 'FOR r IN SELECT p.* FROM pg_roles p WHERE p.rolname = \'backenly_pooler_auth\' LOOP', 'END LOOP;\n\n  -- Each login role')
+    expect(block).toContain(`WHERE s.step = 'pooler'`)
+    expect(block).toContain(`rolconnlimit <> 10`)
+  })
+
+  it('verifies the pooler’s database with the checks pooler.sql ends with, and writes nothing doing it', () => {
+    const pooler = withoutComments(read(`${DIR}/sql/pooler.sql`))
+    // Included as the last statement of pooler.sql's own transaction.
+    expect(pooler.trimEnd()).toMatch(/\\ir verify-pooler\.sql\s+COMMIT;$/)
+    expect(pooler.match(/\\ir /g)).toHaveLength(1)
+    expect(pooler).not.toContain('RAISE NOTICE \'backenly_pooler: logins table')
+    const verify = withoutComments(read(`${DIR}/sql/verify-pooler.sql`))
+    // Its statements, without the text of its messages and the privilege names it asks about.
+    const statements = verify.replace(/'(?:[^']|'')*'/g, "''")
+    expect(statements).not.toMatch(/\b(CREATE|GRANT|REVOKE|ALTER|INSERT|UPDATE|DELETE|DROP|TRUNCATE)\b|\b(BEGIN|COMMIT)\s*;/)
+    expect(verify).toContain("RAISE NOTICE 'backenly_pooler: logins table, lookup, databases and privileges as declared'")
+    expect(verify).toContain("IF current_database() <> 'backenly_pooler' THEN")
   })
 
   it('requires every step a project database records, and no other', () => {
@@ -182,6 +266,10 @@ describe('the image', () => {
 
   it('lists only files that exist', () => {
     expect(listed.filter((f) => !fs.existsSync(path.join(ROOT, f)))).toEqual([])
+  })
+
+  it('carries the pooler’s files, which pooler.sql includes by a path relative to itself', () => {
+    expect(listed).toEqual(expect.arrayContaining([`${DIR}/sql/pooler.sql`, `${DIR}/sql/verify-pooler.sql`]))
   })
 
   it('carries every file bootstrap.sh and the PostgREST installer read', () => {
@@ -270,9 +358,18 @@ describe('scramSha256Verifier', () => {
     expect(a).toMatch(/^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/)
   })
 
-  it('refuses what PostgreSQL would hash differently, and weak iteration counts', () => {
+  it('refuses what PostgreSQL would hash differently, and iteration counts the pooler cannot use', () => {
     expect(() => scramSha256Verifier('has a space')).toThrow(/printable ASCII/)
     expect(() => scramSha256Verifier('pässword')).toThrow(/printable ASCII/)
-    expect(() => scramSha256Verifier('x'.repeat(32), { iterations: 1000 })).toThrow(/at least 4096/)
+    expect(() => scramSha256Verifier('x'.repeat(32), { iterations: 1000 })).toThrow(/from 4096/)
+    expect(() => scramSha256Verifier('x'.repeat(32), { iterations: 1_000_001 })).toThrow(/to 1000000/)
+  })
+
+  it('is the application’s own, so the procedure and the pooler’s logins share one format', () => {
+    expect(scramSha256Verifier).toBe(applicationScram.scramSha256Verifier)
+    expect(read(`${DIR}/scram.ts`)).toContain(`from '../../../lib/data-plane/scram'`)
+    // The image holds no TypeScript, so nothing in it has to resolve that import.
+    const listed = read(`${DIR}/image-files.txt`).split('\n').filter((l) => l.trim() && !l.startsWith('#'))
+    expect(listed.filter((f) => /\.(ts|js)$/.test(f.trim()))).toEqual([])
   })
 })

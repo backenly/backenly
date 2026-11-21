@@ -1,56 +1,90 @@
 /**
  * DIRECT DATABASE ACCESS — the open-loop service
  * ================================================
- * Hands developers real PostgreSQL connection strings scoped to their own
- * workspace schema, without giving the app CREATEROLE or weakening the
- * governance kernel:
+ * Hands developers real PostgreSQL logins to their own project's data, without
+ * giving the app CREATEROLE or weakening the governance kernel:
  *
  *   READ_ONLY  (bkn_ro_<hex12>) — SELECT on every workspace table/sequence.
  *               psql, TablePlus, EXPLAIN, BI tools, self-serve pg_dump.
  *               Cannot mutate anything: no INSERT/UPDATE/DELETE/DDL grants.
  *   READ_WRITE (bkn_rw_<hex12>) — DML. Schema changes over it skip the
  *               approvals and History every other door goes through, and on a
- *               database shared by several projects, which every Backenly Cloud
- *               database is, a trigger, function or view created through it
- *               would run in the sessions that serve all of them. So Postgres
- *               refuses a login any schema change (no CREATE anywhere, no
- *               owner-role membership, nothing it owns): on a shared database
- *               always, and on one dedicated to a single project until its admin
- *               allows them (setSchemaChanges). Allowed, every DDL statement it
- *               runs is captured by the backenly_ddl_watch event trigger into
- *               SchemaDriftEvent, and the autonomy loop adopts or flags it
- *               (see lib/autonomy/drift-watch.ts).
+ *               database shared by several projects a trigger, function or view
+ *               created through it would run in the sessions that serve all of
+ *               them. So Postgres refuses a login any schema change (no CREATE
+ *               anywhere, no owner-role membership, nothing it owns): on a
+ *               shared database always, and on one dedicated to a single
+ *               project until its admin allows them (setSchemaChanges). Allowed,
+ *               every DDL statement it runs is captured by the backenly_ddl_watch
+ *               event trigger into SchemaDriftEvent, and the autonomy loop
+ *               adopts or flags it (see lib/autonomy/drift-watch.ts).
+ *
+ * WHERE A LOGIN CONNECTS. A project with a database of its own (tenancy
+ * 'dedicated', lib/data-plane/regional.ts) is reached through its region's
+ * connection pooler and nothing else (lib/data-plane/pooler.ts): port 5432 for
+ * sessions (migrations, psql) and 6543 for transactions (application traffic),
+ * with sslmode=verify-full against the pooler's publicly trusted certificate.
+ * Where the region does not offer the pooler (POOLER_HOST[_<REGION>] unset),
+ * such a project gets no connection string. A project in its region's shared
+ * database gets the host its operator gives (DIRECT_DB_HOST[_<REGION>]), which
+ * is how a self-hosted deployment's single project is reached, and on Backenly
+ * Cloud, where no region has one, no connection string at all. Either way the
+ * answer says why rather than naming a host nothing answers on.
+ *
+ * PASSWORDS. On a project's own database a login's password is set as a
+ * SCRAM-SHA-256 verifier computed here (lib/data-plane/scram.ts), and the
+ * identical verifier is written to the pooler's row for the login, so the
+ * pooler can sign the login in to the server. The credential row keeps that
+ * verifier (encrypted at rest), never the password:
+ *   - READ_WRITE: a random password, shown once, in the answer that made or
+ *     rotated it. Nothing can produce it again; a lost one is rotated.
+ *   - READ_ONLY: the platform itself signs in as this login (run_query), so
+ *     its password is derived from a key of the platform's (projectEnvCrypto
+ *     derivedKey) and the verifier's salt, and shown on every read, as before.
+ * Resuming a paused project re-keys its logins with what the row keeps
+ * (lib/projects/paused-logins.ts), which is the verifier, so the server and the
+ * pooler still agree afterwards. On a shared database the password itself is
+ * kept, AES-256-GCM encrypted (projectEnvCrypto), so the dashboard can show the
+ * connection string again.
  *
  * Every privileged operation is delegated to a SECURITY DEFINER function
- * installed by scripts/setup-direct-access.sql (owned by postgres, hard input
- * validation, EXECUTE granted to backenly_user only). This module never builds
- * role DDL itself.
- *
- * Passwords are AES-256-GCM encrypted at rest (projectEnvCrypto) so the
- * dashboard can re-show the connection string. Rotation terminates live
- * sessions server-side.
+ * installed by scripts/setup-direct-access.sql (hard input validation, EXECUTE
+ * granted to the application role only). This module never builds role DDL
+ * itself. Rotation terminates live sessions server-side.
  */
 
 import crypto from 'crypto'
-import { isIP } from 'net'
 import { prisma } from '@/lib/db/prisma'
 import {
+  projectDatabase,
   projectDriftEvents,
   projectRegion,
   regionDatabaseUrl,
   regionRawClient,
   regionSetting,
+  databaseClient,
   workspaceRawClient,
+  type ProjectDatabase,
 } from '@/lib/data-plane/regional'
-import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import {
+  ensurePoolerLogins,
+  isPoolerDatabaseMissing,
+  poolerEndpoint,
+  poolerHostVariable,
+  prunePoolerLogins,
+  putPoolerLogin,
+  removePoolerLogins,
+  setPoolerLoginsActive,
+  type PoolerLogin,
+} from '@/lib/data-plane/pooler'
+import { isScramVerifier, SCRAM_SALT_BYTES, scramSha256Verifier } from '@/lib/data-plane/scram'
+import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
-import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
+import { decryptValue, derivedKey, encryptValue } from '@/lib/security/projectEnvCrypto'
 import { rotateProjectChannel } from '@/lib/realtime/channels'
-import { allowlistState, type AllowlistState } from '@/lib/services/direct-access-addresses'
 import { directPostgresAllowanceFor } from '@/lib/entitlements/direct-postgres'
-import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 
 export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -60,15 +94,19 @@ export type SchemaChanges = 'allowed' | 'refused'
 /**
  * Why schema changes cannot be allowed over a read-write login here: the
  * database is shared by several projects (scripts/setup-direct-access.sql,
- * section 5c), or its direct-access helpers predate the check.
+ * section 5c), the project's own database has no pooler in its region to be
+ * reached through, or its direct-access helpers predate the check.
  */
-export type SchemaChangesUnavailable = 'shared_database' | 'helpers_outdated'
+export type SchemaChangesUnavailable = 'shared_database' | 'pooler_not_offered' | 'helpers_outdated'
 
 export const SCHEMA_CHANGES_UNAVAILABLE_MESSAGE: Record<SchemaChangesUnavailable, string> = {
   shared_database:
     "This project's database is shared with other projects, so a read-write login changes rows only and schema changes " +
     'cannot be allowed over it: a trigger, function or view made through it would run with access to every project in ' +
     'the database. Change the schema with apply_migration or the dashboard.',
+  pooler_not_offered:
+    "Schema changes over a read-write login are allowed only on a project's own database reached through the connection " +
+    "pooler, which isn't offered in this project's region yet. Change the schema with apply_migration or the dashboard.",
   helpers_outdated: 'This database needs its direct-access helpers updated before this setting can change.',
 }
 
@@ -82,25 +120,43 @@ export class SchemaChangesUnavailableError extends Error {
 }
 
 /**
- * Direct connections are not offered where nothing answers them.
- *
- * A login's connection string names the region's developer-facing host
- * (DIRECT_DB_HOST, or DIRECT_DB_HOST_<REGION>). Without one, the home region
- * used to fall back to backenly.com:5432, where nothing listens: Connect handed
- * out read-only and read-write strings that psql, TablePlus, BI tools and the
- * copied pg_dump command could never connect with (production QA re-test,
- * 2026-11-16, N4). Every Backenly Cloud database is private to its VPC, so
- * until a region has a public endpoint, no string is shown or issued for it.
- * The platform's own use of a project's read-only role, an agent's run_query,
- * dials the database directly and is unaffected (readOnlyLogin).
+ * Why a project has no connection string:
+ *   no_host             a shared database whose operator gave no host
+ *                       (DIRECT_DB_HOST): nothing outside can reach it
+ *   shared_database     on Backenly Cloud, a project still in its region's
+ *                       shared database, which nothing outside reaches;
+ *                       direct connections are for a project's own database
+ *   pooler_not_offered  a project's own database in a region whose pooler is
+ *                       not offered yet (POOLER_HOST[_<REGION>] unset)
  */
-export const DIRECT_ACCESS_UNAVAILABLE_MESSAGE =
-  "Direct Postgres connections aren't available in this project's region yet: nothing outside Backenly can reach its database, so there is no connection string to give."
+export type DirectAccessUnavailable = 'no_host' | 'shared_database' | 'pooler_not_offered'
+
+export const DIRECT_ACCESS_UNAVAILABLE_MESSAGES: Record<DirectAccessUnavailable, string> = {
+  no_host:
+    "Direct Postgres connections aren't available in this project's region yet: nothing outside Backenly can reach its database, so there is no connection string to give.",
+  shared_database:
+    "Direct Postgres connections are for projects with a database of their own, reached through Backenly's connection pooler. This project's data is in its region's shared database, which nothing outside Backenly can reach, so there is no connection string for it.",
+  pooler_not_offered:
+    "This project has a database of its own, but the connection pooler that direct Postgres connections go through isn't offered in its region yet, so there is no connection string for it yet.",
+}
+
+/**
+ * The sentence for a shared database with no host, under its old name: a
+ * self-hosted deployment whose operator gave no host reads exactly this.
+ * Production QA re-test, 2026-11-16, N4: the home region used to fall back to
+ * backenly.com:5432, where nothing listens.
+ */
+export const DIRECT_ACCESS_UNAVAILABLE_MESSAGE = DIRECT_ACCESS_UNAVAILABLE_MESSAGES.no_host
 
 export class DirectAccessUnavailableError extends Error {
   readonly code = 'DIRECT_ACCESS_UNAVAILABLE'
-  constructor(readonly region: CloudRegionId, readonly variable: string) {
-    super(DIRECT_ACCESS_UNAVAILABLE_MESSAGE)
+  constructor(
+    readonly reason: DirectAccessUnavailable,
+    readonly region: CloudRegionId,
+    /** The setting that would offer connections: DIRECT_DB_HOST[_R] for a shared database, POOLER_HOST[_R] for a project's own. */
+    readonly variable: string,
+  ) {
+    super(DIRECT_ACCESS_UNAVAILABLE_MESSAGES[reason])
     this.name = 'DirectAccessUnavailableError'
   }
 }
@@ -127,45 +183,40 @@ async function refuseWhilePaused(projectId: string): Promise<void> {
   if (project?.pausedAt) throw new DirectAccessPausedError(project.pauseReason === DELETED_PAUSE_REASON)
 }
 
+/**
+ * When a login's password is part of what is shown:
+ *   always  on every read: a login on a shared database, and the read-only
+ *           login of a project's own database, which the platform signs in with
+ *   once    only in the answer that made or rotated it: the read-write login
+ *           of a project's own database
+ *   rotate  not until it is rotated: a login made before its project had a
+ *           database of its own, whose verifier was never kept for the pooler
+ */
+export type PasswordShown = 'always' | 'once' | 'rotate'
+
+/** In a connection string whose password is not shown. */
+export const PASSWORD_PLACEHOLDER = '[YOUR-PASSWORD]'
+
 export interface DirectAccessCredential {
   mode: DirectAccessMode
   roleName: string
-  password: string
+  /** Null where it is not shown (passwordShown). */
+  password: string | null
+  passwordShown: PasswordShown
   host: string
+  /** The session port through the pooler (5432), or the database's own port. */
   port: number
   database: string
   /**
-   * The string for psql, pg_dump, psycopg and other libpq tools. Where the
-   * region's endpoint fronts its RDS instance, it verifies the server in full:
-   * the instance's own name (which its certificate carries) as the host, the
-   * endpoint's fixed address as hostaddr, and the CA bundle as sslrootcert.
+   * The string for psql, pg_dump, migrations and anything that holds a
+   * session. Through the pooler: port 5432, sslmode=verify-full. With
+   * PASSWORD_PLACEHOLDER in place of a password that is not shown.
    */
   connectionString: string
-  /**
-   * Where the region's endpoint fronts its RDS instance: the string for clients
-   * that read sslmode=verify-ca from a URL (Go's pgx, Python's asyncpg, Rust's
-   * sqlx), on the endpoint's own name, verifying the certificate's chain
-   * against the CA bundle without its name.
-   */
-  verifyCaConnectionString?: string
-  /**
-   * Where the region's endpoint fronts its RDS instance: settings for
-   * node-postgres (and Drizzle or Prisma on it), which verifies the host name
-   * even under verify-ca, and sets the name it checks to the host whenever the
-   * host is a name (pg/lib/connection.js). So the host is the endpoint's
-   * address, which it leaves alone, and ssl.servername the instance's name:
-   * pass them with ssl: { ca: <the CA file's contents>, servername }.
-   */
-  nodePostgres?: {
-    host: string
-    port: number
-    database: string
-    user: string
-    password: string
-    ssl: { servername: string; caFile: string; caUrl: string }
-  }
-  /** Where the strings name a CA bundle: its file name, as the strings name it, and where to download it. */
-  caBundle?: { file: string; url: string }
+  /** Through the pooler only: port 6543, transaction pooling, for application traffic and serverless functions. */
+  transactionConnectionString?: string
+  /** Through the pooler only: the transaction-pooling port. */
+  transactionPort?: number
   psqlCommand: string
   pgDumpCommand: string
   createdAt: string
@@ -182,19 +233,17 @@ export interface DirectAccessStatus {
   available: boolean
   /** Why not, in a sentence, where it cannot. */
   unavailable?: string
+  unavailableReason?: DirectAccessUnavailable
+  /** Where the project's data is: its region's shared database, or one of its own. */
+  tenancy: ProjectDatabase['tenancy']
+  /** Where connections go through the pooler: its host, both ports, and which to use for what. */
+  pooler?: { host: string; sessionPort: number; transactionPort: number; guidance: string[] }
   credentials: DirectAccessCredential[]
   /**
    * Where connections cannot be made: the logins that exist, by name, so they
    * can still be revoked. Their passwords and strings are not given.
    */
   logins?: Array<{ mode: DirectAccessMode; roleName: string; createdAt: string; rotatedAt: string | null }>
-  /**
-   * Where connections can be made: the addresses this project allows
-   * (lib/services/direct-access-addresses.ts). Where the region's endpoint
-   * admits only allowed addresses (`enforced`), it admits those of every
-   * project in the region; the login's password is what reaches this one.
-   */
-  allowlist?: AllowlistState
   /**
    * Where connections can be made: how many each login may hold at once, by
    * the project's plan (Postgres CONNECTION LIMIT). Null where the database
@@ -203,6 +252,14 @@ export interface DirectAccessStatus {
   connectionLimit?: number | null
   pendingDriftEvents: number
 }
+
+/** Which port is for what, said wherever pooler strings are handed out (console, MCP). */
+export const POOLER_GUIDANCE: string[] = [
+  'Port 5432 is session pooling: use it for migrations, psql, pg_dump and anything that holds a session (LISTEN, advisory locks, session SET).',
+  'Port 6543 is transaction pooling: use it for application traffic and serverless functions.',
+  'Prisma: the application on 6543 (url) and Prisma Migrate on 5432 (directUrl).',
+  "sslmode=verify-full checks the pooler's publicly trusted certificate. psql and pg_dump 16 or later take sslrootcert=system as your system's trusted roots, which the commands given here add.",
+]
 
 // ── Naming ────────────────────────────────────────────────────────────────────
 
@@ -215,154 +272,393 @@ export function directAccessRoleNames(projectId: string): { ro: string; rw: stri
 
 function generatePassword(): string {
   // 24 random bytes → 32 chars base64url: URL-safe (no encoding surprises in
-  // connection strings) and satisfies the definer function's length floor.
+  // connection strings), printable ASCII without spaces (what a SCRAM verifier
+  // needs, lib/data-plane/scram.ts), and past the definer function's length
+  // floor.
   return crypto.randomBytes(24).toString('base64url')
+}
+
+// ── Passwords on a project's own database ────────────────────────────────────
+
+/** Never the key projectEnvCrypto encrypts with, and versioned so it can be replaced. */
+const READ_ONLY_PASSWORD_PURPOSE = 'backenly/project-database-read-only-login/v1'
+
+/**
+ * The read-only login's password on a project's own database, from its role
+ * name and its verifier's salt: 43 characters of base64url. The platform signs
+ * in as this login for run_query, so it must be able to produce the password;
+ * deriving it from the salt the verifier already carries lets the credential
+ * row keep the verifier alone, which is what a resume re-keys the login with.
+ */
+function readOnlyPassword(roleName: string, salt: Buffer): string {
+  return crypto.createHmac('sha256', derivedKey(READ_ONLY_PASSWORD_PURPOSE)).update(`${roleName}\n`).update(salt).digest('base64url')
+}
+
+/** The iteration count and salt a verifier carries (SCRAM-SHA-256$<iterations>:<salt>$...). */
+function parametersOf(verifier: string): { iterations: number; salt: Buffer } {
+  const [, iterations, salt] = /^SCRAM-SHA-256\$(\d+):([^$]+)\$/.exec(verifier) ?? []
+  return { iterations: Number(iterations), salt: Buffer.from(salt ?? '', 'base64') }
+}
+
+/** A new login secret on a project's own database: the password, and the verifier the server and the pooler get. */
+function newLoginSecret(roleName: string, mode: DirectAccessMode): { password: string; verifier: string } {
+  const salt = crypto.randomBytes(SCRAM_SALT_BYTES)
+  const password = mode === 'READ_ONLY' ? readOnlyPassword(roleName, salt) : generatePassword()
+  return { password, verifier: scramSha256Verifier(password, { salt }) }
+}
+
+/**
+ * The read-only login's password from the verifier its row keeps, checked
+ * against that verifier, so a platform key changed since says so instead of
+ * failing every run_query as a wrong password.
+ */
+function readOnlyPasswordFrom(roleName: string, verifier: string): string {
+  const { iterations, salt } = parametersOf(verifier)
+  const password = readOnlyPassword(roleName, salt)
+  if (scramSha256Verifier(password, { salt, iterations }) !== verifier) {
+    throw new Error(
+      `The read-only login ${roleName} was made under another platform key, so its password can't be produced. Rotate it in Connect → Postgres.`,
+    )
+  }
+  return password
+}
+
+type CredentialRow = {
+  mode: string
+  roleName: string
+  passwordCipher: string
+  passwordIv: string
+  passwordTag: string
+  createdAt: Date
+  rotatedAt: Date | null
+}
+
+/** What a credential row keeps: a project database login's verifier, or the password on a shared database. */
+function storedSecret(row: Pick<CredentialRow, 'passwordCipher' | 'passwordIv' | 'passwordTag'>): string {
+  return decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
 }
 
 // ── Connection info ───────────────────────────────────────────────────────────
 
+export type ConnectionTarget =
+  | { kind: 'pooler'; host: string; sessionPort: number; transactionPort: number; database: string }
+  | { kind: 'direct'; host: string; port: number; database: string; sslmode: 'require' | 'prefer' }
+
+type Env = Readonly<Record<string, string | undefined>>
+
 /**
- * The RDS CA bundle every Backenly image trusts (docker/web.Dockerfile builds
- * /app/certs/rds-ca-cloud-regions.pem from docker/certs), published byte for
- * byte at this path (public/certs) so a client can verify the server with it.
- * The strings name the file; the console and MCP say where to download it.
+ * Backenly Cloud, where a shared database is never reached from outside. Only
+ * chooses the sentence: a self-hosted deployment with no host says no_host.
+ * Read here rather than through lib/edition, which this module's importers
+ * reach through project provisioning (the cycle lib/entitlements notes).
  */
-export const CA_BUNDLE_FILE = 'rds-ca-cloud-regions.pem'
-export const CA_BUNDLE_PATH = `/certs/${CA_BUNDLE_FILE}`
-
-interface ConnectionTarget {
-  host: string
-  port: number
-  database: string
-  sslmode: string
-  /**
-   * Where the region's endpoint fronts its RDS instance (DIRECT_DB_TLS_HOST and
-   * DIRECT_DB_HOSTADDR, regional forms as for DIRECT_DB_HOST): the instance's
-   * own name, which its certificate carries and a name of Backenly's would not,
-   * and the endpoint's fixed address, so libpq connects to the address and
-   * verifies the name.
-   */
-  verified: { tlsHost: string; hostaddr: string } | null
-}
-
-const misconfigurationSaid = new Set<string>()
-
-/** DIRECT_DB_TLS_HOST and DIRECT_DB_HOSTADDR for the region, when both are set and usable. */
-function verifiedEndpoint(region: CloudRegionId): { tlsHost: string; hostaddr: string } | null {
-  const tls = regionSetting('DIRECT_DB_TLS_HOST', region)
-  const addr = regionSetting('DIRECT_DB_HOSTADDR', region)
-  const tlsHost = tls.value?.trim()
-  const hostaddr = addr.value?.trim()
-  if (!tlsHost && !hostaddr) return null
-  const problem =
-    !tlsHost || !hostaddr
-      ? `${tlsHost ? tls.variable : addr.variable} is set without ${tlsHost ? addr.variable : tls.variable}`
-      : !isIP(hostaddr)
-        ? `${addr.variable} is not an IP address`
-        : !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(tlsHost)
-          ? `${tls.variable} is not a host name`
-          : null
-  if (problem) {
-    if (!misconfigurationSaid.has(problem)) {
-      misconfigurationSaid.add(problem)
-      console.warn(`[DirectAccess] region=${region}: ${problem}, so its strings keep sslmode=require until both are set`)
-    }
-    return null
-  }
-  return { tlsHost: tlsHost!, hostaddr: hostaddr! }
+function cloudEdition(env: Env = process.env): boolean {
+  return env.BACKENLY_EDITION?.trim().toLowerCase() === 'cloud'
 }
 
 /**
- * Where a developer connects to reach a project's data: the database in the
- * project's region, where its role exists.
+ * Where a developer connects to reach a project's data. Pure: the project's
+ * placement and the environment decide it.
  *
- * Each region needs its own developer-facing host: DIRECT_DB_HOST for the home
- * region, DIRECT_DB_HOST_<REGION> for any other (DIRECT_DB_PORT and its
- * regional form optional). Without one this refuses with
- * DirectAccessUnavailableError rather than name a host nothing answers on:
- * another region's, or backenly.com. Outside production the home region keeps
- * localhost, the developer's own database.
+ * A project's own database: the region's pooler (POOLER_HOST for the home
+ * region, POOLER_HOST_<REGION> for any other), its session and transaction
+ * ports, and the database's own name. Without one this refuses with
+ * DirectAccessUnavailableError (pooler_not_offered).
+ *
+ * A shared database: the host its operator gives (DIRECT_DB_HOST for the home
+ * region, DIRECT_DB_HOST_<REGION> for any other, DIRECT_DB_PORT and its
+ * regional form optional), and outside production the home region keeps
+ * localhost, the developer's own database. Without one this refuses rather
+ * than name a host nothing answers on.
  */
-function connectionTargetFor(region: CloudRegionId, _projectId: string): ConnectionTarget {
-  const isProd = process.env.NODE_ENV === 'production'
+export function directConnectionTarget(placement: ProjectDatabase, env: Env = process.env): ConnectionTarget {
+  const { region } = placement
+  if (placement.tenancy === 'dedicated') {
+    const pooler = poolerEndpoint(region, env)
+    if (!pooler) throw new DirectAccessUnavailableError('pooler_not_offered', region, poolerHostVariable(region))
+    return { kind: 'pooler', host: pooler.host, sessionPort: pooler.sessionPort, transactionPort: pooler.transactionPort, database: placement.database as string }
+  }
+  const isProd = env.NODE_ENV === 'production'
   let database = 'backenly'
   try {
-    const url = new URL(regionDatabaseUrl(region) ?? '')
+    const url = new URL(regionDatabaseUrl(region, 'app', env) ?? '')
     database = url.pathname.replace(/^\//, '').split('?')[0] || 'backenly'
   } catch {
     /* keep default */
   }
-  const host = regionSetting('DIRECT_DB_HOST', region)
+  const host = regionSetting('DIRECT_DB_HOST', region, env)
   const hostname = host.value || (!isProd && region === HOME_REGION ? 'localhost' : '')
-  if (!hostname) throw new DirectAccessUnavailableError(region, host.variable)
+  if (!hostname) throw new DirectAccessUnavailableError(cloudEdition(env) ? 'shared_database' : 'no_host', region, host.variable)
   return {
+    kind: 'direct',
     host: hostname,
-    port: parseInt(regionSetting('DIRECT_DB_PORT', region).value ?? '5432', 10),
+    port: parseInt(regionSetting('DIRECT_DB_PORT', region, env).value ?? '5432', 10),
     database,
-    // Where the endpoint is not described further (a self-hosted server with a
-    // certificate of its own): require (encrypted, no CA verification). Local
-    // dev clusters usually have ssl off, so don't demand it there.
+    // A self-hosted server with a certificate of its own: require (encrypted,
+    // no CA verification). Local dev clusters usually have ssl off, so don't
+    // demand it there.
     sslmode: isProd ? 'require' : 'prefer',
-    verified: verifiedEndpoint(region),
   }
 }
 
 async function connectionTarget(projectId: string): Promise<ConnectionTarget> {
-  return connectionTargetFor(await projectRegion(projectId), projectId)
+  return directConnectionTarget(await projectDatabase(projectId))
 }
 
-function buildCredential(
-  row: { mode: string; roleName: string; passwordCipher: string; passwordIv: string; passwordTag: string; createdAt: Date; rotatedAt: Date | null },
-  schema: string,
+/**
+ * The strings a login is handed for a target: through the pooler a session
+ * string (5432) and a transaction string (6543), both sslmode=verify-full;
+ * elsewhere one string. PASSWORD_PLACEHOLDER stands in for a password that is
+ * not shown. Pure.
+ */
+export function credentialStrings(
   target: ConnectionTarget,
-): DirectAccessCredential {
-  const { host, port, database, sslmode, verified } = target
-  const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
-  const login = `${row.roleName}:${password}`
-  // The RDS certificate names only the instance's own endpoint, so verify-full
-  // needs that name as the host and the endpoint's address as hostaddr, which
-  // only libpq understands. Clients that implement verify-ca verify the chain
-  // on the endpoint's own name (owner's decision, 2026-11-17). node-postgres
-  // does neither: it gets settings that verify in full (nodePostgres).
-  const connectionString = verified
-    ? `postgresql://${login}@${verified.tlsHost}:${port}/${database}?hostaddr=${verified.hostaddr}&sslmode=verify-full&sslrootcert=${CA_BUNDLE_FILE}`
-    : `postgresql://${login}@${host}:${port}/${database}?sslmode=${sslmode}`
-  const caUrl = `${resolvePublicBaseUrl({ headers: new Headers() })}${CA_BUNDLE_PATH}`
-  const otherClients = verified
-    ? {
-        verifyCaConnectionString: `postgresql://${login}@${host}:${port}/${database}?sslmode=verify-ca&sslrootcert=${CA_BUNDLE_FILE}`,
-        nodePostgres: {
-          host: verified.hostaddr,
-          port,
-          database,
-          user: row.roleName,
-          password,
-          ssl: { servername: verified.tlsHost, caFile: CA_BUNDLE_FILE, caUrl },
-        },
-        caBundle: { file: CA_BUNDLE_FILE, url: caUrl },
-      }
-    : {}
+  roleName: string,
+  password: string | null,
+  schema: string,
+): Pick<
+  DirectAccessCredential,
+  'host' | 'port' | 'database' | 'connectionString' | 'transactionConnectionString' | 'transactionPort' | 'psqlCommand' | 'pgDumpCommand'
+> {
+  const login = `${roleName}:${password ?? PASSWORD_PLACEHOLDER}`
+  let connectionString: string
+  let libpq: string
+  let port: number
+  let pooled: Pick<DirectAccessCredential, 'transactionConnectionString' | 'transactionPort'> = {}
+  if (target.kind === 'pooler') {
+    port = target.sessionPort
+    connectionString = `postgresql://${login}@${target.host}:${port}/${target.database}?sslmode=verify-full`
+    pooled = {
+      transactionConnectionString: `postgresql://${login}@${target.host}:${target.transactionPort}/${target.database}?sslmode=verify-full`,
+      transactionPort: target.transactionPort,
+    }
+    // psql and pg_dump 16 and later take the system's trusted roots this way;
+    // without it libpq looks only for ~/.postgresql/root.crt. Not in the
+    // strings themselves: node-postgres would read "system" as a file name.
+    libpq = `${connectionString}&sslrootcert=system`
+  } else {
+    port = target.port
+    connectionString = `postgresql://${login}@${target.host}:${port}/${target.database}?sslmode=${target.sslmode}`
+    libpq = connectionString
+  }
   return {
-    mode: row.mode as DirectAccessMode,
-    roleName: row.roleName,
-    password,
-    host,
+    host: target.host,
     port,
-    database,
+    database: target.database,
     connectionString,
-    ...otherClients,
+    ...pooled,
     // search_path is pinned per-role server-side, so plain psql lands in the
     // project's schema — `\dt` just works.
-    psqlCommand: `psql "${connectionString}"`,
+    psqlCommand: `psql "${libpq}"`,
     // --enable-row-security is load-bearing: pg_dump defaults row_security to
     // OFF, and PostgreSQL then refuses to dump any RLS table the NOBYPASSRLS
     // bkn_ro_ role is subject to ("query would be affected by row-level
     // security policy"). With the flag on, the role reads through its
-    // pass-through SELECT policy and the dump completes.
-    pgDumpCommand: `pg_dump "${connectionString}" --schema="${schema}" --enable-row-security --no-owner --no-privileges > backup.sql`,
+    // pass-through SELECT policy and the dump completes. On the session port.
+    pgDumpCommand: `pg_dump "${libpq}" --schema="${schema}" --enable-row-security --no-owner --no-privileges > backup.sql`,
+  }
+}
+
+/**
+ * A credential as shown. `made` is the password just set, where the caller has
+ * it (provision, rotate): the only time a read-write login's password on a
+ * project's own database is shown.
+ */
+function buildCredential(row: CredentialRow, schema: string, target: ConnectionTarget, made?: { password: string }): DirectAccessCredential {
+  const stored = storedSecret(row)
+  const verifierKept = isScramVerifier(stored)
+  let password: string | null
+  let passwordShown: PasswordShown
+  if (target.kind === 'pooler' && !verifierKept) {
+    // A password kept as it is: no verifier of it was kept for the pooler's
+    // row, so it cannot sign in through the pooler, and is shown nowhere
+    // until the login is rotated.
+    passwordShown = 'rotate'
+    password = null
+  } else if (target.kind === 'direct') {
+    passwordShown = 'always'
+    password = made?.password ?? (verifierKept ? null : stored)
+  } else if (row.mode === 'READ_ONLY') {
+    passwordShown = 'always'
+    try {
+      password = made?.password ?? readOnlyPasswordFrom(row.roleName, stored)
+    } catch {
+      // Made under a platform key that has changed since: a rotation gives it
+      // a password that can be produced again.
+      passwordShown = 'rotate'
+      password = null
+    }
+  } else {
+    passwordShown = 'once'
+    password = made?.password ?? null
+  }
+  return {
+    mode: row.mode as DirectAccessMode,
+    roleName: row.roleName,
+    password,
+    passwordShown,
+    ...credentialStrings(target, row.roleName, password, schema),
     createdAt: row.createdAt.toISOString(),
     rotatedAt: row.rotatedAt ? row.rotatedAt.toISOString() : null,
   }
+}
+
+// ── The pooler's rows ─────────────────────────────────────────────────────────
+//
+// A project database's login is served by the pooler only through its row in
+// backenly_pooler.logins (lib/data-plane/pooler.ts), which carries the same
+// verifier the server holds. The row is written LAST when a login is made or
+// rotated, after the server has the verifier and the credential row records
+// it: until then the pooler cannot sign the login in, which is the safe way to
+// fail. It is turned off FIRST when a login is revoked, before the role is
+// dropped. And the pooler serves a row only while its role can log in, so a
+// login made NOLOGIN (a pause) or dropped is refused even before its row
+// changes.
+
+const poolerWriteFailedSaid = new Set<string>()
+
+/** A pooler write that must not hold back what called it; logged by its code, never its values. */
+async function quietly(what: string, region: CloudRegionId, write: () => Promise<unknown>): Promise<void> {
+  try {
+    await write()
+  } catch (err) {
+    // No pooler database on the instance yet: no row to change.
+    if (isPoolerDatabaseMissing(err)) return
+    const key = `${region}:${what}`
+    if (!poolerWriteFailedSaid.has(key)) {
+      poolerWriteFailedSaid.add(key)
+      console.warn(`[DirectAccess] region=${region}: ${what} not done (${err instanceof Error ? err.message : 'Error'}); the scheduled pass tries again`)
+    }
+  }
+}
+
+/** The pooler's row for a project database's login, from its credential row; null where its row keeps no verifier. */
+function poolerLoginOf(
+  row: Pick<CredentialRow, 'roleName' | 'passwordCipher' | 'passwordIv' | 'passwordTag'>,
+  database: string,
+  active: boolean,
+): PoolerLogin | null {
+  const verifier = storedSecret(row)
+  return isScramVerifier(verifier) ? { rolname: row.roleName, verifier, database, active } : null
+}
+
+/**
+ * Bring the pooler's rows for a project's logins in line with what their
+ * credential rows keep, where its region offers the pooler: a missing row (the
+ * pooler was offered after the login was made, or a write failed) is written,
+ * a different verifier corrected, and a row turned off is turned on again
+ * unless the project is paused. Never throws.
+ */
+async function ensureProjectPoolerLogins(projectId: string, placement: ProjectDatabase, rows: CredentialRow[]): Promise<void> {
+  if (placement.tenancy !== 'dedicated' || !poolerEndpoint(placement.region) || rows.length === 0) return
+  try {
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true } })
+    const logins = rows
+      .map((r) => poolerLoginOf(r, placement.database as string, !project?.pausedAt))
+      .filter((l): l is PoolerLogin => l !== null)
+    await quietly('pooler logins', placement.region, () => ensurePoolerLogins(placement.region, logins))
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: pooler logins not checked: ${err instanceof Error ? err.name : 'Error'}`)
+  }
+}
+
+/**
+ * Stop the pooler serving a project's logins, for a pause or a deletion
+ * (lib/projects), beside making the logins NOLOGIN and ending their sessions
+ * there: the pooler serves no login that cannot log in, so this is the second
+ * of two locks, not the only one. Answers how many rows were turned off.
+ * Never throws.
+ */
+export async function stopPoolerLogins(projectId: string): Promise<number> {
+  let changed = 0
+  try {
+    const placement = await projectDatabase(projectId)
+    if (placement.tenancy !== 'dedicated') return 0
+    const { ro, rw } = directAccessRoleNames(projectId)
+    await quietly('pooler logins off', placement.region, async () => {
+      changed = await setPoolerLoginsActive(placement.region, [ro, rw], false)
+    })
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: pooler logins not turned off: ${err instanceof Error ? err.name : 'Error'}`)
+  }
+  return changed
+}
+
+/**
+ * Serve a project's logins through the pooler again, for a resume or a
+ * restore (lib/projects), once its logins can log in again. Nothing while the
+ * project is paused. Never throws.
+ */
+export async function restorePoolerLogins(projectId: string): Promise<void> {
+  try {
+    const placement = await projectDatabase(projectId)
+    if (placement.tenancy !== 'dedicated') return
+    const rows = await prisma.databaseCredential.findMany({ where: { projectId } })
+    await ensureProjectPoolerLogins(projectId, placement, rows)
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: pooler logins not restored: ${err instanceof Error ? err.name : 'Error'}`)
+  }
+}
+
+/**
+ * Remove a project's rows from the pooler, for a deletion (lib/projects), which
+ * may already have removed the project's row: then name its region. The
+ * scheduled pass removes any a failure left once their roles are gone.
+ * Never throws.
+ */
+export async function forgetPoolerLogins(projectId: string, region?: CloudRegionId): Promise<void> {
+  try {
+    const where = region ?? (await projectRegion(projectId))
+    const { ro, rw } = directAccessRoleNames(projectId)
+    await quietly('pooler logins removed', where, () => removePoolerLogins(where, [ro, rw]))
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: pooler logins not removed: ${err instanceof Error ? err.name : 'Error'}`)
+  }
+}
+
+/**
+ * The scheduled pass (instrumentation.ts, from home): in every region that
+ * offers the pooler, each project database login's row made as its credential
+ * row says (ensureProjectPoolerLogins), and the rows of logins or databases
+ * that no longer exist removed. Never throws: a region this process cannot
+ * reach is said once and left for the next pass.
+ */
+export async function reconcilePoolerLogins(): Promise<{ regions: number; changed: number; pruned: number }> {
+  const offered = CLOUD_REGIONS.map((r) => r.id).filter((id) => poolerEndpoint(id) !== null)
+  if (offered.length === 0) return { regions: 0, changed: 0, pruned: 0 }
+  const rows = await prisma.databaseCredential.findMany().catch(() => [])
+  const byProject = new Map<string, typeof rows>()
+  for (const r of rows) byProject.set(r.projectId, [...(byProject.get(r.projectId) ?? []), r])
+  const paused = new Set(
+    (
+      await prisma.project
+        .findMany({ where: { id: { in: [...byProject.keys()] }, pausedAt: { not: null } }, select: { id: true } })
+        .catch(() => [] as Array<{ id: string }>)
+    ).map((p) => p.id),
+  )
+  const logins = new Map<CloudRegionId, PoolerLogin[]>()
+  for (const [projectId, projectRows] of byProject) {
+    try {
+      const placement = await projectDatabase(projectId)
+      if (placement.tenancy !== 'dedicated' || !offered.includes(placement.region)) continue
+      for (const r of projectRows) {
+        const login = poolerLoginOf(r, placement.database as string, !paused.has(projectId))
+        if (login) logins.set(placement.region, [...(logins.get(placement.region) ?? []), login])
+      }
+    } catch (err) {
+      console.warn(`[DirectAccess] project=${projectId}: pooler logins not checked: ${err instanceof Error ? err.name : 'Error'}`)
+    }
+  }
+  let changed = 0
+  let pruned = 0
+  for (const region of offered) {
+    await quietly('pooler logins', region, async () => {
+      changed += await ensurePoolerLogins(region, logins.get(region) ?? [])
+      pruned += await prunePoolerLogins(region)
+    })
+  }
+  if (changed + pruned > 0) console.log(`[DirectAccess] pooler logins: ${changed} written, ${pruned} removed, in ${offered.length} region(s)`)
+  return { regions: offered.length, changed, pruned }
 }
 
 // ── Provision / rotate / revoke ───────────────────────────────────────────────
@@ -370,11 +666,12 @@ function buildCredential(
 export async function provisionDirectAccess(projectId: string, mode: DirectAccessMode): Promise<DirectAccessCredential> {
   assertValidProjectId(projectId)
   // Where the developer will connect, settled before any role exists: a
-  // region with no public host configured refuses here, not after the fact.
-  const target = await connectionTarget(projectId)
+  // region with nothing to connect through refuses here, not after the fact.
+  const placement = await projectDatabase(projectId)
+  const target = directConnectionTarget(placement)
   const schema = await resolveWorkspaceSchema(projectId)
-  const row = await provisionRole(projectId, mode, schema)
-  return withSchemaChanges(projectId, buildCredential(row, schema, target))
+  const { row, password } = await provisionRole(projectId, mode, schema, placement)
+  return withSchemaChanges(projectId, buildCredential(row, schema, target, { password }))
 }
 
 /**
@@ -395,13 +692,25 @@ async function schemaChangesOf(projectId: string, roleName: string): Promise<Sch
 
 /**
  * Why schema changes cannot be allowed over the project's read-write login, or
- * null where they can. The database answers (public.backenly_direct_shared_database),
- * not the edition: it is shared unless a superuser marked it as dedicated to one
- * project and it holds one, which a self-hosted deployment's is
- * (scripts/sql/dedicated-database.sql, run by scripts/selfhost.ts). A database
- * whose helpers predate the question cannot answer it, and is treated as unable.
+ * null where they can.
+ *
+ * A project's own database allows them only where its region offers the
+ * pooler, the one way a login reaches it. On Backenly Cloud a project in its
+ * region's shared database never does. Then the database answers
+ * (public.backenly_direct_shared_database): it is shared unless it is marked as
+ * holding one project and it does, which a project's own database is
+ * (tools/managed-db/regional/sql/project-db.sql) and so is a self-hosted
+ * deployment's (scripts/sql/dedicated-database.sql, run by scripts/selfhost.ts).
+ * A database whose helpers predate the question cannot answer it, and is
+ * treated as unable.
  */
 async function schemaChangesUnavailable(projectId: string): Promise<SchemaChangesUnavailable | null> {
+  const placement = await projectDatabase(projectId)
+  if (placement.tenancy === 'dedicated') {
+    if (!poolerEndpoint(placement.region)) return 'pooler_not_offered'
+  } else if (cloudEdition()) {
+    return 'shared_database'
+  }
   const db = await workspaceRawClient(projectId)
   const [probe] = await db.$queryRaw<Array<{ present: boolean }>>`
     SELECT to_regprocedure('public.backenly_direct_shared_database()') IS NOT NULL AS present`
@@ -423,7 +732,8 @@ async function withSchemaChanges(projectId: string, credential: DirectAccessCred
  * Allow or refuse schema changes over the project's read-write login. Refused
  * is the default for a new one: they skip the approvals and History that
  * apply_migration and the dashboard go through, and are only observed as drift
- * afterwards. On a database shared by several projects they are never allowed
+ * afterwards. They can be allowed only on a project's own database reached
+ * through the pooler, and never on a database shared by several projects
  * (SchemaChangesUnavailableError): asked here first, so the person is told why,
  * and refused by the database whatever this says. Applied by the grants sync,
  * which runs straight after.
@@ -466,22 +776,37 @@ export async function setSchemaChanges(projectId: string, allowed: boolean): Pro
  * Create (or re-key) a project's role and record its credential. Roles are
  * cluster-wide, so it is created on the database holding the project's data,
  * in its region: a role anywhere else could never reach the schema.
+ *
+ * On a project's own database the role is given a verifier computed here, the
+ * credential row keeps that verifier, and the pooler's row is written last,
+ * after the grants and the realtime channel are in place, so the login is
+ * served only once it is complete. Answers the password, which for a
+ * read-write login there is never seen again.
  */
-async function provisionRole(projectId: string, mode: DirectAccessMode, schema: string) {
+async function provisionRole(
+  projectId: string,
+  mode: DirectAccessMode,
+  schema: string,
+  placement: ProjectDatabase,
+): Promise<{ row: CredentialRow & { id: string }; password: string }> {
   // Creating or re-keying a login gives it LOGIN: not while the project is paused.
   await refuseWhilePaused(projectId)
   const db = await workspaceRawClient(projectId)
   const names = directAccessRoleNames(projectId)
   const roleName = mode === 'READ_ONLY' ? names.ro : names.rw
-  const password = generatePassword()
+  const secret = placement.tenancy === 'dedicated' ? newLoginSecret(roleName, mode) : null
+  const password = secret ? secret.password : generatePassword()
+  // What the server is given and the row keeps: the verifier on a project's
+  // own database (PostgreSQL stores a verifier as it is), the password elsewhere.
+  const kept = secret ? secret.verifier : password
 
   // Definer function validates names server-side and is idempotent (re-keys if
   // the role already exists — recovers cleanly from a half-finished provision).
-  await db.$queryRaw`SELECT public.backenly_direct_create_role(${roleName}, ${password}, ${schema}, ${mode})`
+  await db.$queryRaw`SELECT public.backenly_direct_create_role(${roleName}, ${kept}, ${schema}, ${mode})`
   // The plan's number of connections at once, from the login's first moment.
   await applyConnectionLimit(projectId, [roleName])
 
-  const enc = encryptValue(password)
+  const enc = encryptValue(kept)
   const row = await prisma.databaseCredential.upsert({
     where: { projectId_mode: { projectId, mode } },
     create: {
@@ -508,6 +833,11 @@ async function provisionRole(projectId: string, mode: DirectAccessMode, schema: 
   // channel, so what an earlier key could read stops being the channel.
   if (mode === 'READ_WRITE') await rotateProjectChannel(projectId)
 
+  // Last: from here the pooler serves the login.
+  if (secret && poolerEndpoint(placement.region)) {
+    await putPoolerLogin(placement.region, { rolname: roleName, verifier: secret.verifier, database: placement.database as string, active: true })
+  }
+
   await prisma.auditLog.create({
     data: {
       projectId,
@@ -518,22 +848,24 @@ async function provisionRole(projectId: string, mode: DirectAccessMode, schema: 
     },
   }).catch(() => {})
 
-  return row
+  return { row, password }
 }
 
 /**
  * The role and password the platform itself connects as for an agent's
  * read-only SQL (lib/mcp/read-query.ts), provisioning the role on first use.
  * No public host is involved: that connection dials the project's database
- * directly, so a region without a developer-facing host still works.
+ * directly, so a region nothing outside can connect to still works. On a
+ * project's own database the password is derived from the verifier the row
+ * keeps (readOnlyPasswordFrom).
  */
 export async function readOnlyLogin(projectId: string): Promise<{ roleName: string; password: string }> {
   assertValidProjectId(projectId)
   const row =
     (await prisma.databaseCredential.findUnique({ where: { projectId_mode: { projectId, mode: 'READ_ONLY' } } })) ??
-    (await provisionRole(projectId, 'READ_ONLY', await resolveWorkspaceSchema(projectId)))
-  const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
-  return { roleName: row.roleName, password }
+    (await provisionRole(projectId, 'READ_ONLY', await resolveWorkspaceSchema(projectId), await projectDatabase(projectId))).row
+  const stored = storedSecret(row)
+  return { roleName: row.roleName, password: isScramVerifier(stored) ? readOnlyPasswordFrom(row.roleName, stored) : stored }
 }
 
 export async function rotateDirectAccess(projectId: string, mode: DirectAccessMode): Promise<DirectAccessCredential> {
@@ -543,15 +875,21 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
   })
   if (!existing) throw new Error(`No ${mode} credential to rotate — provision first.`)
 
-  const target = await connectionTarget(projectId)
+  const placement = await projectDatabase(projectId)
+  const target = directConnectionTarget(placement)
   const schema = await resolveWorkspaceSchema(projectId)
-  const password = generatePassword()
-  // The role lives on the project's database, in its region.
+  const secret = placement.tenancy === 'dedicated' ? newLoginSecret(existing.roleName, mode) : null
+  const password = secret ? secret.password : generatePassword()
+  const kept = secret ? secret.verifier : password
+  // The role lives on the project's database, in its region. The helper ends
+  // the login's sessions, so the old password stops working now. Through the
+  // pooler, the old verifier stays in the pooler's row until the last step
+  // below: until then neither password signs in, the safe way round.
   const db = await workspaceRawClient(projectId)
-  await db.$queryRaw`SELECT public.backenly_direct_set_password(${existing.roleName}, ${password})`
+  await db.$queryRaw`SELECT public.backenly_direct_set_password(${existing.roleName}, ${kept})`
   await applyConnectionLimit(projectId, [existing.roleName])
 
-  const enc = encryptValue(password)
+  const enc = encryptValue(kept)
   const row = await prisma.databaseCredential.update({
     where: { id: existing.id },
     data: {
@@ -567,6 +905,18 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
   // the rotation, which is safe to ask for again.
   if (mode === 'READ_WRITE') await rotateProjectChannel(projectId)
 
+  if (secret && poolerEndpoint(placement.region)) {
+    // Served only if the project is not paused: a rotation leaves a stopped
+    // login stopped (backenly_direct_set_password never sets LOGIN).
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true } })
+    await putPoolerLogin(placement.region, {
+      rolname: existing.roleName,
+      verifier: secret.verifier,
+      database: placement.database as string,
+      active: !project?.pausedAt,
+    })
+  }
+
   await prisma.auditLog.create({
     data: {
       projectId,
@@ -577,7 +927,7 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
     },
   }).catch(() => {})
 
-  return withSchemaChanges(projectId, buildCredential(row, schema, target))
+  return withSchemaChanges(projectId, buildCredential(row, schema, target, { password }))
 }
 
 export async function revokeDirectAccess(projectId: string, mode: DirectAccessMode): Promise<void> {
@@ -593,6 +943,12 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
   if (existing.stoppedForPauseAt) {
     await prisma.databaseCredential.update({ where: { id: existing.id }, data: { stoppedForPauseAt: null } })
   }
+
+  // The pooler stops serving the login first, so a revocation that stops
+  // part-way leaves nothing that signs in through it.
+  const placement = await projectDatabase(projectId)
+  const dedicated = placement.tenancy === 'dedicated'
+  if (dedicated) await quietly('pooler login off', placement.region, () => setPoolerLoginsActive(placement.region, [existing.roleName], false))
 
   // Terminates live sessions, drops policies naming the role, reassigns any
   // tables it created to the platform role, then drops it. On the project's
@@ -627,6 +983,9 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
   // replaced before the credential is forgotten, so a failure here leaves the
   // revocation to be asked for again.
   if (mode === 'READ_WRITE') await rotateProjectChannel(projectId)
+  // Its pooler row goes with it. One a failure leaves is never served (its
+  // role cannot log in) and the scheduled pass removes it once the role is gone.
+  if (dedicated) await quietly('pooler login removed', placement.region, () => removePoolerLogins(placement.region, [existing.roleName]))
   await prisma.databaseCredential.delete({ where: { id: existing.id } })
 
   await prisma.auditLog.create({
@@ -656,10 +1015,12 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
  * installed" has a cheap direct answer, and asking it directly is also what
  * lets one clear advisory replace one error block per mode.
  *
- * Per region: each region's database needs its own copy of the helpers.
+ * Per database: each region's database needs its own copy of the helpers, and
+ * so does each project's own database (`database`, p_<32 hex>, on the region's
+ * data instance), which gets them from the template it is cloned from.
  */
-export async function directAccessHelpersInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
-  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
+export async function directAccessHelpersInstalled(region: CloudRegionId = HOME_REGION, database?: string): Promise<boolean> {
+  const rows = await clientFor(region, database).$queryRaw<Array<{ present: boolean }>>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_proc p
@@ -672,15 +1033,16 @@ export async function directAccessHelpersInstalled(region: CloudRegionId = HOME_
 
 export async function getDirectAccessStatus(projectId: string): Promise<DirectAccessStatus> {
   assertValidProjectId(projectId)
-  const [schema, rows, pendingDriftEvents] = await Promise.all([
+  const [schema, rows, pendingDriftEvents, placement] = await Promise.all([
     resolveWorkspaceSchema(projectId),
     prisma.databaseCredential.findMany({ where: { projectId }, orderBy: { mode: 'asc' } }),
     // Counted in the project's region, where the capture trigger records them.
     projectDriftEvents(projectId).then((events) => events.countPending(projectId)),
+    projectDatabase(projectId),
   ])
   let target: ConnectionTarget
   try {
-    target = await connectionTarget(projectId)
+    target = directConnectionTarget(placement)
   } catch (err) {
     if (!(err instanceof DirectAccessUnavailableError)) throw err
     // Nothing outside can connect: no strings, and the logins that exist by
@@ -689,6 +1051,8 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
       schema,
       available: false,
       unavailable: err.message,
+      unavailableReason: err.reason,
+      tenancy: placement.tenancy,
       credentials: [],
       logins: rows.map((r) => ({
         mode: r.mode as DirectAccessMode,
@@ -699,14 +1063,26 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
       pendingDriftEvents,
     }
   }
-  const [credentials, allowlist, connectionLimit] = await Promise.all([
-    Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))),
-    allowlistState(projectId),
+  const [credentials, connectionLimit] = await Promise.all([
+    Promise.all(rows.map((r) => withSchemaChanges(projectId, buildCredential(r, schema, target)))),
     // Every read of the credentials applies the plan's limit, so a plan
     // change reaches the logins at the next one (applyConnectionLimit).
     applyConnectionLimit(projectId, rows.map((r) => r.roleName)),
+    // And puts back a row the pooler is missing (a login made before the
+    // pooler was offered here, or a write a failure left). Never throws.
+    ensureProjectPoolerLogins(projectId, placement, rows),
   ])
-  return { schema, available: true, credentials, allowlist, connectionLimit, pendingDriftEvents }
+  return {
+    schema,
+    available: true,
+    tenancy: placement.tenancy,
+    ...(target.kind === 'pooler'
+      ? { pooler: { host: target.host, sessionPort: target.sessionPort, transactionPort: target.transactionPort, guidance: POOLER_GUIDANCE } }
+      : {}),
+    credentials,
+    connectionLimit,
+    pendingDriftEvents,
+  }
 }
 
 // ── Connections at once, by plan ──────────────────────────────────────────────
@@ -821,12 +1197,13 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
     select: { mode: true, roleName: true },
   }).catch(() => [])
 
-  // The grants are on the project's database, in its region, where its roles are.
-  const region = await projectRegion(projectId)
+  // The grants are on the database holding the project's data, where its roles
+  // are: its region's shared database, or its own (workspaceRawClient).
+  const db = await workspaceRawClient(projectId)
   // Credentials were provisioned through the helpers, so they are there. With
   // none, the database may be one that never installed them (they are optional
   // on a self-hosted install), and then there is nothing to sync.
-  if (rows.length === 0 && !(await syncHelperInstalled(region))) return
+  if (rows.length === 0 && !(await syncHelperIn(db))) return
 
   const names = directAccessRoleNames(projectId)
   const ro = rows.find(r => r.mode === 'READ_ONLY')?.roleName ?? null
@@ -834,7 +1211,6 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
   const owner = rw ? names.owner : null
   const schema = await resolveWorkspaceSchema(projectId)
 
-  const db = regionRawClient(region, projectId)
   await db.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, ${ro}, ${rw}, ${owner})`
 
   // A sync that took schema changes from the read-write login ended its
@@ -854,27 +1230,43 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
  * The backup role's read on a workspace schema just created, from its first
  * moment, so its first snapshot works. lib/projects/provision.ts calls this
  * right after CREATE SCHEMA, before the project's row exists: the caller names
- * the region, because projectRegion() reads a project with no row as home.
- * The sync also sets the default privileges that cover each table the
- * application adds to the schema later.
+ * the region, because projectRegion() reads a project with no row as home, and
+ * for a project with a database of its own, that database (p_<32 hex>), where
+ * the schema is. The sync also sets the default privileges that cover each
+ * table the application adds to the schema later. The one place this grant is
+ * made outside syncDirectAccessGrants.
  *
  * Returns false, having granted nothing, on a database without the helpers.
  */
-export async function grantWorkspaceBackupAccess(region: CloudRegionId, schema: string): Promise<boolean> {
-  if (!(await syncHelperInstalled(region))) return false
+export async function grantWorkspaceBackupAccess(region: CloudRegionId, schema: string, database?: string): Promise<boolean> {
+  const db = clientFor(region, database)
+  if (!(await syncHelperIn(db))) return false
   // No direct-access role: the call syncDirectAccessGrants makes for a project
   // without credentials.
-  await regionRawClient(region).$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, NULL, NULL, NULL)`
+  await db.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, NULL, NULL, NULL)`
   return true
 }
 
 /**
- * Whether the region's database has backenly_direct_sync_schema. Asked rather
- * than called and caught, because a failed query is logged at error level
- * before the caller sees it (see directAccessHelpersInstalled).
+ * The region's database, or a project's own database on its data instance.
+ * databaseClient refuses any name but p_<32 hex>, so nothing else is reached.
  */
-async function syncHelperInstalled(region: CloudRegionId): Promise<boolean> {
-  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
+function clientFor(region: CloudRegionId, database?: string): Pick<ReturnType<typeof regionRawClient>, '$queryRaw'> {
+  return database === undefined ? regionRawClient(region) : databaseClient(region, database)
+}
+
+/**
+ * Whether a database has backenly_direct_sync_schema: the region's, or a
+ * project's own. Asked rather than called and caught, because a failed query
+ * is logged at error level before the caller sees it (see
+ * directAccessHelpersInstalled).
+ */
+export async function syncHelperInstalled(region: CloudRegionId, database?: string): Promise<boolean> {
+  return syncHelperIn(clientFor(region, database))
+}
+
+async function syncHelperIn(db: Pick<ReturnType<typeof regionRawClient>, '$queryRaw'>): Promise<boolean> {
+  const rows = await db.$queryRaw<Array<{ present: boolean }>>`
     SELECT to_regprocedure('public.backenly_direct_sync_schema(text,text,text,text)') IS NOT NULL AS present`
   return rows[0]?.present === true
 }
