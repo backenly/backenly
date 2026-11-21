@@ -17,7 +17,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import { createHash } from 'node:crypto'
+
 import {
+  REQUIRED_ROLES,
   ROLES,
   Refusal,
   auditReport,
@@ -25,9 +28,12 @@ import {
   connectionString,
   launch,
   loadConfig,
+  managedRoles,
   parseArgs,
   parseReport,
   planCredentials,
+  projectDatabasesInput,
+  readDatabaseList,
   type Aws,
   type LaunchConfig,
   type ManagedRole,
@@ -56,8 +62,13 @@ const CONFIG: LaunchConfig = {
   },
 }
 
+/** A region whose config also names the secret of the role that creates project databases. */
+const WITH_CREATOR: LaunchConfig = { ...CONFIG, secrets: { ...CONFIG.secrets, dbcreator: secretArn('dbcreator-url') } }
+
 const ALL_ROLES = Object.keys(ROLES) as ManagedRole[]
+const BASE_ROLES = REQUIRED_ROLES
 const STEPS = ['roles', 'postgrest', 'drift-events', 'direct-access', 'extensions']
+const db = (n: number) => `p_${n.toString(16).padStart(32, '0')}`
 
 // ── The model ────────────────────────────────────────────────────────────────
 
@@ -71,6 +82,9 @@ interface Database {
    * database does not verify against them until an apply converges it.
    */
   changed?: boolean
+  failTemplate?: boolean
+  /** The project databases on the instance, and what a project-dbs run makes of each. */
+  projectDatabases?: Record<string, 'current' | 'applied' | 'failed'>
 }
 
 type Call = { args: string[]; stdin?: string }
@@ -82,8 +96,8 @@ class FakeAws {
   private secrets = new Map<string, Array<{ id: string; value: string; stages: string[] }>>()
   private n = 0
 
-  constructor(readonly db: Database) {
-    for (const arn of Object.values(CONFIG.secrets)) this.secrets.set(arn, [])
+  constructor(readonly db: Database, config: LaunchConfig = CONFIG) {
+    for (const arn of Object.values(config.secrets)) if (arn) this.secrets.set(arn, [])
   }
 
   /** What a secret's current version holds, or undefined. */
@@ -113,6 +127,8 @@ class FakeAws {
       expect(args).not.toContain('--cli-input-json')
       expect(flag('--cluster')).toBe(CONFIG.cluster)
       expect(flag('--task-definition')).toBe(CONFIG.taskDefinition)
+      // The overrides a task may carry are capped at 8 KiB.
+      expect(stdin!.length).toBeLessThan(8192)
       expect(flag('--overrides')).toBe('file:///dev/stdin')
       expect(JSON.parse(flag('--network-configuration')!).awsvpcConfiguration).toEqual({
         subnets: CONFIG.subnets, securityGroups: [CONFIG.securityGroup], assignPublicIp: 'DISABLED',
@@ -176,6 +192,31 @@ class FakeAws {
 
   /** bootstrap.sh, as the launcher sees it: its report lines, its refusals, its exit code. */
   private procedure(env: Record<string, string>): { exitCode: number; lines: string[] } {
+    if (env.BOOTSTRAP_MODE === 'template') {
+      const lines = ['', 'Project database template (template)', '  template backenly_project_template: exists']
+      if (this.db.failTemplate) {
+        return { exitCode: 3, lines: [...lines, 'ERROR:  project database verification failed', 'Project database template NOT converged: nothing can be cloned from backenly_project_template until a template run succeeds.'] }
+      }
+      for (const id of ['project-db', 'postgrest', 'drift-events', 'direct-access', 'extensions']) lines.push(`  step ${id}: re-applied (files unchanged)`)
+      return { exitCode: 0, lines: [...lines, 'Project database template converged and verified: backenly_project_template may be cloned.'] }
+    }
+    if (env.BOOTSTRAP_MODE === 'project-dbs') {
+      // As bootstrap.sh: the list passed must be exactly the databases found.
+      const found = Object.keys(this.db.projectDatabases ?? {}).sort()
+      const passed = env.BOOTSTRAP_PROJECT_DATABASES
+      const digest = `sha256:${createHash('sha256').update(found.map((n) => `${n}\n`).join('')).digest('hex')}`
+      const matches = passed === (found.length ? found.join(',') : 'none') || passed === digest
+      const lines = ['', 'Project databases (project-dbs)']
+      if (!matches) return { exitCode: 2, lines: [...lines, 'refusing: the project databases found here are not the ones the platform listed. Nothing was touched.'] }
+      for (const name of found) {
+        const state = this.db.projectDatabases![name]
+        lines.push(`db ${name}: ${state === 'current' ? 'current' : state === 'applied' ? 'applied direct-access' : 'failed verify'}`)
+        if (state === 'failed') lines.push('    ERROR:  project database verification failed')
+      }
+      const failed = found.filter((n) => this.db.projectDatabases![n] === 'failed').length
+      lines.push(failed ? `Project databases: 0 current, 0 applied, ${failed} failed. The run fails: every database must verify.` : 'Project databases converged and verified.')
+      return { exitCode: failed ? 1 : 0, lines }
+    }
     const apply = env.BOOTSTRAP_MODE === 'apply'
     const preApply = env.BOOTSTRAP_PRE_APPLY === 'true'
     const lines = ['', `Regional database initialisation (${apply ? 'apply' : 'check'})`]
@@ -188,6 +229,8 @@ class FakeAws {
       for (const role of ALL_ROLES) {
         const verifier = env[ROLES[role].verifier]
         const have = this.db.roles[role]
+        // As roles.sql: the database creator is made only when given its verifier.
+        if (!have && !verifier && role === 'backenly_dbcreator') continue
         if (!have && !verifier) return { exitCode: 3, lines: [...lines, `ERROR:  refusing: ${role} does not exist, and no verifier was supplied`] }
         if (have && verifier && !rotate.includes(role)) {
           return { exitCode: 3, lines: [...lines, `ERROR:  refusing: ${role} already has the password this procedure set`] }
@@ -214,7 +257,13 @@ class FakeAws {
       const have = this.db.roles[role]
       lines.push(
         `  credential ${role}: ${
-          !have ? `missing (the first apply must supply ${ROLES[role].verifier})` : have.recorded ? 'recorded 2026-10-16T12:00:00Z' : 'unrecorded (exists, but this procedure never set its password)'
+          !have
+            ? role === 'backenly_dbcreator'
+              ? `missing (an apply makes it only when given ${ROLES[role].verifier})`
+              : `missing (the first apply must supply ${ROLES[role].verifier})`
+            : have.recorded
+              ? 'recorded 2026-10-16T12:00:00Z'
+              : 'unrecorded (exists, but this procedure never set its password)'
         }`,
       )
     }
@@ -261,9 +310,9 @@ describe('a first apply', () => {
     const fake = new FakeAws({ roles: {}, applied: false })
     expect(await launch('apply', CONFIG, [], deps(fake))).toBe(0)
 
-    const secretFor = { backenly_app: CONFIG.secrets.app, backenly_backup: CONFIG.secrets.backup, backenly_authenticator: CONFIG.secrets.authenticator }
+    const secretFor: Record<string, string> = { backenly_app: CONFIG.secrets.app, backenly_backup: CONFIG.secrets.backup, backenly_authenticator: CONFIG.secrets.authenticator }
     const passwords: string[] = []
-    for (const role of ALL_ROLES) {
+    for (const role of BASE_ROLES) {
       const url = fake.current(secretFor[role])!
       expect(url).toMatch(new RegExp(`^postgresql://${role}:[0-9a-f]{64}@${CONFIG.database.host}:5432/backenly\\?sslmode=require$`))
       expect(verifies(passwordOf(url), fake.db.roles[role]!.verifier!)).toBe(true)
@@ -291,9 +340,12 @@ describe('a first apply', () => {
     expect(firstPromotion).toBeGreaterThan(applyAt)
     expect(order.filter((o) => o.startsWith('run-task'))).toEqual(['run-task:check', 'run-task:apply', 'run-task:check'])
 
-    // The procedure got verifiers, and nothing to rotate.
+    // The procedure got verifiers, and nothing to rotate. No database creator:
+    // this region's config names no secret for it.
     const applyEnv = envOf(runTasks(fake)[1])
-    for (const role of ALL_ROLES) expect(applyEnv[ROLES[role].verifier]).toMatch(/^SCRAM-SHA-256\$4096:/)
+    for (const role of BASE_ROLES) expect(applyEnv[ROLES[role].verifier]).toMatch(/^SCRAM-SHA-256\$4096:/)
+    expect(applyEnv.BACKENLY_DBCREATOR_VERIFIER).toBeUndefined()
+    expect(fake.db.roles.backenly_dbcreator).toBeUndefined()
     expect(applyEnv.BOOTSTRAP_ROTATE).toBeUndefined()
     // ...on standard input only: no verifier is ever an argument (the process list).
     for (const call of fake.calls) expect(call.args.join(' ')).not.toContain('SCRAM-SHA-256')
@@ -313,13 +365,16 @@ describe('a first apply', () => {
 })
 
 /** A database the procedure finished, with every credential in its secret. */
-function finished(db: Partial<Database> = {}): { fake: FakeAws; passwords: Record<ManagedRole, string> } {
-  const passwords = { backenly_app: generatePassword(), backenly_backup: generatePassword(), backenly_authenticator: generatePassword() }
-  const fake = new FakeAws({
-    roles: Object.fromEntries(ALL_ROLES.map((role) => [role, { verifier: scramSha256Verifier(passwords[role]), recorded: true }])),
-    applied: true,
-    ...db,
-  })
+function finished(db: Partial<Database> = {}, config: LaunchConfig = CONFIG): { fake: FakeAws; passwords: Record<string, string> } {
+  const passwords: Record<string, string> = { backenly_app: generatePassword(), backenly_backup: generatePassword(), backenly_authenticator: generatePassword() }
+  const fake = new FakeAws(
+    {
+      roles: Object.fromEntries(BASE_ROLES.map((role) => [role, { verifier: scramSha256Verifier(passwords[role]), recorded: true }])),
+      applied: true,
+      ...db,
+    },
+    config,
+  )
   fake.seedCurrent(CONFIG.secrets.app, connectionString('backenly_app', passwords.backenly_app, CONFIG.database))
   fake.seedCurrent(CONFIG.secrets.direct, connectionString('backenly_app', passwords.backenly_app, CONFIG.database))
   fake.seedCurrent(CONFIG.secrets.backup, connectionString('backenly_backup', passwords.backenly_backup, CONFIG.database))
@@ -398,6 +453,96 @@ describe('a region whose step files changed and do not verify yet', () => {
   })
 })
 
+describe('the role that creates project databases', () => {
+  it('is made where the region’s config names its secret, and its password kept there like the others', async () => {
+    const { fake, passwords } = finished({}, WITH_CREATOR)
+    const log: string[] = []
+    expect(await launch('apply', WITH_CREATOR, [], deps(fake, log))).toBe(0)
+
+    const url = fake.current(WITH_CREATOR.secrets.dbcreator!)!
+    expect(url).toMatch(new RegExp(`^postgresql://backenly_dbcreator:[0-9a-f]{64}@${CONFIG.database.host}:5432/backenly\\?sslmode=require$`))
+    expect(verifies(passwordOf(url), fake.db.roles.backenly_dbcreator!.verifier!)).toBe(true)
+    // Only it: every other credential is as it was.
+    for (const [key, role] of [['app', 'backenly_app'], ['backup', 'backenly_backup'], ['authenticator', 'backenly_authenticator']] as const) {
+      expect(passwordOf(fake.current(WITH_CREATOR.secrets[key])!)).toBe(passwords[role])
+    }
+    expect(Object.keys(envOf(runTasks(fake)[1])).sort()).toEqual(['BACKENLY_DBCREATOR_VERIFIER', 'BOOTSTRAP_MODE'])
+    for (const call of fake.calls) expect(call.args.join(' ')).not.toContain(passwordOf(url))
+    expect(log.join('\n')).toContain('The region database is initialised')
+  })
+
+  it('is not asked of a region whose config does not name its secret, and cannot be rotated there', async () => {
+    const { fake } = finished()
+    expect(managedRoles(CONFIG)).toEqual(BASE_ROLES)
+    expect(managedRoles(WITH_CREATOR)).toEqual([...BASE_ROLES, 'backenly_dbcreator'])
+    await expect(launch('apply', CONFIG, ['backenly_dbcreator'], deps(fake))).rejects.toThrow(/does not manage: its config names no secret/)
+    expect(runTasks(fake)).toHaveLength(0)
+    expect(await launch('apply', CONFIG, [], deps(fake))).toBe(0)
+    expect(fake.db.roles.backenly_dbcreator).toBeUndefined()
+  })
+})
+
+describe('a project database template and the project databases', () => {
+  it('converges the template in one run, touching no secret', async () => {
+    const { fake } = finished()
+    const log: string[] = []
+    expect(await launch('template', CONFIG, [], deps(fake, log))).toBe(0)
+    expect(runTasks(fake).map(envOf)).toEqual([{ BOOTSTRAP_MODE: 'template' }])
+    expect(fake.calls.filter((c) => c.args[0] === 'secretsmanager')).toHaveLength(0)
+    expect(log.join('\n')).toContain('The project database template is converged and verified.')
+
+    fake.db.failTemplate = true
+    const failed: string[] = []
+    expect(await launch('template', CONFIG, [], deps(fake, failed))).toBe(1)
+    expect(failed.join('\n')).toContain('Nothing can be cloned from it until a template run succeeds.')
+  })
+
+  it('passes the databases the platform knows, and counts what the procedure reports for each', async () => {
+    const names = [db(3), db(1), db(2)]
+    const { fake } = finished({ projectDatabases: { [db(1)]: 'current', [db(2)]: 'applied', [db(3)]: 'current' } })
+    const log: string[] = []
+    expect(await launch('project-dbs', CONFIG, [], deps(fake, log), { databases: names })).toBe(0)
+    expect(runTasks(fake).map(envOf)).toEqual([{ BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: [db(1), db(2), db(3)].join(',') }])
+    expect(fake.calls.filter((c) => c.args[0] === 'secretsmanager')).toHaveLength(0)
+    expect(log).toContain('Project databases: 3 listed, 2 current, 1 applied, 0 failed.')
+  })
+
+  it('fails the run when one database fails, and names it, though the others converged', async () => {
+    const { fake } = finished({ projectDatabases: { [db(1)]: 'current', [db(2)]: 'failed' } })
+    const log: string[] = []
+    expect(await launch('project-dbs', CONFIG, [], deps(fake, log), { databases: [db(1), db(2)] })).toBe(1)
+    expect(log).toContain('Project databases: 2 listed, 1 current, 0 applied, 1 failed.')
+    expect(log).toContain(`NOT DONE: ${db(2)} failed at verify`)
+  })
+
+  it('fails when the procedure refuses a list that is not what it finds', async () => {
+    const { fake } = finished({ projectDatabases: { [db(1)]: 'current', [db(2)]: 'current' } })
+    const log: string[] = []
+    expect(await launch('project-dbs', CONFIG, [], deps(fake, log), { databases: [db(1)] })).toBe(1)
+    expect(log.join('\n')).toContain('not the ones the platform listed')
+  })
+
+  it('passes a long list as its hash, which is how bootstrap.sh hashes the databases it finds', async () => {
+    const many = Array.from({ length: 250 }, (_, i) => db(i + 1))
+    expect(projectDatabasesInput([])).toBe('none')
+    expect(projectDatabasesInput([db(2), db(1)])).toBe(`${db(1)},${db(2)}`)
+    const hashed = projectDatabasesInput(many)
+    expect(hashed).toBe(`sha256:${createHash('sha256').update([...many].sort().map((n) => `${n}\n`).join('')).digest('hex')}`)
+    const { fake } = finished({ projectDatabases: Object.fromEntries(many.map((n) => [n, 'current' as const])) })
+    const log: string[] = []
+    expect(await launch('project-dbs', CONFIG, [], deps(fake, log), { databases: many })).toBe(0)
+    expect(envOf(runTasks(fake)[0]).BOOTSTRAP_PROJECT_DATABASES).toBe(hashed)
+    expect(log).toContain('Project databases: 250 listed, 250 current, 0 applied, 0 failed.')
+  })
+
+  it('reads a list of database names, and refuses anything else', () => {
+    expect(readDatabaseList(`${db(2)}\n${db(1)}\n\n${db(2)}, ${db(3)}\n`)).toEqual([db(1), db(2), db(3)])
+    expect(readDatabaseList('')).toEqual([])
+    expect(() => readDatabaseList(`${db(1)}\nbackenly_project_template`)).toThrow(/not project database names/)
+    expect(() => readDatabaseList('p_ABC')).toThrow(/not project database names/)
+  })
+})
+
 describe('refusals, before anything is written', () => {
   it('refuses a role that exists but that the procedure never set', async () => {
     const fake = new FakeAws({ roles: { backenly_backup: { verifier: null, recorded: false } }, applied: false })
@@ -445,6 +590,22 @@ describe('reading the procedure', () => {
     'Check only: nothing was written. 1 step(s) not applied yet.',
   ]
 
+  it('parses each project database’s line', () => {
+    const report = parseReport([
+      `db ${db(1)}: current`,
+      `db ${db(2)}: applied project-db,direct-access`,
+      `db ${db(3)}: failed verify`,
+      '    ERROR:  project database verification failed',
+      'Project databases: 1 current, 1 applied, 1 failed. The run fails: every database must verify.',
+    ])
+    expect(report.databases).toEqual({
+      [db(1)]: { state: 'current' },
+      [db(2)]: { state: 'applied', detail: 'project-db,direct-access' },
+      [db(3)]: { state: 'failed', detail: 'verify' },
+    })
+    expect(report.summary).toBe('Project databases: 1 current, 1 applied, 1 failed. The run fails: every database must verify.')
+  })
+
   it('parses steps, credentials and the summary bootstrap.sh prints', () => {
     const report = parseReport(sample)
     expect(report.steps).toEqual({ roles: 'current', postgrest: 'changed', 'drift-events': 'pending' })
@@ -485,6 +646,16 @@ describe('arguments and configuration', () => {
     expect(() => parseArgs(['apply', '--config', 'l.json', '--rotate', 'postgres'])).toThrow(/does not manage: postgres/)
   })
 
+  it('reads template and project-dbs, and what each needs', () => {
+    expect(parseArgs(['template', '--config', 'l.json'])).toEqual({ mode: 'template', configPath: 'l.json', rotate: [] })
+    expect(parseArgs(['project-dbs', '--config', 'l.json', '--databases', 'none'])).toEqual({
+      mode: 'project-dbs', configPath: 'l.json', rotate: [], databases: 'none',
+    })
+    expect(() => parseArgs(['project-dbs', '--config', 'l.json'])).toThrow(/needs --databases/)
+    expect(() => parseArgs(['apply', '--config', 'l.json', '--databases', 'none'])).toThrow(/--databases is for project-dbs/)
+    expect(() => parseArgs(['template', '--config', 'l.json', '--rotate', 'backenly_app'])).toThrow(/--rotate is for apply/)
+  })
+
   it('takes the stack output as it is, and refuses one that cannot run', () => {
     expect(loadConfig(JSON.stringify(CONFIG))).toEqual(CONFIG)
     expect(() => loadConfig(JSON.stringify({ ...CONFIG, taskDefinition: null }))).toThrow(/pin db_procedure_image_digest/)
@@ -492,6 +663,12 @@ describe('arguments and configuration', () => {
       /backup secret is not in us-east-1/,
     )
     expect(() => loadConfig(JSON.stringify({ ...CONFIG, subnets: [] }))).toThrow(/subnets/)
+    // The database creator's secret is optional, and kept in the region like the rest.
+    expect(loadConfig(JSON.stringify(WITH_CREATOR))).toEqual(WITH_CREATOR)
+    expect(loadConfig(JSON.stringify({ ...CONFIG, secrets: { ...CONFIG.secrets, dbcreator: null } }))).toEqual(CONFIG)
+    expect(() => loadConfig(JSON.stringify({ ...CONFIG, secrets: { ...CONFIG.secrets, dbcreator: secretArn('x').replace(REGION, 'eu-central-1') } }))).toThrow(
+      /dbcreator secret is not in us-east-1/,
+    )
     expect(() => loadConfig('not json')).toThrow(/terraform output -json/)
   })
 })
