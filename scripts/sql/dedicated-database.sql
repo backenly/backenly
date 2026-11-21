@@ -14,9 +14,12 @@
 -- (scripts/setup-direct-access.sql, sections 5b and 5c).
 --
 -- Only a superuser can set a parameter of its own on a database, which is why
--- the mark is one: a managed database such as Amazon RDS has no superuser and
--- is always treated as shared. A second project's workspace in the database
--- makes it shared whatever this says. Undo with
+-- the mark is one here. A managed database such as Amazon RDS has no superuser,
+-- so there a project's own database is marked instead by a row of
+-- backenly_meta.tenancy, which the regional procedure writes as the database's
+-- administrator (tools/managed-db/regional/sql/project-db.sql);
+-- public.backenly_direct_shared_database reads either. A second project's
+-- workspace in the database makes it shared whatever either says. Undo with
 --
 --   ALTER DATABASE <db> RESET backenly.database_tenancy;
 --
