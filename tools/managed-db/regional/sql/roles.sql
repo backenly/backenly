@@ -41,7 +41,7 @@
 --                           reads the verifier of a customer's login through
 --                           backenly_pooler.lookup in database backenly_pooler
 --                           (sql/pooler.sql grants it that and nothing else).
---                           LOGIN NOINHERIT CONNECTION LIMIT 10, and otherwise
+--                           LOGIN NOINHERIT CONNECTION LIMIT 40, and otherwise
 --                           the defaults: no other attribute, a member of no
 --                           role, and no role the platform runs as is a member
 --                           of it. Made, like the database creator, only by a
@@ -51,10 +51,12 @@
 --                           small. Each PgBouncer process holds up to its
 --                           pool size (POOLER_DEFAULT_POOL_SIZE, 5 by
 --                           default) of lookup connections, and its list
---                           refresh opens one more for a moment, so ten fits
---                           one pooler task's two processes at their usual
---                           load; a service of more tasks needs it raised
---                           here and in verify.sql together.
+--                           refresh opens one more for a moment: six per
+--                           process. A production region runs two pooler
+--                           tasks of two processes each, 24 at most, so forty
+--                           leaves room; a service of more tasks or a larger
+--                           pool needs it raised here and in verify.sql
+--                           together.
 --
 -- A region's database holds every project in the region, so it is shared, and
 -- on a shared database a read-write login changes rows only
@@ -333,18 +335,18 @@ BEGIN
   -- Made only by a run that supplies its verifier (decided above). It is given
   -- nothing here: sql/pooler.sql grants it CONNECT on database backenly_pooler
   -- and EXECUTE on the lookup there, and refuses it any membership. Its
-  -- connection limit is only ever lowered to ten, never raised: a lower one
+  -- connection limit is only ever lowered to forty, never raised: a lower one
   -- an operator set is kept, and verify.sql reports it.
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_pooler_auth')
      AND 'backenly_pooler_auth' = ANY (to_set) THEN
-    CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 10;
+    CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 40;
     RAISE NOTICE 'created role backenly_pooler_auth';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_pooler_auth') THEN
     ALTER ROLE backenly_pooler_auth WITH NOINHERIT NOCREATEDB NOCREATEROLE;
-    IF (SELECT rolconnlimit FROM pg_roles WHERE rolname = 'backenly_pooler_auth') NOT BETWEEN 0 AND 10 THEN
-      ALTER ROLE backenly_pooler_auth WITH CONNECTION LIMIT 10;
-      RAISE NOTICE 'lowered the connection limit of backenly_pooler_auth to 10';
+    IF (SELECT rolconnlimit FROM pg_roles WHERE rolname = 'backenly_pooler_auth') NOT BETWEEN 0 AND 40 THEN
+      ALTER ROLE backenly_pooler_auth WITH CONNECTION LIMIT 40;
+      RAISE NOTICE 'lowered the connection limit of backenly_pooler_auth to 40';
     END IF;
   END IF;
 

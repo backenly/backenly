@@ -494,7 +494,7 @@ suite('a region’s first database', () => {
     expect(result.status).not.toBe(0)
     expect(result.output).not.toContain('step postgrest: re-applied')
 
-    // It can log in, and do nothing else: no attribute, no role, ten connections.
+    // It can log in, and do nothing else: no attribute, no role, forty connections.
     expect(
       await rows(
         superUrl(),
@@ -505,7 +505,7 @@ suite('a region’s first database', () => {
     ).toEqual([
       {
         rolcanlogin: true, rolinherit: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false,
-        rolreplication: false, rolbypassrls: false, rolconnlimit: 10,
+        rolreplication: false, rolbypassrls: false, rolconnlimit: 40,
       },
     ])
     expect(await rows(superUrl(), `SELECT 1 FROM pg_auth_members WHERE member = $1::regrole`, [POOLER_AUTH])).toEqual([])
@@ -606,10 +606,10 @@ suite('a region’s first database', () => {
       const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
       expect(result.status).not.toBe(0)
       expect(result.output).toContain(`role ${POOLER_AUTH} is a member of backenly_external; it may hold no role`)
-      expect(result.output).toContain(`role ${POOLER_AUTH} must have CONNECTION LIMIT 10, not 50`)
+      expect(result.output).toContain(`role ${POOLER_AUTH} must have CONNECTION LIMIT 40, not 50`)
     } finally {
       await rows(superUrl(), `REVOKE backenly_external FROM ${POOLER_AUTH}`)
-      await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 10`)
+      await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 40`)
     }
 
     // In its own database, as its owner could make it.

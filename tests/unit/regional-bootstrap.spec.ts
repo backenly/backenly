@@ -84,10 +84,10 @@ describe('roles.sql', () => {
     expect(widening).toEqual([])
     expect(alters.filter((m) => m[2].startsWith('WITH')).length).toBeGreaterThanOrEqual(5)
     // The one connection limit set on an existing role only ever lowers it:
-    // to ten, and only from above ten or from unlimited (-1).
+    // to forty, and only from above forty or from unlimited (-1).
     expect(code.match(/CONNECTION LIMIT/g)).toHaveLength(2)
     expect(code).toMatch(
-      /IF \(SELECT rolconnlimit FROM pg_roles WHERE rolname = 'backenly_pooler_auth'\) NOT BETWEEN 0 AND 10 THEN\s+ALTER ROLE backenly_pooler_auth WITH CONNECTION LIMIT 10;/,
+      /IF \(SELECT rolconnlimit FROM pg_roles WHERE rolname = 'backenly_pooler_auth'\) NOT BETWEEN 0 AND 40 THEN\s+ALTER ROLE backenly_pooler_auth WITH CONNECTION LIMIT 40;/,
     )
   })
 
@@ -128,7 +128,7 @@ describe('roles.sql', () => {
   })
 
   it('makes the pooler’s login able to log in and nothing else, only when asked, and never grants it a role', () => {
-    expect(code).toMatch(/CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 10;/)
+    expect(code).toMatch(/CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT 40;/)
     expect(code.match(/CREATE ROLE backenly_pooler_auth/g)).toHaveLength(1)
     // Made only by a run given its verifier, like the database creator, and
     // a rotation the procedure accepts.
@@ -196,7 +196,12 @@ describe('bootstrap.sh and verify.sql agree', () => {
     // verify.sql asks for the step only where the login exists.
     const block = section(read(`${DIR}/sql/verify.sql`), 'FOR r IN SELECT p.* FROM pg_roles p WHERE p.rolname = \'backenly_pooler_auth\' LOOP', 'END LOOP;\n\n  -- Each login role')
     expect(block).toContain(`WHERE s.step = 'pooler'`)
-    expect(block).toContain(`rolconnlimit <> 10`)
+    expect(block).toContain(`rolconnlimit <> 40`)
+    // The limit verify.sql requires is the one roles.sql creates and lowers to.
+    const created = /CREATE ROLE backenly_pooler_auth LOGIN NOINHERIT CONNECTION LIMIT (\d+);/.exec(read(`${DIR}/sql/roles.sql`))?.[1]
+    const required = /rolconnlimit <> (\d+)/.exec(block)?.[1]
+    expect(created).toBe('40')
+    expect(required).toBe(created)
   })
 
   it('verifies the pooler’s database with the checks pooler.sql ends with, and writes nothing doing it', () => {
