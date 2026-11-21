@@ -34,6 +34,18 @@ DECLARE
   app_exists boolean := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_app');
   authenticator_exists boolean := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_authenticator');
 BEGIN
+  -- ── Run by the role that built the template ───────────────────────────────
+  -- What follows reads the ledger in backenly_meta and the helpers in public
+  -- and postgrest, which belong to the administrator that built the template
+  -- (on Amazon RDS, the master). A role that cannot use those schemas cannot
+  -- verify anything here: said once, by name, rather than as a bare error.
+  FOREACH rname IN ARRAY ARRAY['backenly_meta', 'postgrest', 'public'] LOOP
+    IF to_regnamespace(rname) IS NOT NULL AND NOT has_schema_privilege(rname, 'USAGE') THEN
+      RAISE EXCEPTION 'project database verification failed (%): % cannot use schema %, which belongs to %; run this as the administrator that built the template',
+        db, current_user, rname, (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = rname);
+    END IF;
+  END LOOP;
+
   -- ── A project database, and nothing else ──────────────────────────────────
   IF db <> 'backenly_project_template' AND db !~ '^p_[0-9a-f]{32}$' THEN
     problems := problems || format('%s is neither backenly_project_template nor a project database (p_<32 lowercase hex>)', db);

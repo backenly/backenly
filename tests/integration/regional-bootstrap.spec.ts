@@ -275,11 +275,19 @@ async function catalog(database = DB): Promise<unknown> {
   return row.catalog
 }
 
-/** As RDS leaves it: the administrator owns what was installed. Event triggers excepted. */
-async function handToAdministrator(database = DB): Promise<void> {
+/**
+ * As RDS leaves it: the administrator owns what was installed. Event triggers
+ * excepted. The hand-over is this suite's stand-in for "the administrator made
+ * it", not a change the procedure should react to, so the database's event
+ * triggers are kept out of it: an ALTER ... OWNER fires the PostgREST sync,
+ * whose definer, once handed over, reads a registry that whoever created it
+ * owns, so the hand-over must not depend on the order it takes them in.
+ */
+async function handToAdministrator(): Promise<void> {
   await rows(
-    superUrl(database),
-    `DO $$
+    superUrl(),
+    `SET session_replication_role = replica;
+     DO $$
      DECLARE r record;
      BEGIN
        FOR r IN SELECT nspname FROM pg_namespace
@@ -1245,33 +1253,76 @@ suite('a project’s own database, cloned from the region’s template', () => {
   let fnRole = ''
   const both = () => `${a},${b}`
 
-  it('has its template built by the procedure, closed to connections and open to cloning', async () => {
-    const result = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
-    expect(result.output).toContain(`Project database template converged and verified: ${TEMPLATE} may be cloned.`)
-    expect(result.status).toBe(0)
-    expect(result.output).toContain(`template ${TEMPLATE}: created`)
-    for (const step of ['project-db', 'postgrest', 'drift-events', 'direct-access', 'extensions']) {
-      expect(result.output).toContain(`step ${step}: applied`)
+  it('has its template built by the region’s administrator, closed to connections and open to cloning', async () => {
+    const state = async () =>
+      rows(
+        superUrl(),
+        `SELECT pg_get_userbyid(datdba) AS owner, datistemplate AS template, datallowconn AS connections FROM pg_database WHERE datname = $1`,
+        [TEMPLATE],
+      )
+    // As on RDS, the administrator builds it and owns what it creates. Stock
+    // PostgreSQL 16 lets only a superuser create an event trigger, so here the
+    // administrator's run stops at the first one, as it does for the region's
+    // database, and leaves the template closed to cloning and to connections.
+    const first = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+    expect(first.output).toContain(`template ${TEMPLATE}: created`)
+    expect(first.output).toContain('step project-db: applied')
+    expect(first.output).toContain('Must be superuser to create an event trigger')
+    expect(first.output).toContain(`Project database template NOT converged: nothing can be cloned from ${TEMPLATE}`)
+    expect(first.status).not.toBe(0)
+    expect(await state()).toEqual([{ owner: ADMIN, template: false, connections: false }])
+
+    // The rest it builds itself, holding SUPERUSER for as long as that takes,
+    // because event triggers are what stock PostgreSQL keeps from any other
+    // role and the RDS master may create. Everything in the template, event
+    // triggers included, is then the administrator's, as on RDS, and nothing
+    // is handed over afterwards. Every later step as the administrator runs
+    // without SUPERUSER.
+    await rows(superUrl('postgres'), `ALTER ROLE ${ADMIN} SUPERUSER`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+      expect(result.output).toContain(`Project database template converged and verified: ${TEMPLATE} may be cloned.`)
+      expect(result.status).toBe(0)
+      expect(result.output).toContain(`template ${TEMPLATE}: exists`)
+      expect(result.output).toContain('step project-db: re-applied (files unchanged)')
+      for (const step of ['postgrest', 'drift-events', 'direct-access', 'extensions']) {
+        expect(result.output).toContain(`step ${step}: applied`)
+      }
+      expect(await state()).toEqual([{ owner: ADMIN, template: true, connections: false }])
+
+      // Run again, it converges what is there and changes nothing it need not.
+      const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+      expect(again.output).toContain(`template ${TEMPLATE}: exists`)
+      expect(again.output).toContain('step direct-access: re-applied (files unchanged)')
+      expect(again.status).toBe(0)
+    } finally {
+      await rows(superUrl('postgres'), `ALTER ROLE ${ADMIN} NOSUPERUSER`)
     }
-    expect(
-      await rows(superUrl(), `SELECT datistemplate AS template, datallowconn AS connections FROM pg_database WHERE datname = $1`, [TEMPLATE]),
-    ).toEqual([{ template: true, connections: false }])
 
-    // Run again, it converges what is there and changes nothing it need not.
-    const again = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
-    expect(again.output).toContain(`template ${TEMPLATE}: exists`)
-    expect(again.output).toContain('step direct-access: re-applied (files unchanged)')
-    expect(again.status).toBe(0)
+    // Another role, the superuser excepted, is refused by name rather than
+    // failing on each object the administrator owns.
+    const outsider = bootstrap({ DATABASE_URL: url('backenly_app', passwords.backenly_app), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+    expect(outsider.output).toContain(`refusing: ${TEMPLATE} and the project databases cloned from it belong to ${ADMIN}`)
+    expect(outsider.status).toBe(2)
 
-    // As RDS leaves it: the administrator owns the template and what it holds.
     await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} WITH ALLOW_CONNECTIONS true`)
     try {
-      await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} OWNER TO ${ADMIN}`)
-      await handToAdministrator(TEMPLATE)
+      const notTheAdministrators = await rows(
+        superUrl(TEMPLATE),
+        `SELECT 'schema ' || nspname AS item FROM pg_namespace
+          WHERE nspname IN ('public', 'postgrest', 'backenly_meta', 'backenly_pgrst_idle') AND nspowner <> $1::regrole
+         UNION ALL
+         SELECT 'relation ' || c.oid::regclass::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname IN ('public', 'postgrest', 'backenly_meta') AND c.relkind IN ('r', 'p', 'v', 'm') AND c.relowner <> $1::regrole
+         UNION ALL
+         SELECT 'function ' || p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname IN ('public', 'postgrest') AND p.proowner <> $1::regrole
+         UNION ALL
+         SELECT 'event trigger ' || evtname FROM pg_event_trigger WHERE evtowner <> $1::regrole`,
+        [ADMIN],
+      )
+      expect(notTheAdministrators).toEqual([])
       expect(await rows(superUrl(TEMPLATE), `SELECT dedicated FROM backenly_meta.tenancy`)).toEqual([{ dedicated: true }])
-      expect(await rows(superUrl(TEMPLATE), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = 'public'`)).toEqual([
-        { owner: ADMIN },
-      ])
     } finally {
       await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} WITH ALLOW_CONNECTIONS false`)
     }

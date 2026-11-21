@@ -231,20 +231,39 @@ use_database() {
 }
 
 # The project modes reach other databases by name from DATABASE_URL, so it must
-# be a URL that names one; and they rely on the roles the region's apply makes,
-# from this image's roles.sql (the role-level settings a clone needs among them).
+# be a URL that names one; they are run by the role that built the template
+# (below); and they rely on the roles the region's apply makes, from this
+# image's roles.sql (the role-level settings a clone needs among them).
 require_region_applied() {
   local base="${DATABASE_URL%%\?*}"
   case "$base" in
     *://*/?*) ;;
     *) echo "refusing: BOOTSTRAP_MODE=$MODE needs DATABASE_URL as a postgresql:// URL that names the region's database"; exit 2 ;;
   esac
+  require_template_owner
   local have; have="$(recorded roles)"
   if [ -z "$have" ]; then
     echo "refusing: the region's database has never applied sql/roles.sql. Run BOOTSTRAP_MODE=apply first: project databases use the roles it makes."
     exit 2
   elif [ "$have" != "$(checksum "$HERE/sql/roles.sql")" ]; then
     echo "refusing: the region's database applied another version of sql/roles.sql than this image's. Run BOOTSTRAP_MODE=apply first: project databases use the roles it makes."
+    exit 2
+  fi
+}
+
+# The template and every database cloned from it hold what the role that built
+# the template created, and only that role (or a superuser) can replace those
+# objects, read the ledger in backenly_meta and verify the helpers in postgrest.
+# On Amazon RDS that is the master, which builds the template itself. Another
+# role would fail on each of them with a bare "permission denied"; refuse it
+# once, by name, instead. No template yet: the run that creates it owns it.
+require_template_owner() {
+  local found
+  found="$("${PSQL[@]}" -tA -F ' ' -c "SELECT (d.datdba = r.oid OR r.rolsuper)::text, pg_get_userbyid(d.datdba)
+                                         FROM pg_database d, pg_roles r
+                                        WHERE d.datname = '$TEMPLATE' AND r.rolname = current_user")"
+  if [ -n "$found" ] && [ "${found%% *}" != true ]; then
+    echo "refusing: $TEMPLATE and the project databases cloned from it belong to ${found#* }, which built them; run BOOTSTRAP_MODE=$MODE as that role"
     exit 2
   fi
 }
@@ -308,7 +327,8 @@ converge_project_db() {
   local name="$1" ledger id sum have
   local -a applied=()
   use_database "$name"
-  if ! ledger="$(project_ledger)"; then echo "db $name: failed connect"; return 1; fi
+  "${PSQL[@]}" -tA -c "SELECT 1" > /dev/null || { echo "db $name: failed connect"; return 1; }
+  if ! ledger="$(project_ledger)"; then echo "db $name: failed ledger"; return 1; fi
   for id in "${PROJECT_STEPS[@]}"; do
     sum="${PROJECT_SUMS[$id]}"
     have="$(printf '%s\n' "$ledger" | awk -v s="$id" '$1 == s { print $2 }')"
