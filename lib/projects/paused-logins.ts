@@ -31,7 +31,10 @@
  * from its logins while it is paused, its functions' login included, and gives
  * it back when it is resumed or restored and not otherwise paused
  * (lib/data-plane/project-databases.ts setProjectDatabaseConnect): a login is
- * then kept out by the database as well as by NOLOGIN.
+ * then kept out by the database as well as by NOLOGIN. Its logins' rows in the
+ * connection pooler's table are turned off and on with it
+ * (lib/services/direct-access.ts stopPoolerLogins, restorePoolerLogins), so
+ * the pooler stops signing them in too.
  *
  * Nothing here throws. A failure is logged, and the hourly pass
  * (reconcileDirectLoginsWithPause, instrumentation.ts) brings every project's
@@ -41,6 +44,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { projectDatabase, workspaceRawClient } from '@/lib/data-plane/regional'
 import { decryptValue } from '@/lib/security/projectEnvCrypto'
+import { restorePoolerLogins, stopPoolerLogins } from '@/lib/services/direct-access'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 
 type RawClient = Awaited<ReturnType<typeof workspaceRawClient>>
@@ -79,31 +83,41 @@ async function hasHelper(db: RawClient, signature: string): Promise<boolean> {
  */
 export async function stopDirectLogins(projectId: string, why: string): Promise<string[]> {
   const stopped = await stopCredentialLogins(projectId, why)
-  await setOwnDatabaseConnect(projectId, false, why)
+  await setOwnDatabaseOpen(projectId, false, why)
   return stopped
 }
 
 /**
- * For a project with a database of its own, whether its logins may connect to
- * it (setProjectDatabaseConnect). Giving it back is skipped while the project
- * is paused. Never throws; a failure is logged, and the hourly pass tries again.
+ * For a project with a database of its own: whether its logins may connect to
+ * it (setProjectDatabaseConnect), and whether the connection pooler signs them
+ * in (stopPoolerLogins, restorePoolerLogins). Opening is skipped while the
+ * project is paused. Never throws; a failure is logged, and the hourly pass
+ * tries again.
  */
-async function setOwnDatabaseConnect(projectId: string, allowed: boolean, why: string): Promise<void> {
+async function setOwnDatabaseOpen(projectId: string, open: boolean, why: string): Promise<void> {
   try {
     // A project in a shared database has none of its own: nothing to change.
     if ((await projectDatabase(projectId)).tenancy !== 'dedicated') return
-    if (allowed) {
+    if (open) {
       const project = await prisma.project.findUnique({ where: { id: projectId }, select: { pausedAt: true } })
       if (!project || project.pausedAt) return
     }
+  } catch (err) {
+    console.warn(`[DirectAccess] project=${projectId}: its own database not ${open ? 'opened' : 'closed'} to its logins (${why}): ${failure(err)}; the hourly pass tries again`)
+    return
+  }
+  try {
     const { setProjectDatabaseConnect } = await import('@/lib/data-plane/project-databases')
-    const { changed } = await setProjectDatabaseConnect(projectId, allowed)
+    const { changed } = await setProjectDatabaseConnect(projectId, open)
     if (changed.length > 0) {
-      console.log(`[DirectAccess] project=${projectId}: CONNECT on its database ${allowed ? 'given back to' : 'taken from'} ${changed.length} login(s) (${why})`)
+      console.log(`[DirectAccess] project=${projectId}: CONNECT on its database ${open ? 'given back to' : 'taken from'} ${changed.length} login(s) (${why})`)
     }
   } catch (err) {
-    console.warn(`[DirectAccess] project=${projectId}: CONNECT on its database not ${allowed ? 'given back' : 'taken'} (${why}): ${failure(err)}; the hourly pass tries again`)
+    console.warn(`[DirectAccess] project=${projectId}: CONNECT on its database not ${open ? 'given back' : 'taken'} (${why}): ${failure(err)}; the hourly pass tries again`)
   }
+  // Neither throws.
+  if (open) await restorePoolerLogins(projectId)
+  else await stopPoolerLogins(projectId)
 }
 
 async function stopCredentialLogins(projectId: string, why: string): Promise<string[]> {
@@ -137,7 +151,7 @@ async function stopCredentialLogins(projectId: string, why: string): Promise<str
  */
 export async function restoreDirectLogins(projectId: string, why: string): Promise<string[]> {
   const restored = await restoreCredentialLogins(projectId, why)
-  await setOwnDatabaseConnect(projectId, true, why)
+  await setOwnDatabaseOpen(projectId, true, why)
   return restored
 }
 
