@@ -199,8 +199,14 @@ type Tx = Prisma.TransactionClient
  * would need escaping to be correct and would be a quiet cross-tenant match if
  * anyone got the escaping wrong. Both parameters are bound values, never
  * identifiers, so this query cannot be injected.
+ *
+ * That includes what a move to a database of its own left behind in the
+ * database the project moved out of, `workspace_<id>_moved<epoch>[_<n>]`
+ * (movedSchemaName in lib/security/workspace-schema.ts), which the allowlist
+ * admits as the project's own. Exported for that move
+ * (lib/data-plane/tenancy-migration.ts), which dumps exactly this list.
  */
-async function resolveProjectSchemas(tx: Tx, projectId: string): Promise<string[]> {
+export async function resolveProjectSchemas(tx: Pick<Tx, '$queryRaw'>, projectId: string): Promise<string[]> {
   assertValidProjectId(projectId)
 
   const canonical = workspaceSchemaName(projectId)
@@ -470,6 +476,12 @@ async function dropRegionalProjectData(
  * is not dropped again, and the logins its project's rows still name are.
  * Its regional bodies, outside the home region, go first, from the region's
  * own database, where they are kept for every project of the region.
+ *
+ * A project that moved into a database of its own may still have schemas in
+ * its region's own database: what the move left there, fenced, until its drop
+ * is due (lib/data-plane/tenancy-migration.ts). They are its data too, so they
+ * go with it, found the way any project's schemas are (resolveProjectSchemas),
+ * before the logins, whose grants they could otherwise still hold.
  */
 async function dropDedicatedProjectData(
   projectId: string,
@@ -500,6 +512,23 @@ async function dropDedicatedProjectData(
     if (present) await regionRawClient(region, projectId).$executeRaw`DELETE FROM public.regional_bodies WHERE "projectId" = ${projectId}`
   }
 
+  // What a move into its own database left in the region's own database. Never
+  // served there, so dropped now; one that is served after all stops being
+  // served now and is dropped by the region's pass, from the row the platform
+  // transaction writes (retiredSchemas).
+  const left = await regionRawClient(region, projectId).$transaction(
+    async (rtx) => {
+      await rtx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`)
+      await rtx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`)
+      const found = await resolveProjectSchemas(rtx as Tx, projectId)
+      if (found.length === 0) return { dropped: [] as string[], retired: [] as string[] }
+      const outcome = await dropOrRetireSchemas(rtx, found)
+      await dropRealtimeChannels(rtx as Tx, projectId, found)
+      return outcome
+    },
+    { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
+  )
+
   await dropProjectDatabase({ region, database, projectId })
 
   const retiredLogins = await dataInstanceRawClient(region).$transaction(
@@ -510,7 +539,7 @@ async function dropDedicatedProjectData(
     },
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
   )
-  return { dropped: schemas, retiredSchemas: [], retiredLogins, pendingLogins: [] }
+  return { dropped: [...left.dropped, ...schemas], retiredSchemas: left.retired, retiredLogins, pendingLogins: [] }
 }
 
 /**
