@@ -751,16 +751,11 @@ export async function restoreWorkspace(
     // (the dump carries none): the backup role's, so the next snapshot would
     // fail, and any direct-access role's. The sync makes them again. Caught
     // here and never rethrown: the old copy is gone, and the rollback below
-    // would drop the restored data.
+    // would drop the restored data. The sync runs on the database holding the
+    // project's data, its own included.
     try {
       const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
       await syncDirectAccessGrants(projectId)
-      // In a project's own database the backup role's read is made there too,
-      // on the client the restore ran its checks on.
-      if (placement.tenancy === 'dedicated') {
-        const { grantBackupReadOn } = await import('@/lib/data-plane/project-databases')
-        await grantBackupReadOn(db, schemaName)
-      }
     } catch (grantErr: any) {
       console.warn(
         `[Restore] Restored ${projectId}, but its grants were not made again: ` +

@@ -34,6 +34,7 @@ import {
   planCredentials,
   projectDatabasesInput,
   readDatabaseList,
+  secretValue,
   type Aws,
   type LaunchConfig,
   type ManagedRole,
@@ -64,6 +65,11 @@ const CONFIG: LaunchConfig = {
 
 /** A region whose config also names the secret of the role that creates project databases. */
 const WITH_CREATOR: LaunchConfig = { ...CONFIG, secrets: { ...CONFIG.secrets, dbcreator: secretArn('dbcreator-url') } }
+/** A region whose config also names the secret of the connection pooler's login. */
+const WITH_POOLER: LaunchConfig = { ...CONFIG, secrets: { ...CONFIG.secrets, poolerAuth: secretArn('pooler-auth-password') } }
+
+/** As roles.sql: made only by an apply that is given its verifier. */
+const OPTIONAL_ROLES: ManagedRole[] = ['backenly_dbcreator', 'backenly_pooler_auth']
 
 const ALL_ROLES = Object.keys(ROLES) as ManagedRole[]
 const BASE_ROLES = REQUIRED_ROLES
@@ -190,6 +196,11 @@ class FakeAws {
     throw new Error(`the model has no ${service} ${command}`)
   }
 
+  /** The steps bootstrap.sh reports: the pooler's only where its login exists, right after the roles. */
+  private steps(): string[] {
+    return this.db.roles.backenly_pooler_auth ? ['roles', 'pooler', ...STEPS.slice(1)] : STEPS
+  }
+
   /** bootstrap.sh, as the launcher sees it: its report lines, its refusals, its exit code. */
   private procedure(env: Record<string, string>): { exitCode: number; lines: string[] } {
     if (env.BOOTSTRAP_MODE === 'template') {
@@ -229,8 +240,8 @@ class FakeAws {
       for (const role of ALL_ROLES) {
         const verifier = env[ROLES[role].verifier]
         const have = this.db.roles[role]
-        // As roles.sql: the database creator is made only when given its verifier.
-        if (!have && !verifier && role === 'backenly_dbcreator') continue
+        // As roles.sql: the database creator and the pooler's login are made only when given their verifiers.
+        if (!have && !verifier && OPTIONAL_ROLES.includes(role)) continue
         if (!have && !verifier) return { exitCode: 3, lines: [...lines, `ERROR:  refusing: ${role} does not exist, and no verifier was supplied`] }
         if (have && verifier && !rotate.includes(role)) {
           return { exitCode: 3, lines: [...lines, `ERROR:  refusing: ${role} already has the password this procedure set`] }
@@ -242,9 +253,9 @@ class FakeAws {
       }
       this.db.applied = true
       this.db.changed = false
-      for (const id of STEPS) lines.push(`  step ${id}: applied`)
+      for (const id of this.steps()) lines.push(`  step ${id}: applied`)
     } else {
-      for (const id of STEPS) {
+      for (const id of this.steps()) {
         const state = !this.db.applied
           ? 'pending (not applied)'
           : this.db.changed && id === 'direct-access'
@@ -258,7 +269,7 @@ class FakeAws {
       lines.push(
         `  credential ${role}: ${
           !have
-            ? role === 'backenly_dbcreator'
+            ? OPTIONAL_ROLES.includes(role)
               ? `missing (an apply makes it only when given ${ROLES[role].verifier})`
               : `missing (the first apply must supply ${ROLES[role].verifier})`
             : have.recorded
@@ -346,6 +357,9 @@ describe('a first apply', () => {
     for (const role of BASE_ROLES) expect(applyEnv[ROLES[role].verifier]).toMatch(/^SCRAM-SHA-256\$4096:/)
     expect(applyEnv.BACKENLY_DBCREATOR_VERIFIER).toBeUndefined()
     expect(fake.db.roles.backenly_dbcreator).toBeUndefined()
+    // Nor the pooler's login, for the same reason.
+    expect(applyEnv.BACKENLY_POOLER_AUTH_VERIFIER).toBeUndefined()
+    expect(fake.db.roles.backenly_pooler_auth).toBeUndefined()
     expect(applyEnv.BOOTSTRAP_ROTATE).toBeUndefined()
     // ...on standard input only: no verifier is ever an argument (the process list).
     for (const call of fake.calls) expect(call.args.join(' ')).not.toContain('SCRAM-SHA-256')
@@ -481,6 +495,97 @@ describe('the role that creates project databases', () => {
     expect(runTasks(fake)).toHaveLength(0)
     expect(await launch('apply', CONFIG, [], deps(fake))).toBe(0)
     expect(fake.db.roles.backenly_dbcreator).toBeUndefined()
+  })
+})
+
+describe('the connection pooler’s login', () => {
+  it('is made where the region’s config names its secret, which holds the password itself, current only once the procedure set it', async () => {
+    const { fake, passwords } = finished({}, WITH_POOLER)
+    const log: string[] = []
+    expect(await launch('apply', WITH_POOLER, [], deps(fake, log))).toBe(0)
+
+    // The pooler is given its server separately: its secret is the password,
+    // 64 hex characters, which POOLER_AUTH_PASSWORD accepts, and not a URL.
+    const password = fake.current(WITH_POOLER.secrets.poolerAuth!)!
+    expect(password).toMatch(/^[0-9a-f]{64}$/)
+    expect(verifies(password, fake.db.roles.backenly_pooler_auth!.verifier!)).toBe(true)
+    expect(fake.stagesOf(WITH_POOLER.secrets.poolerAuth!)).toEqual([['AWSCURRENT']])
+
+    // Stored pending before the apply that set it, and promoted only after.
+    const order = fake.calls.map((c) => `${c.args[1]}${c.args.includes('AWSPENDING') ? ':pending' : ''}${c.args[1] === 'run-task' ? `:${envOf(c).BOOTSTRAP_MODE}` : ''}`)
+    const applyAt = order.indexOf('run-task:apply')
+    expect(order.slice(0, applyAt).filter((o) => o === 'put-secret-value:pending')).toHaveLength(1)
+    expect(order.findIndex((o) => o === 'update-secret-version-stage')).toBeGreaterThan(applyAt)
+
+    // The procedure got its verifier alone, and the password went nowhere but its secret.
+    const applyEnv = envOf(runTasks(fake)[1])
+    expect(Object.keys(applyEnv).sort()).toEqual(['BACKENLY_POOLER_AUTH_VERIFIER', 'BOOTSTRAP_MODE'])
+    expect(applyEnv.BACKENLY_POOLER_AUTH_VERIFIER).toBe(fake.db.roles.backenly_pooler_auth!.verifier)
+    expect(fake.calls.filter((c) => c.args.join(' ').includes(password))).toEqual([])
+    expect(fake.calls.filter((c) => c.args[1] !== 'put-secret-value' && (c.stdin ?? '').includes(password))).toEqual([])
+    expect(log.join('\n')).not.toContain(password)
+
+    // Every other credential is as it was, and the closing check finds the
+    // pooler's step current and its credential recorded.
+    for (const [key, role] of [['app', 'backenly_app'], ['backup', 'backenly_backup'], ['authenticator', 'backenly_authenticator']] as const) {
+      expect(passwordOf(fake.current(WITH_POOLER.secrets[key])!)).toBe(passwords[role])
+    }
+    expect(log).toContain('   |   step pooler: current (applied, files unchanged)')
+    expect(log.join('\n')).toContain('The region database is initialised: every step current, every credential recorded and kept.')
+  })
+
+  it('stays pending, unseen by the pooler, when the apply fails', async () => {
+    const { fake } = finished({ failApply: true }, WITH_POOLER)
+    expect(await launch('apply', WITH_POOLER, [], deps(fake))).toBe(1)
+    expect(fake.current(WITH_POOLER.secrets.poolerAuth!)).toBeUndefined()
+    expect(fake.stagesOf(WITH_POOLER.secrets.poolerAuth!)).toEqual([['AWSPENDING']])
+    expect(fake.db.roles.backenly_pooler_auth).toBeUndefined()
+  })
+
+  it('is rotated when named, and only then', async () => {
+    const { fake } = finished({}, WITH_POOLER)
+    expect(await launch('apply', WITH_POOLER, [], deps(fake))).toBe(0)
+    const first = fake.current(WITH_POOLER.secrets.poolerAuth!)!
+
+    // An apply that names nothing leaves it alone.
+    expect(await launch('apply', WITH_POOLER, [], deps(fake))).toBe(0)
+    expect(fake.current(WITH_POOLER.secrets.poolerAuth!)).toBe(first)
+
+    const log: string[] = []
+    expect(await launch('apply', WITH_POOLER, ['backenly_pooler_auth'], deps(fake, log))).toBe(0)
+    const second = fake.current(WITH_POOLER.secrets.poolerAuth!)!
+    expect(second).not.toBe(first)
+    expect(second).toMatch(/^[0-9a-f]{64}$/)
+    expect(verifies(second, fake.db.roles.backenly_pooler_auth!.verifier!)).toBe(true)
+    const applyEnv = envOf(runTasks(fake).filter((c) => envOf(c).BOOTSTRAP_MODE === 'apply').pop()!)
+    expect(applyEnv.BOOTSTRAP_ROTATE).toBe('backenly_pooler_auth')
+    expect(log.join('\n')).toContain('Rotated backenly_pooler_auth: restart the services that use it now')
+  })
+
+  it('is not asked of a region whose config does not name its secret, and cannot be rotated there', async () => {
+    expect(managedRoles(CONFIG)).toEqual(BASE_ROLES)
+    expect(managedRoles(WITH_POOLER)).toEqual([...BASE_ROLES, 'backenly_pooler_auth'])
+    expect(managedRoles({ ...WITH_POOLER, secrets: { ...WITH_POOLER.secrets, dbcreator: secretArn('dbcreator-url') } })).toEqual([
+      ...BASE_ROLES,
+      'backenly_dbcreator',
+      'backenly_pooler_auth',
+    ])
+    const { fake } = finished()
+    await expect(launch('apply', CONFIG, ['backenly_pooler_auth'], deps(fake))).rejects.toThrow(/does not manage: its config names no secret/)
+    expect(runTasks(fake)).toHaveLength(0)
+    expect(await launch('apply', CONFIG, [], deps(fake))).toBe(0)
+    expect(fake.db.roles.backenly_pooler_auth).toBeUndefined()
+    expect(envOf(runTasks(fake)[1]).BACKENLY_POOLER_AUTH_VERIFIER).toBeUndefined()
+  })
+
+  it('is the only role whose secret holds a password rather than a connection string', () => {
+    const password = generatePassword()
+    for (const role of ALL_ROLES) {
+      const value = secretValue(role, password, CONFIG.database)
+      if (role === 'backenly_pooler_auth') expect(value).toBe(password)
+      else expect(value).toBe(connectionString(role, password, CONFIG.database))
+    }
+    expect(ALL_ROLES.filter((role) => ROLES[role].stored === 'password')).toEqual(['backenly_pooler_auth'])
   })
 })
 
@@ -646,6 +751,9 @@ describe('arguments and configuration', () => {
     expect(() => parseArgs(['drop', '--config', 'l.json'])).toThrow(/usage/)
     expect(() => parseArgs(['check', '--config', 'l.json', '--rotate', 'backenly_app'])).toThrow(/check writes nothing/)
     expect(() => parseArgs(['apply', '--config', 'l.json', '--rotate', 'postgres'])).toThrow(/does not manage: postgres/)
+    expect(parseArgs(['apply', '--config', 'l.json', '--rotate', 'backenly_pooler_auth'])).toEqual({
+      mode: 'apply', configPath: 'l.json', rotate: ['backenly_pooler_auth'],
+    })
   })
 
   it('reads template and project-dbs, and what each needs', () => {
@@ -671,6 +779,13 @@ describe('arguments and configuration', () => {
     expect(() => loadConfig(JSON.stringify({ ...CONFIG, secrets: { ...CONFIG.secrets, dbcreator: secretArn('x').replace(REGION, 'eu-central-1') } }))).toThrow(
       /dbcreator secret is not in us-east-1/,
     )
+    // So is the pooler's login's: absent, null, or in the region.
+    expect(loadConfig(JSON.stringify(WITH_POOLER))).toEqual(WITH_POOLER)
+    expect(loadConfig(JSON.stringify({ ...CONFIG, secrets: { ...CONFIG.secrets, poolerAuth: null } }))).toEqual(CONFIG)
+    expect(() => loadConfig(JSON.stringify({ ...CONFIG, secrets: { ...CONFIG.secrets, poolerAuth: secretArn('x').replace(REGION, 'eu-central-1') } }))).toThrow(
+      /poolerAuth secret is not in us-east-1/,
+    )
+    expect(() => loadConfig(JSON.stringify({ ...CONFIG, secrets: { ...CONFIG.secrets, poolerAuth: '' } }))).toThrow(/no poolerAuth secret/)
     expect(() => loadConfig('not json')).toThrow(/terraform output -json/)
   })
 })

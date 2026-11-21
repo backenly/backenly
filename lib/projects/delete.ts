@@ -94,7 +94,7 @@ import {
 } from '@/lib/security/workspace-schema'
 import { CHANNEL_TABLE_EXISTS_SQL, DELETE_CHANNELS_SQL } from '@/lib/realtime/channel-sql'
 import { purgeProjectExternals } from '@/lib/projects/purge'
-import { syncAllowlist } from '@/lib/services/direct-access-allowlist'
+import { forgetPoolerLogins } from '@/lib/services/direct-access'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
 import { purgeAccountState } from '@/lib/usage/account'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
@@ -778,9 +778,9 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
   // Its keys stop working in its region once the region has the deletion
   // (lib/auth-projection/confirm.ts); `pending` says it is still in flight.
   const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
-  // Its allowed addresses went with its row: the region's network allowlist
-  // drops each one no other project there allows. Never throws.
-  await syncAllowlist(region)
+  // Its logins went with its database: the connection pooler's rows for them
+  // go too. Only a project with a database of its own has any. Never throws.
+  if (dedicated) await forgetPoolerLogins(projectId, region)
 
   return {
     projectIds: [projectId],
@@ -921,9 +921,11 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
   const externalPurgeCompleted = await attemptImmediatePurge(
     projectIds.map((projectId, i) => ({ projectId, jobId: jobIds[i], region: regions.get(projectId) ?? HOME_REGION })),
   )
-  // The projects' allowed addresses went with them: each region's network
-  // allowlist drops the ones no other project there allows.
-  for (const region of new Set(projectIds.map((projectId) => regions.get(projectId) ?? HOME_REGION))) await syncAllowlist(region)
+  // The logins of the projects with a database of their own went with their
+  // databases: the connection pooler's rows for them go too. Never throws.
+  for (const projectId of projectIds) {
+    if (dedicatedProjects.has(projectId)) await forgetPoolerLogins(projectId, regions.get(projectId) ?? HOME_REGION)
+  }
 
   return {
     projectIds,

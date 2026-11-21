@@ -36,6 +36,12 @@
  * A third is in the definers themselves: dropping a login needs its privileges,
  * which its creator does not hold (see the block on logins below).
  *
+ * The region is first built without the connection pooler's login, and then
+ * given it by an apply that supplies its verifier, as a region whose launch
+ * config gains the pooler's secret is: the administrator makes the login and
+ * the pooler's own database, backenly_pooler, and the lookup the pooler reads
+ * customers' logins through answers as that login.
+ *
  * The last suites give a project a database of its own: the procedure builds
  * the template such databases are cloned from, a role that may create
  * databases and nothing else clones it, the clone's owner gives it its grants
@@ -124,6 +130,12 @@ const MISSING: Record<Login, string> = {
   backenly_dbcreator: 'missing (an apply makes it only when given BACKENLY_DBCREATOR_VERIFIER)',
 }
 
+/** The connection pooler's login and its database, made only by an apply given its verifier. */
+const POOLER_AUTH = 'backenly_pooler_auth'
+const POOLER_DB = 'backenly_pooler'
+const POOLER_MISSING = 'missing (an apply makes it only when given BACKENLY_POOLER_AUTH_VERIFIER)'
+let poolerPassword = generatePassword()
+
 const SUPER_PW = generatePassword()
 const ADMIN_PW = generatePassword()
 const passwords: Record<Login, string> = {
@@ -148,6 +160,7 @@ function url(user: string, password: string, database = DB): string {
 const superUrl = (database = DB) => url('postgres', SUPER_PW, database)
 const adminUrl = (database = DB) => url(ADMIN, ADMIN_PW, database)
 const loginUrl = (role: Login) => url(role, passwords[role])
+const poolerAuthUrl = () => url(POOLER_AUTH, poolerPassword, POOLER_DB)
 
 async function rows<T = Record<string, unknown>>(connection: string, sql: string, params: unknown[] = []): Promise<T[]> {
   const client = new Client({ connectionString: connection })
@@ -353,6 +366,9 @@ beforeAll(async () => {
   // another only with the ADMIN option on it, which is what roles.sql needs to
   // give the application pg_read_all_stats.
   await rows(superUrl('postgres'), `GRANT pg_read_all_stats TO ${ADMIN} WITH ADMIN OPTION`)
+  // And pg_signal_backend, which roles.sql gives the database creator so that
+  // DROP DATABASE ... WITH (FORCE) can end the sessions in a project database.
+  await rows(superUrl('postgres'), `GRANT pg_signal_backend TO ${ADMIN} WITH ADMIN OPTION`)
   await rows(superUrl('postgres'), `CREATE DATABASE ${DB} OWNER ${ADMIN}`)
 
   vectorAvailable = (await rows(superUrl(), `SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`)).length > 0
@@ -378,6 +394,9 @@ suite('a region’s first database', () => {
     expect(result.status).toBe(0)
     for (const step of STEPS) expect(result.output).toContain(`step ${step}: pending`)
     for (const role of LOGINS) expect(result.output).toContain(`credential ${role}: ${MISSING[role]}`)
+    // A region without the pooler's login has no step for it at all.
+    expect(result.output).toContain(`credential ${POOLER_AUTH}: ${POOLER_MISSING}`)
+    expect(result.output).not.toContain('step pooler')
     expect(result.output).toContain(`Check only: nothing was written. ${STEPS.length} step(s) not applied yet.`)
     expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = 'backenly_meta'`)).toEqual([])
     expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [[...LOGINS]])).toEqual([])
@@ -435,6 +454,12 @@ suite('a region’s first database', () => {
     if (!vectorAvailable) {
       expect(result.output).toContain('rehearsal: extension vector is not available on this server')
     }
+    // Given no verifier for it, the procedure makes neither the pooler's login
+    // nor its database, runs no step for it, and verifies all the same.
+    expect(result.output).not.toContain('step pooler')
+    expect(result.output).toContain(`credential ${POOLER_AUTH}: ${POOLER_MISSING}`)
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_roles WHERE rolname = $1`, [POOLER_AUTH])).toEqual([])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_database WHERE datname = $1`, [POOLER_DB])).toEqual([])
     const extensions = await rows<{ extname: string; schema: string }>(
       superUrl(),
       `SELECT extname, extnamespace::regnamespace::text AS schema FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY extname`,
@@ -453,6 +478,104 @@ suite('a region’s first database', () => {
     expect(await catalog()).toEqual(before)
   })
 
+  it('gets the connection pooler’s login and database from the administrator when an apply gives its verifier', async () => {
+    const result = bootstrap({
+      DATABASE_URL: adminUrl(),
+      BOOTSTRAP_MODE: 'apply',
+      EXPECT_DATABASE: DB,
+      BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(poolerPassword),
+    })
+    expect(result.output).toContain('step roles: re-applied (files unchanged)')
+    expect(result.output).toContain(`database ${POOLER_DB}: created`)
+    expect(result.output).toContain('step pooler: applied')
+    expect(result.output).toContain('backenly_pooler: logins table, lookup, databases and privileges as declared')
+    // The steps after it need a superuser on stock PostgreSQL, as the first
+    // apply's did; the next test finishes the run as one.
+    expect(result.status).not.toBe(0)
+    expect(result.output).not.toContain('step postgrest: re-applied')
+
+    // It can log in, and do nothing else: no attribute, no role, sixty connections.
+    expect(
+      await rows(
+        superUrl(),
+        `SELECT rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolconnlimit
+           FROM pg_roles WHERE rolname = $1`,
+        [POOLER_AUTH],
+      ),
+    ).toEqual([
+      {
+        rolcanlogin: true, rolinherit: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false,
+        rolreplication: false, rolbypassrls: false, rolconnlimit: 60,
+      },
+    ])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_auth_members WHERE member = $1::regrole`, [POOLER_AUTH])).toEqual([])
+    expect(
+      await rows(superUrl(), `SELECT set_by, rotations FROM backenly_meta.bootstrap_credentials WHERE role_name = $1`, [POOLER_AUTH]),
+    ).toEqual([{ set_by: ADMIN, rotations: 0 }])
+
+    // The database and everything in it are the administrator's, as the RDS
+    // master's would be, and the step is recorded in the region's own ledger
+    // with the checksum of both its files.
+    expect(await rows(superUrl(), `SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1`, [POOLER_DB])).toEqual([
+      { owner: ADMIN },
+    ])
+    expect(
+      await rows(
+        superUrl(POOLER_DB),
+        `SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass`,
+      ),
+    ).toEqual([{ owner: ADMIN }])
+    const checksum = createHash('sha256')
+      .update(Buffer.concat(['sql/pooler.sql', 'sql/verify-pooler.sql'].map((f) => fs.readFileSync(path.join(ROOT, 'tools/managed-db/regional', f)))))
+      .digest('hex')
+    expect(await rows(superUrl(), `SELECT checksum FROM backenly_meta.bootstrap_steps WHERE step = 'pooler'`)).toEqual([{ checksum }])
+
+    // The verifier is its password: it logs in to its database with it, and
+    // not with another.
+    expect(await rows(poolerAuthUrl(), 'SELECT current_user AS me')).toEqual([{ me: POOLER_AUTH }])
+    expect(await refusal(url(POOLER_AUTH, generatePassword(), POOLER_DB), 'SELECT 1')).toMatch(/password authentication failed/)
+  })
+
+  it('serves a login’s verifier to the pooler’s login, as the pooler asks for it, and nothing else', async () => {
+    const probe = 'bkn_ci_pooler_probe'
+    const database = `p_${randomUUID().replace(/-/g, '')}`
+    const verifier = scramSha256Verifier(generatePassword())
+    await rows(superUrl(), `CREATE ROLE ${probe} LOGIN PASSWORD '${verifier}'`)
+    const app = url('backenly_app', passwords.backenly_app, POOLER_DB)
+    try {
+      await rows(app, `INSERT INTO backenly_pooler.logins (rolname, verifier, database) VALUES ($1, $2, $3)`, [probe, verifier, database])
+      const lookup = `SELECT usename::text AS usename, passwd FROM backenly_pooler.lookup($1, $2)`
+      expect(await rows(poolerAuthUrl(), lookup, [probe, database])).toEqual([{ usename: probe, passwd: verifier }])
+      // Only for that login's own database, and only while it is active.
+      expect(await rows(poolerAuthUrl(), lookup, [probe, `p_${'0'.repeat(32)}`])).toEqual([])
+      await rows(app, `UPDATE backenly_pooler.logins SET active = false, updated_at = now() WHERE rolname = $1`, [probe])
+      expect(await rows(poolerAuthUrl(), lookup, [probe, database])).toEqual([])
+      // The pooler's login reads nothing itself, and the application looks nothing up.
+      expect(await refusal(poolerAuthUrl(), `SELECT * FROM backenly_pooler.logins`)).toMatch(/permission denied/)
+      expect(await refusal(app, `SELECT * FROM backenly_pooler.lookup('${probe}', '${database}')`)).toMatch(/permission denied/)
+    } finally {
+      await rows(app, `DELETE FROM backenly_pooler.logins WHERE rolname = $1`, [probe]).catch(() => {})
+      await rows(superUrl(), `DROP ROLE IF EXISTS ${probe}`)
+    }
+  })
+
+  it('is finished by a superuser, re-applying the pooler’s step without changing whose its database is, and verifies', async () => {
+    const result = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: DB })
+    expect(result.output).toContain('Regional database initialised and verified.')
+    expect(result.status).toBe(0)
+    expect(result.output).toContain(`database ${POOLER_DB}: exists`)
+    for (const step of ['roles', 'pooler']) expect(result.output).toContain(`step ${step}: re-applied (files unchanged)`)
+    for (const step of STEPS.slice(1)) expect(result.output).toContain(`step ${step}:`)
+    expect(result.output).toMatch(new RegExp(`credential ${POOLER_AUTH}: recorded \\d{4}-`))
+    const owners = await rows<{ owner: string }>(
+      superUrl(POOLER_DB),
+      `SELECT DISTINCT pg_get_userbyid(p.proowner) AS owner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'backenly_pooler'
+       UNION SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass`,
+    )
+    expect(owners).toEqual([{ owner: ADMIN }])
+  })
+
   it('is handed to the administrator, as RDS leaves it, and a check audits it, writing nothing', async () => {
     // After this nothing re-applies until the application has run against it:
     // setup-direct-access.sql drops and recreates its role functions on every
@@ -469,9 +592,36 @@ suite('a region’s first database', () => {
     const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
     expect(result.output).toContain('Check only: nothing was written. Every step is recorded, and the database verifies.')
     expect(result.status).toBe(0)
-    for (const step of STEPS) expect(result.output).toContain(`step ${step}: current`)
-    for (const role of LOGINS) expect(result.output).toContain(`credential ${role}: recorded`)
+    for (const step of [...STEPS, 'pooler']) expect(result.output).toContain(`step ${step}: current`)
+    for (const role of [...LOGINS, POOLER_AUTH]) expect(result.output).toContain(`credential ${role}: recorded`)
+    // The pooler's database is verified by the check too.
+    expect(result.output).toContain('backenly_pooler: logins table, lookup, databases and privileges as declared')
     expect(await rows(superUrl(), `SELECT step, checksum, applied_at, applied_by FROM backenly_meta.bootstrap_steps ORDER BY step`)).toEqual(before)
+  })
+
+  it('fails a check when the pooler’s login or its database is not as declared', async () => {
+    await rows(superUrl(), `GRANT backenly_external TO ${POOLER_AUTH}`)
+    await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 70`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+      expect(result.status).not.toBe(0)
+      expect(result.output).toContain(`role ${POOLER_AUTH} is a member of backenly_external; it may hold no role`)
+      expect(result.output).toContain(`role ${POOLER_AUTH} must have CONNECTION LIMIT 60, not 70`)
+    } finally {
+      await rows(superUrl(), `REVOKE backenly_external FROM ${POOLER_AUTH}`)
+      await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 60`)
+    }
+
+    // In its own database, as its owner could make it.
+    await rows(adminUrl(POOLER_DB), `GRANT SELECT ON backenly_pooler.logins TO PUBLIC`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+      expect(result.status).not.toBe(0)
+      expect(result.output).toContain('backenly_pooler did not reach its declared state: public has any privilege on logins')
+    } finally {
+      await rows(adminUrl(POOLER_DB), `REVOKE SELECT ON backenly_pooler.logins FROM PUBLIC`)
+    }
+    expect(bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB }).status).toBe(0)
   })
 })
 
@@ -1347,10 +1497,23 @@ suite('a project’s own database, cloned from the region’s template', () => {
       await rows(
         superUrl(),
         `SELECT rolcreatedb, rolcreaterole, rolsuper, rolinherit, rolbypassrls,
-                (SELECT count(*)::int FROM pg_auth_members m WHERE m.member = r.oid) AS member_of
+                (SELECT array_agg(m.roleid::regrole::text) FROM pg_auth_members m WHERE m.member = r.oid) AS member_of,
+                pg_has_role(r.oid, 'pg_signal_backend', 'USAGE') AS signals,
+                pg_has_role(r.oid, 'pg_signal_backend', 'SET') AS becomes
            FROM pg_roles r WHERE rolname = 'backenly_dbcreator'`,
       ),
-    ).toEqual([{ rolcreatedb: true, rolcreaterole: false, rolsuper: false, rolinherit: false, rolbypassrls: false, member_of: 0 }])
+    ).toEqual([
+      {
+        rolcreatedb: true,
+        rolcreaterole: false,
+        rolsuper: false,
+        rolinherit: false,
+        rolbypassrls: false,
+        member_of: ['pg_signal_backend'],
+        signals: true,
+        becomes: false,
+      },
+    ])
     // It reads nothing in the region's database, and creates nothing there.
     expect(await refusal(creatorUrl(), `SELECT count(*) FROM public.schema_drift_events`)).toMatch(/permission denied/)
     expect(await refusal(creatorUrl(), `CREATE SCHEMA creator_probe`)).toMatch(/permission denied/)
@@ -2019,6 +2182,30 @@ suite('the procedure refuses', () => {
     expect(
       await rows(superUrl(), `SELECT rotations FROM backenly_meta.bootstrap_credentials WHERE role_name = 'backenly_authenticator'`),
     ).toEqual([{ rotations: 1 }])
+  })
+
+  it('to replace the pooler’s login’s password unasked, and rotates it when asked', async () => {
+    const before = await catalog()
+    const unasked = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(generatePassword()) })
+    expect(unasked.status).not.toBe(0)
+    expect(unasked.output).toContain(`refusing: ${POOLER_AUTH} already has the password this procedure set at`)
+    expect(await catalog()).toEqual(before)
+
+    const old = poolerPassword
+    poolerPassword = generatePassword()
+    const result = bootstrap({
+      DATABASE_URL: superUrl(),
+      BOOTSTRAP_MODE: 'apply',
+      BOOTSTRAP_ROTATE: POOLER_AUTH,
+      BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(poolerPassword),
+    })
+    expect(result.output).toContain('Regional database initialised and verified.')
+    expect(result.status).toBe(0)
+    expect(await rows(poolerAuthUrl(), 'SELECT current_user AS me')).toEqual([{ me: POOLER_AUTH }])
+    expect(await refusal(url(POOLER_AUTH, old, POOLER_DB), 'SELECT 1')).toMatch(/password authentication failed/)
+    expect(await rows(superUrl(), `SELECT rotations FROM backenly_meta.bootstrap_credentials WHERE role_name = $1`, [POOLER_AUTH])).toEqual([
+      { rotations: 1 },
+    ])
   })
 
   it('to pass a database that has drifted from what it promises', async () => {

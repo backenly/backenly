@@ -604,22 +604,6 @@ export async function forEachProjectDatabase<R>(
 
 // ── Grants inside a project database ─────────────────────────────────────────
 
-/**
- * Give the backup role read on a workspace schema in the database `db`
- * reaches, and the default privileges that cover each table added to it later:
- * public.backenly_direct_sync_schema with no login, the call a project without
- * direct access gets (lib/services/direct-access.ts grantWorkspaceBackupAccess
- * makes the same call on a region's database). False where the helper is not
- * installed.
- */
-export async function grantBackupReadOn(db: WorkspaceRawClient, schema: string): Promise<boolean> {
-  const [probe] = await db.$queryRaw<Array<{ present: boolean }>>`
-    SELECT to_regprocedure('public.backenly_direct_sync_schema(text,text,text,text)') IS NOT NULL AS present`
-  if (!probe?.present) return false
-  await db.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, NULL, NULL, NULL)`
-  return true
-}
-
 /** The project's schemas in its own database: its canonical one, its branches and its vaults. */
 export async function projectSchemasIn(db: WorkspaceRawClient, projectId: string): Promise<string[]> {
   const canonical = workspaceSchemaName(projectId)
