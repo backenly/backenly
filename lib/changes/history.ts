@@ -280,10 +280,11 @@ export async function listChanges(
 ): Promise<{ changes: ChangeSummary[]; windowDays: number; nextBeforeSeq: number | null }> {
   const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100)
   const rows = await prisma.backendChange.findMany({
-    // Snapshot restores are in the history too: the biggest change of all.
+    // Snapshot restores are in the history too: the biggest change of all. So
+    // is a move to a database of its own, which changed where the data is.
     where: {
       projectId,
-      kind: { in: ['change', 'snapshot_restore'] },
+      kind: { in: ['change', 'snapshot_restore', 'tenancy_migration'] },
       status: { not: 'failed' },
       ...(opts.beforeSeq ? { seq: { lt: opts.beforeSeq } } : {}),
       ...(opts.resource ? { resources: { has: opts.resource } } : {}),
