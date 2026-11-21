@@ -31,7 +31,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { regionDriftEvents, regionOfRecord, regionRawClient } from '@/lib/data-plane/regional'
+import { regionDriftEvents, regionOfRecord, regionRawClient, type PendingGroup } from '@/lib/data-plane/regional'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import type { CloudRegionId } from '@/lib/regions'
 
@@ -118,11 +118,11 @@ export async function driftEventBacklog(region: CloudRegionId, now: Date = new D
   let oldest: Date | null = null
   for (const group of groups) {
     if (group.projectId !== null && held.has(group.projectId)) {
-      pending += group._count._all
-      const first = group._min.capturedAt
+      pending += group.count
+      const first = group.oldestCapturedAt
       if (first && (!oldest || first < oldest)) oldest = first
     } else {
-      orphaned += group._count._all
+      orphaned += group.count
     }
   }
   return {
@@ -133,13 +133,8 @@ export async function driftEventBacklog(region: CloudRegionId, now: Date = new D
 }
 
 /** Pending events, grouped by the project they name, with the oldest capture of each. */
-async function pendingByProject(region: CloudRegionId, capturedBefore?: Date) {
-  return regionDriftEvents(region).groupBy({
-    by: ['projectId'],
-    where: { status: 'pending', ...(capturedBefore ? { capturedAt: { lt: capturedBefore } } : {}) },
-    _count: { _all: true },
-    _min: { capturedAt: true },
-  })
+async function pendingByProject(region: CloudRegionId, capturedBefore?: Date): Promise<PendingGroup[]> {
+  return regionDriftEvents(region).pendingByProject({ capturedBefore })
 }
 
 function namedProjects(groups: Array<{ projectId: string | null }>): string[] {
@@ -170,10 +165,7 @@ export async function pruneResolvedDriftEvents(
   now: Date = new Date(),
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
-  const { count } = await regionDriftEvents(region).deleteMany({
-    where: { status: { in: ['adopted', 'ignored'] }, resolvedAt: { lt: cutoff } },
-  })
-  return count
+  return regionDriftEvents(region).deleteResolvedBefore(cutoff)
 }
 
 /**
@@ -194,14 +186,7 @@ export async function pruneOrphanedDriftEvents(
   const gone = named.filter((projectId) => !held.has(projectId))
   const unnamed = groups.some((group) => group.projectId === null)
   if (gone.length === 0 && !unnamed) return 0
-  const { count } = await regionDriftEvents(region).deleteMany({
-    where: {
-      status: 'pending',
-      capturedAt: { lt: cutoff },
-      OR: [...(unnamed ? [{ projectId: null }] : []), ...(gone.length > 0 ? [{ projectId: { in: gone } }] : [])],
-    },
-  })
-  return count
+  return regionDriftEvents(region).deletePendingBefore(cutoff, { projectIds: gone, unnamed })
 }
 
 export interface DriftUpkeepReport {

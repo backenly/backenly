@@ -109,12 +109,9 @@ export async function changesBefore(
     }).catch(() => []),
     // In the project's region, where they are captured. A region this process
     // cannot reach is not "no external changes".
-    projectDriftEvents(projectId).then((events) => events.findMany({
-      where: { projectId, capturedAt: { gte: since, lte: deviationAt } },
-      orderBy: { capturedAt: 'desc' },
-      take: MAX_CHANGES,
-      select: { commandTag: true, objectIdentity: true, roleName: true, capturedAt: true },
-    })).catch(unlessRegionError([])),
+    projectDriftEvents(projectId)
+      .then((events) => events.capturedBetween(projectId, { from: since, to: deviationAt, take: MAX_CHANGES }))
+      .catch(unlessRegionError([])),
     prisma.deployment.findMany({
       where: { projectId, createdAt: { gte: since, lte: deviationAt } },
       orderBy: { createdAt: 'desc' },
