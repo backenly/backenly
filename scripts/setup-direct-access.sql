@@ -21,7 +21,10 @@
 --                                     change the schema (section 5b).
 --   2. backenly_direct_create_role  — create/reset a bkn_ro_/bkn_rw_ login role
 --                                     (hardened: connection limit, timeouts,
---                                     search_path pinned to the one schema).
+--                                     search_path pinned to the one schema),
+--                                     with CONNECT on this database by name
+--                                     where PUBLIC has none (a project's own
+--                                     database).
 --   3. backenly_direct_set_password — rotate.
 --   3b. backenly_direct_set_connection_limit — how many connections a login
 --                                     may hold at once: its project's plan's.
@@ -182,6 +185,20 @@ BEGIN
       EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
                           THEN 'GRANT backenly_no_schema_changes TO %I WITH INHERIT FALSE, SET FALSE'
                           ELSE 'GRANT backenly_no_schema_changes TO %I' END, p_role);
+    END IF;
+  END IF;
+
+  -- A project's own database lets no login connect through PUBLIC
+  -- (tools/managed-db/regional/sql/project-db.sql), so its logins are given
+  -- CONNECT on it by name, and on no other project's database. Re-keying a
+  -- login made before this gives it too. Where PUBLIC may connect, as on a
+  -- database several projects share, nothing is granted and nothing changes.
+  -- A GRANT the definer cannot make may only warn, so the result is read back.
+  IF NOT has_database_privilege('public', current_database(), 'CONNECT') THEN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), p_role);
+    IF NOT has_database_privilege(p_role, current_database(), 'CONNECT') THEN
+      RAISE EXCEPTION 'backenly_direct_create_role: % could not be given CONNECT on database %; the role that owns this function needs CONNECT on it WITH GRANT OPTION (scripts/sql/project-database-acl.sql)',
+        p_role, current_database();
     END IF;
   END IF;
 
@@ -839,30 +856,55 @@ REVOKE ALL ON FUNCTION public.backenly_direct_set_schema_changes(text, boolean) 
 -- ends whatever sessions it has and clears the mark: by the application right
 -- after each sync, by each sync of that login, and by this file (section 7b).
 --
--- A database is dedicated to one project only when a superuser says so for
--- this database and it holds one project's workspace:
+-- A database is dedicated to one project only when it is marked so and holds
+-- at most one project's workspace. Either of two marks counts:
+--
+--   A row of backenly_meta.tenancy with dedicated = true. A project with a
+--   database of its own gets it from the regional procedure, in the template
+--   its database is cloned from and again whenever the procedure converges it
+--   (tools/managed-db/regional/sql/project-db.sql). It counts only while the
+--   table and its schema belong to the role that owns this function, or to a
+--   superuser, so that no other role can write or create it; a managed database
+--   such as Amazon RDS, which has no superuser, can carry this one.
 --
 --   ALTER DATABASE <db> SET backenly.database_tenancy = 'dedicated';
+--   scripts/sql/dedicated-database.sql does that, and scripts/selfhost.ts runs
+--   it: a self-hosted deployment is one project. Only a superuser can set a
+--   custom parameter on a database.
 --
--- scripts/sql/dedicated-database.sql does that, and scripts/selfhost.ts runs it:
--- a self-hosted deployment is one project. Only a superuser can set a custom
--- parameter on a database, so a managed database such as Amazon RDS, which has
--- none, is always shared, as every Backenly Cloud database is. The setting is
--- read from the catalog, never from the session, so no session can claim it
--- with SET. A second project's workspace makes the database shared whatever
--- the setting says.
+-- Both are read from the catalog, never from the session, so no session can
+-- claim either with SET. A second project's workspace makes the database shared
+-- whatever either says. A region's own database carries neither, and the
+-- regional procedure refuses one that does (tools/managed-db/regional/sql/roles.sql).
 CREATE OR REPLACE FUNCTION public.backenly_direct_shared_database() RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog
 AS $fn$
-  SELECT NOT EXISTS (
-           SELECT 1
-             FROM pg_db_role_setting s
-            CROSS JOIN LATERAL unnest(s.setconfig) AS c(setting)
-            WHERE s.setrole = 0
-              AND s.setdatabase = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
-              AND c.setting = 'backenly.database_tenancy=dedicated')
+DECLARE
+  v_mark      regclass := to_regclass('backenly_meta.tenancy');
+  v_dedicated boolean;
+BEGIN
+  v_dedicated := EXISTS (
+    SELECT 1
+      FROM pg_db_role_setting s
+     CROSS JOIN LATERAL unnest(s.setconfig) AS c(setting)
+     WHERE s.setrole = 0
+       AND s.setdatabase = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
+       AND c.setting = 'backenly.database_tenancy=dedicated');
+  IF NOT v_dedicated AND v_mark IS NOT NULL AND EXISTS (
+       SELECT 1
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_roles t ON t.oid = c.relowner
+         JOIN pg_roles s ON s.oid = n.nspowner
+        WHERE c.oid = v_mark AND c.relkind = 'r'
+          AND (t.rolname = current_user OR t.rolsuper)
+          AND (s.rolname = current_user OR s.rolsuper)) THEN
+    v_dedicated := EXISTS (SELECT 1 FROM backenly_meta.tenancy m WHERE m.dedicated);
+  END IF;
+  RETURN NOT v_dedicated
       OR (SELECT count(*) FROM pg_namespace n
-           WHERE n.nspname ~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') > 1
+           WHERE n.nspname ~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') > 1;
+END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_shared_database() FROM PUBLIC;
@@ -1743,6 +1785,29 @@ BEGIN
   END IF;
 END $grant$;
 
+-- Whether a login is another database's: one a project with a database of
+-- its own made there, which gave it CONNECT by name (section 2), and whose
+-- workspace is not in this database. Roles belong to the whole instance, so
+-- such a login is seen from every database on it, and there its admin may
+-- have allowed what a login on a shared database may not hold: section 7 and
+-- the regional verification (tools/managed-db/regional/sql/verify.sql) leave
+-- it to its own database. A login made where PUBLIC may connect holds CONNECT
+-- by name nowhere, so on a database whose logins were all made so, this is
+-- false for every one of them.
+CREATE OR REPLACE FUNCTION public.backenly_direct_login_elsewhere(p_role text) RETURNS boolean
+LANGUAGE sql STABLE SET search_path = pg_catalog
+AS $fn$
+  SELECT public.backenly_capture_home_schema(p_role) IS NULL
+     AND EXISTS (SELECT 1
+                   FROM pg_database d
+                  CROSS JOIN LATERAL aclexplode(d.datacl) a
+                  WHERE d.datname <> current_database()
+                    AND a.privilege_type = 'CONNECT'
+                    AND a.grantee = (SELECT r.oid FROM pg_roles r WHERE r.rolname = p_role))
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_login_elsewhere(text) FROM PUBLIC;
+
 -- ── 7. A shared database: no login keeps a way to change the schema ──────────
 --
 -- The sync strips the login it names each time it runs, and converges what
@@ -1762,10 +1827,11 @@ END $grant$;
 -- matters most: every session's search path includes it, so a function or
 -- operator created there can stand in for a built-in one.
 --
--- A database dedicated to one project (section 5c) is left as it is. One
--- transaction: every failure is collected and reported together, and any
--- failure leaves every grant, membership and owner as it was (a session the
--- strip already ended stays ended). Run as the installer, which on Amazon RDS
+-- A database dedicated to one project (section 5c) is left as it is, and so is
+-- a login another database holds as its own (backenly_direct_login_elsewhere,
+-- above). One transaction: every failure is collected and reported together,
+-- and any failure leaves every grant, membership and owner as it was (a session
+-- the strip already ended stays ended). Run as the installer, which on Amazon RDS
 -- is no superuser: it grants itself, as the strip does, the privileges of the
 -- roles whose objects it changes, and takes them back.
 DO $strip$
@@ -1789,7 +1855,9 @@ BEGIN
     RETURN;
   END IF;
 
-  FOR r IN SELECT rolname::text AS login FROM pg_roles WHERE rolname ~ '^bkn_rw_[0-9a-f]{12}$' ORDER BY 1 LOOP
+  FOR r IN SELECT rolname::text AS login FROM pg_roles
+            WHERE rolname ~ '^bkn_rw_[0-9a-f]{12}$' AND NOT public.backenly_direct_login_elsewhere(rolname::text)
+            ORDER BY 1 LOOP
     BEGIN
       IF public.backenly_direct_strip_schema_changes(r.login) THEN
         stripped := stripped + 1;

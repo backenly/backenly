@@ -7,9 +7,21 @@
  *
  *   npx tsx tools/managed-db/regional/launch.ts check --config launch.json
  *   npx tsx tools/managed-db/regional/launch.ts apply --config launch.json [--rotate backenly_app,...]
+ *   npx tsx tools/managed-db/regional/launch.ts template --config launch.json
+ *   npx tsx tools/managed-db/regional/launch.ts project-dbs --config launch.json --databases <file>|none
  *
  * launch.json is the region stack's db_procedure_launch_config output
  * (backenly-infra, aws/REGIONS_RUNBOOK.md): identifiers, never a secret value.
+ * Its `secrets.dbcreator`, where present, is where the password of the role
+ * that creates project databases is kept; without it that role is not made.
+ *
+ * A project can have a database of its own on the region's instance, cloned
+ * from a template. `template` builds or converges that template, and
+ * `project-dbs` converges every project database, after an apply of the
+ * region's database. `--databases` names the project databases the platform
+ * knows in the region, one per line in a file (or `none`); the procedure
+ * refuses, touching nothing, unless they are exactly the ones it finds, and
+ * reports one line per database, which this launcher counts.
  * AWS calls go through the AWS CLI on PATH with the credentials in the
  * environment (AWS_PROFILE), so this adds no dependency. Linux or macOS: secret
  * values reach the CLI on /dev/stdin, through a real pipe (awsCli).
@@ -37,6 +49,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 
 import { generatePassword, scramSha256Verifier } from './scram'
@@ -51,20 +64,31 @@ export interface LaunchConfig {
   logGroup: string
   logStreamPrefix: string
   database: { host: string; port: number; name: string }
-  secrets: { app: string; direct: string; backup: string; authenticator: string; postgrestJwt: string }
+  secrets: { app: string; direct: string; backup: string; authenticator: string; postgrestJwt: string; dbcreator?: string }
 }
 
-export type Mode = 'check' | 'apply'
+export type Mode = 'check' | 'apply' | 'template' | 'project-dbs'
+const MODES: Mode[] = ['check', 'apply', 'template', 'project-dbs']
 
 /** The login roles the procedure sets passwords for, and where each password is kept. */
 export const ROLES = {
   backenly_app: { verifier: 'BACKENLY_APP_VERIFIER', secrets: ['app', 'direct'] },
   backenly_backup: { verifier: 'BACKENLY_BACKUP_VERIFIER', secrets: ['backup'] },
   backenly_authenticator: { verifier: 'BACKENLY_AUTHENTICATOR_VERIFIER', secrets: ['authenticator'] },
+  // Made only where the region's config names its secret (sql/roles.sql makes
+  // it only when given its verifier).
+  backenly_dbcreator: { verifier: 'BACKENLY_DBCREATOR_VERIFIER', secrets: ['dbcreator'] },
 } as const satisfies Record<string, { verifier: string; secrets: ReadonlyArray<keyof LaunchConfig['secrets']> }>
 
 export type ManagedRole = keyof typeof ROLES
 const MANAGED_ROLES = Object.keys(ROLES) as ManagedRole[]
+/** The roles every region has. */
+export const REQUIRED_ROLES: ManagedRole[] = ['backenly_app', 'backenly_backup', 'backenly_authenticator']
+
+/** The roles this region's procedure manages: every region's, and the database creator where its secret is configured. */
+export function managedRoles(config: LaunchConfig): ManagedRole[] {
+  return config.secrets.dbcreator ? [...REQUIRED_ROLES, 'backenly_dbcreator'] : [...REQUIRED_ROLES]
+}
 
 /** A refusal: the inputs or the database's state rule the run out before anything is written. */
 export class Refusal extends Error {
@@ -80,15 +104,20 @@ export interface Args {
   mode: Mode
   configPath: string
   rotate: ManagedRole[]
+  /** project-dbs only: a file listing the project databases, or 'none'. */
+  databases?: string
 }
 
 export function parseArgs(argv: string[]): Args {
   const [mode, ...rest] = argv
-  if (mode !== 'check' && mode !== 'apply') {
-    throw new Refusal('usage: launch.ts check|apply --config <launch.json> [--rotate role,...]')
+  if (!MODES.includes(mode as Mode)) {
+    throw new Refusal(
+      'usage: launch.ts check|apply|template|project-dbs --config <launch.json> [--rotate role,...] [--databases <file>|none]',
+    )
   }
   let configPath: string | undefined
   let rotate: ManagedRole[] = []
+  let databases: string | undefined
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i]
     const value = rest[i + 1]
@@ -101,13 +130,44 @@ export function parseArgs(argv: string[]): Args {
       if (unknown.length) throw new Refusal(`--rotate names roles this procedure does not manage: ${unknown.join(', ')}`)
       rotate = [...new Set(roles as ManagedRole[])]
       i++
+    } else if (flag === '--databases' && value) {
+      databases = value
+      i++
     } else {
       throw new Refusal(`unexpected argument: ${flag}`)
     }
   }
   if (!configPath) throw new Refusal('--config <launch.json> is required')
   if (mode === 'check' && rotate.length) throw new Refusal('--rotate is for apply; check writes nothing')
-  return { mode, configPath, rotate }
+  if (mode !== 'apply' && mode !== 'check' && rotate.length) throw new Refusal(`--rotate is for apply, not ${mode}`)
+  if (mode === 'project-dbs' && !databases) {
+    throw new Refusal('project-dbs needs --databases: a file naming the project databases the platform knows in the region, one per line, or none')
+  }
+  if (mode !== 'project-dbs' && databases) throw new Refusal('--databases is for project-dbs')
+  return { mode: mode as Mode, configPath, rotate, ...(databases ? { databases } : {}) }
+}
+
+const PROJECT_DATABASE = /^p_[0-9a-f]{32}$/
+
+/** The project databases a --databases file names: one per line (commas and spaces also separate), or none. */
+export function readDatabaseList(text: string): string[] {
+  const names = [...new Set(text.split(/[\s,]+/).map((n) => n.trim()).filter(Boolean))].sort()
+  const wrong = names.filter((n) => !PROJECT_DATABASE.test(n))
+  if (wrong.length) throw new Refusal(`not project database names (p_<32 lowercase hex>): ${wrong.slice(0, 5).join(', ')}`)
+  return names
+}
+
+/**
+ * What the procedure is given as BOOTSTRAP_PROJECT_DATABASES: `none`, the
+ * names, or, for a list too long for a task's environment (ECS caps a task's
+ * overrides at 8 KiB), the sha256 of the names sorted, each followed by a
+ * newline, exactly as bootstrap.sh hashes the ones it finds.
+ */
+export function projectDatabasesInput(names: string[]): string {
+  if (names.length === 0) return 'none'
+  const sorted = [...names].sort()
+  if (sorted.length <= 100) return sorted.join(',')
+  return `sha256:${createHash('sha256').update(sorted.map((n) => `${n}\n`).join('')).digest('hex')}`
 }
 
 /** The region stack's db_procedure_launch_config output, checked before anything runs. */
@@ -132,12 +192,15 @@ export function loadConfig(json: string): LaunchConfig {
   const db = c.database
   if (!db || !present(db.host) || !present(db.name) || !Number.isInteger(db.port)) throw new Refusal('the config has no database host, port and name')
   const secrets = c.secrets
-  for (const key of ['app', 'direct', 'backup', 'authenticator', 'postgrestJwt'] as const) {
+  for (const key of ['app', 'direct', 'backup', 'authenticator', 'postgrestJwt', 'dbcreator'] as const) {
     const arn = secrets?.[key]
+    // The database creator's is optional: a region without it makes no such role.
+    if (key === 'dbcreator' && (arn === undefined || arn === null)) continue
     if (!present(arn)) throw new Refusal(`the config has no ${key} secret`)
     // A credential for this region's database is kept in this region, never elsewhere.
     if (!arn!.startsWith(`arn:aws:secretsmanager:${c.region}:`)) throw new Refusal(`the ${key} secret is not in ${c.region}: ${arn}`)
   }
+  if (secrets && secrets.dbcreator === null) delete secrets.dbcreator
   return c as LaunchConfig
 }
 
@@ -145,15 +208,19 @@ export function loadConfig(json: string): LaunchConfig {
 
 export type CredentialState = 'missing' | 'unrecorded' | 'recorded'
 
+export type ProjectDatabaseState = 'current' | 'applied' | 'failed'
+
 export interface Report {
   steps: Record<string, string>
   credentials: Partial<Record<ManagedRole, { state: CredentialState; at?: string }>>
+  /** project-dbs: each database's line, and what it applied or where it failed. */
+  databases: Record<string, { state: ProjectDatabaseState; detail?: string }>
   summary: string | null
 }
 
 /** The lines bootstrap.sh prints for a launcher (its "Output a launcher may read"). */
 export function parseReport(lines: string[]): Report {
-  const report: Report = { steps: {}, credentials: {}, summary: null }
+  const report: Report = { steps: {}, credentials: {}, databases: {}, summary: null }
   for (const line of lines) {
     const step = /^\s*step ([a-z][a-z-]*): (current|changed|pending|applied|re-applied)\b/.exec(line)
     if (step) report.steps[step[1]] = step[2]
@@ -161,7 +228,13 @@ export function parseReport(lines: string[]): Report {
     if (credential && MANAGED_ROLES.includes(credential[1] as ManagedRole)) {
       report.credentials[credential[1] as ManagedRole] = { state: credential[2] as CredentialState, at: credential[3] }
     }
-    if (/^(Regional database initialised|Check only:)/.test(line.trim())) report.summary = line.trim()
+    const database = /^\s*db (p_[0-9a-f]{32}): (current|applied|failed)(?: (\S+))?\s*$/.exec(line)
+    if (database) {
+      report.databases[database[1]] = { state: database[2] as ProjectDatabaseState, ...(database[3] ? { detail: database[3] } : {}) }
+    }
+    if (/^(Regional database initialised|Check only:|Project database template (converged|NOT converged)|Project databases(:| converged))/.test(line.trim())) {
+      report.summary = line.trim()
+    }
   }
   return report
 }
@@ -171,11 +244,11 @@ export function parseReport(lines: string[]): Report {
  * have yet, and every recorded one named in --rotate. A role that exists but
  * that this procedure never set is refused, as roles.sql refuses it: something
  * else made it, and that has to be understood before anything replaces its
- * password.
+ * password. `roles` is what the region manages (managedRoles).
  */
-export function planCredentials(report: Report, rotate: ManagedRole[]): ManagedRole[] {
+export function planCredentials(report: Report, rotate: ManagedRole[], roles: ManagedRole[] = REQUIRED_ROLES): ManagedRole[] {
   const plan: ManagedRole[] = []
-  for (const role of MANAGED_ROLES) {
+  for (const role of roles) {
     const credential = report.credentials[role]
     if (!credential) throw new Refusal(`the check did not report ${role}; its output is not one this launcher reads`)
     if (credential.state === 'unrecorded') {
@@ -187,12 +260,12 @@ export function planCredentials(report: Report, rotate: ManagedRole[]): ManagedR
 }
 
 /** Every step current and every credential recorded: a database the procedure has finished. */
-export function auditReport(report: Report): string[] {
+export function auditReport(report: Report, roles: ManagedRole[] = REQUIRED_ROLES): string[] {
   const problems: string[] = []
   const steps = Object.entries(report.steps)
   if (steps.length === 0) problems.push('the check reported no steps')
   for (const [id, state] of steps) if (state !== 'current') problems.push(`step ${id} is ${state}, not current`)
-  for (const role of MANAGED_ROLES) {
+  for (const role of roles) {
     const state = report.credentials[role]?.state
     if (state !== 'recorded') problems.push(`credential ${role} is ${state ?? 'not reported'}, not recorded`)
   }
@@ -371,10 +444,61 @@ function printRun(label: string, run: ProcedureRun, log: Deps['log']): void {
   log(`── ${label}: exit ${run.exitCode ?? 'unknown'}${run.stoppedReason ? ` (${run.stoppedReason})` : ''}`)
 }
 
-/** check: report only. apply: converge, keep the credentials, check again. Resolves to the exit code. */
-export async function launch(mode: Mode, config: LaunchConfig, rotate: ManagedRole[], deps: Deps): Promise<number> {
+/**
+ * check: report only. apply: converge, keep the credentials, check again.
+ * template: build or converge the template project databases are cloned from.
+ * project-dbs: converge every project database, given the ones the platform
+ * knows. Resolves to the exit code.
+ */
+export async function launch(
+  mode: Mode,
+  config: LaunchConfig,
+  rotate: ManagedRole[],
+  deps: Deps,
+  options: { databases?: string[] } = {},
+): Promise<number> {
   const { aws, log } = deps
   log(`Regional database procedure, ${mode}: ${config.database.host}/${config.database.name} in ${config.region}`)
+
+  if (mode === 'template') {
+    const run = await runProcedure(config, { BOOTSTRAP_MODE: 'template' }, deps)
+    printRun('template', run, log)
+    if (run.exitCode !== 0) {
+      log('The template did not converge. Nothing can be cloned from it until a template run succeeds.')
+      return 1
+    }
+    log('The project database template is converged and verified.')
+    return 0
+  }
+
+  if (mode === 'project-dbs') {
+    if (!options.databases) throw new Refusal('project-dbs needs the project databases the platform knows in the region')
+    const listed = options.databases
+    const run = await runProcedure(
+      config,
+      { BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: projectDatabasesInput(listed) },
+      deps,
+    )
+    printRun('project-dbs', run, log)
+    const found = parseReport(run.lines).databases
+    const counts: Record<ProjectDatabaseState, number> = { current: 0, applied: 0, failed: 0 }
+    for (const { state } of Object.values(found)) counts[state]++
+    const failed = Object.entries(found).filter(([, d]) => d.state === 'failed')
+    const unreported = listed.filter((name) => !found[name])
+    log(`Project databases: ${listed.length} listed, ${counts.current} current, ${counts.applied} applied, ${counts.failed} failed.`)
+    for (const [name, d] of failed) log(`NOT DONE: ${name} failed at ${d.detail ?? 'an unknown step'}`)
+    if (run.exitCode === 0 && unreported.length) {
+      for (const name of unreported) log(`NOT DONE: ${name} was not reported`)
+    }
+    if (run.exitCode !== 0 && Object.keys(found).length === 0) log('The procedure converged no project database; its log above says why.')
+    return run.exitCode === 0 && failed.length === 0 && unreported.length === 0 ? 0 : 1
+  }
+
+  const roles = managedRoles(config)
+  const unmanaged = rotate.filter((role) => !roles.includes(role))
+  if (unmanaged.length) {
+    throw new Refusal(`--rotate names ${unmanaged.join(', ')}, which this region does not manage: its config names no secret for it`)
+  }
 
   // Only the check this apply runs first is a pre-apply check (see the header).
   const before = await runProcedure(
@@ -390,25 +514,27 @@ export async function launch(mode: Mode, config: LaunchConfig, rotate: ManagedRo
   if (mode === 'check') return 0
 
   const found = parseReport(before.lines)
-  const roles = planCredentials(found, rotate)
+  const planned = planCredentials(found, rotate, roles)
 
   const jwt = await ensureJwtSecret(aws, config.secrets.postgrestJwt)
   log(`PostgREST JWT secret: ${jwt === 'created' ? 'created' : 'kept (it already had a value)'}`)
 
   const env: Record<string, string> = { BOOTSTRAP_MODE: 'apply' }
   const pending: Array<{ key: string; arn: string; versionId: string }> = []
-  for (const role of roles) {
+  for (const role of planned) {
     const password = generatePassword()
     env[ROLES[role].verifier] = scramSha256Verifier(password)
     const url = connectionString(role, password, config.database)
     for (const key of ROLES[role].secrets) {
-      pending.push({ key, arn: config.secrets[key], versionId: await putPending(aws, config.secrets[key], url) })
+      const arn = config.secrets[key]
+      if (!arn) throw new Refusal(`the config has no ${key} secret for ${role}`)
+      pending.push({ key, arn, versionId: await putPending(aws, arn, url) })
     }
   }
   // The roles whose existing password is replaced; a missing one is simply set.
   const rotating = rotate.filter((role) => found.credentials[role]?.state === 'recorded')
   if (rotating.length) env.BOOTSTRAP_ROTATE = rotating.join(',')
-  log(roles.length ? `Setting passwords for: ${roles.join(', ')} (stored as pending until the procedure has set them)` : 'No password to set.')
+  log(planned.length ? `Setting passwords for: ${planned.join(', ')} (stored as pending until the procedure has set them)` : 'No password to set.')
 
   const applied = await runProcedure(config, env, deps)
   printRun('apply', applied, log)
@@ -437,7 +563,7 @@ export async function launch(mode: Mode, config: LaunchConfig, rotate: ManagedRo
 
   const after = await runProcedure(config, { BOOTSTRAP_MODE: 'check' }, deps)
   printRun('check', after, log)
-  const problems = after.exitCode === 0 ? auditReport(parseReport(after.lines)) : ['the closing check failed']
+  const problems = after.exitCode === 0 ? auditReport(parseReport(after.lines), roles) : ['the closing check failed']
   for (const problem of problems) log(`NOT DONE: ${problem}`)
   if (problems.length === 0) log('The region database is initialised: every step current, every credential recorded and kept.')
   return problems.length ? 1 : 0
@@ -447,11 +573,19 @@ async function main(): Promise<void> {
   try {
     const args = parseArgs(process.argv.slice(2))
     const config = loadConfig(fs.readFileSync(args.configPath, 'utf8'))
-    process.exitCode = await launch(args.mode, config, args.rotate, {
-      aws: awsCli(config.region),
-      log: (line) => console.log(line),
-      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    })
+    const databases =
+      args.databases === undefined ? undefined : args.databases === 'none' ? [] : readDatabaseList(fs.readFileSync(args.databases, 'utf8'))
+    process.exitCode = await launch(
+      args.mode,
+      config,
+      args.rotate,
+      {
+        aws: awsCli(config.region),
+        log: (line) => console.log(line),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      },
+      databases === undefined ? {} : { databases },
+    )
   } catch (err) {
     console.error(`${err instanceof Refusal ? 'refusing' : 'failed'}: ${err instanceof Error ? err.message : String(err)}`)
     process.exitCode = err instanceof Refusal ? 2 : 1

@@ -44,8 +44,8 @@ describe('the extensions are the managed-database spec', () => {
     expect(rows).toEqual(REQUIRED_EXTENSIONS.map((e) => ({ name: e.name, requiresPreload: e.requiresPreload })))
   })
 
-  it('verifies each one with the spec’s own operational probe', () => {
-    const block = section(read(`${DIR}/sql/verify.sql`), '── Extensions', '── Every step recorded')
+  it.each(['verify.sql', 'verify-project-db.sql'])('%s verifies each one with the spec’s own operational probe', (file) => {
+    const block = section(read(`${DIR}/sql/${file}`), '── Extensions', '── Every step recorded')
     const rows = [...block.matchAll(/\('([a-z_]+)',\s*'((?:[^']|'')*)'\)/g)]
       .map((m) => ({ name: m[1], probe: m[2].replace(/''/g, "'") }))
     expect(rows).toEqual(REQUIRED_EXTENSIONS.map((e) => ({ name: e.name, probe: e.operationalProbe })))
@@ -87,7 +87,36 @@ describe('roles.sql', () => {
     const read_ = [...code.matchAll(/^\\getenv\s+\S+\s+(\S+)$/gm)].map((m) => m[1]).sort()
     const exported = [...read(`${DIR}/bootstrap.sh`).matchAll(/^export (\w+)=/gm)].map((m) => m[1]).sort()
     expect(read_).toEqual(exported)
-    expect(read_).toEqual(['BACKENLY_APP_VERIFIER', 'BACKENLY_AUTHENTICATOR_VERIFIER', 'BACKENLY_BACKUP_VERIFIER', 'BOOTSTRAP_ROTATE'])
+    expect(read_).toEqual([
+      'BACKENLY_APP_VERIFIER',
+      'BACKENLY_AUTHENTICATOR_VERIFIER',
+      'BACKENLY_BACKUP_VERIFIER',
+      'BACKENLY_DBCREATOR_VERIFIER',
+      'BOOTSTRAP_ROTATE',
+    ])
+  })
+
+  it('makes the database creator able to create databases and nothing else, and never grants it', () => {
+    expect(code).toMatch(/CREATE ROLE backenly_dbcreator LOGIN NOINHERIT CREATEDB;/)
+    expect(code.match(/CREATE ROLE backenly_dbcreator/g)).toHaveLength(1)
+    // Granted to no role, and no role granted to it, anywhere the procedure or
+    // the helpers it installs could do it.
+    const everySql = [
+      ...['roles.sql', 'project-db.sql', 'verify.sql', 'verify-project-db.sql'].map((f) => read(`${DIR}/sql/${f}`)),
+      read('scripts/setup-direct-access.sql'),
+      read('scripts/sql/function-roles.sql'),
+      read('scripts/sql/postgrest-schema-registry.sql'),
+      read('scripts/sql/project-database-acl.sql'),
+    ].map(withoutComments)
+    for (const sql of everySql) {
+      expect(sql).not.toMatch(/GRANT\s+backenly_dbcreator\b/i)
+      expect(sql).not.toMatch(/\bTO\s+backenly_dbcreator\b/i)
+    }
+  })
+
+  it('sets the application role’s createrole_self_grant for the role, which a clone keeps', () => {
+    expect(code).toContain(`ALTER ROLE backenly_app SET createrole_self_grant = 'set, inherit';`)
+    expect(code).not.toMatch(/IN DATABASE[^;]*createrole_self_grant/)
   })
 })
 
@@ -98,6 +127,45 @@ describe('bootstrap.sh and verify.sql agree', () => {
     const required = [...block.matchAll(/'([a-z-]+)'/g)].map((m) => m[1])
     expect(steps).toEqual(['roles', 'postgrest', 'drift-events', 'regional-bodies', 'auth-projection', 'direct-access', 'extensions'])
     expect(required).toEqual(steps)
+  })
+
+  it('requires every step a project database records, and no other', () => {
+    const declared = /^PROJECT_STEPS=\(([a-z -]+)\)$/m.exec(read(`${DIR}/bootstrap.sh`))
+    expect(declared).not.toBeNull()
+    const steps = declared![1].trim().split(/\s+/)
+    const block = section(read(`${DIR}/sql/verify-project-db.sql`), '── Every step recorded', 'IF array_length')
+    const required = [...block.matchAll(/'([a-z-]+)'/g)].map((m) => m[1])
+    expect(steps).toEqual(['project-db', 'postgrest', 'drift-events', 'direct-access', 'extensions'])
+    expect(required).toEqual(steps)
+    // Each has its files, and the PostgREST one is the region's step, file for file.
+    const script = read(`${DIR}/bootstrap.sh`)
+    for (const id of steps) expect(script).toMatch(new RegExp(`^    ${id}\\) printf '%s' "\\$`, 'm'))
+    expect(script).toContain('step postgrest "$POSTGREST_FILES" postgrest_install')
+    expect(script).toContain(`postgrest) printf '%s' "$POSTGREST_FILES" ;;`)
+  })
+
+  it('checks a project database for the same helpers it checks the region’s database for, and their own', () => {
+    const signatures = (file: string) =>
+      [...section(read(file), '── The definer functions', 'AS f(signature, app_calls)').matchAll(/\('(public\.[a-z_]+\([a-z,]*\))',\s*(true|false)\)/g)].map((m) => `${m[1]} ${m[2]}`)
+    const region = signatures(`${DIR}/sql/verify.sql`)
+    expect(region.length).toBeGreaterThan(20)
+    expect(signatures(`${DIR}/sql/verify-project-db.sql`)).toEqual(region)
+    expect(region).toContain('public.backenly_direct_login_elsewhere(text) false')
+  })
+
+  it('reaches a project database only by name, never the region’s through the project steps', () => {
+    const projectDb = withoutComments(read(`${DIR}/sql/project-db.sql`))
+    expect(projectDb).toContain(`IF db <> 'backenly_project_template' AND db !~ '^p_[0-9a-f]{32}$' THEN`)
+    const preflight = withoutComments(read(`${DIR}/sql/preflight.sql`))
+    expect(preflight).toContain(`current_database() = 'backenly_project_template' OR current_database() ~ '^p_[0-9a-f]{32}$'`)
+  })
+
+  it('gives a clone its database grants in plain SQL a driver can send, with its inputs documented', () => {
+    const acl = read('scripts/sql/project-database-acl.sql')
+    expect(acl.split('\n').filter((l) => l.startsWith('\\'))).toEqual([])
+    expect(acl).toContain('── Inputs')
+    expect(acl).toContain("current_setting('backenly.project_database', true)")
+    expect(withoutComments(acl)).toMatch(/REVOKE CONNECT, TEMPORARY, CREATE ON DATABASE %I FROM PUBLIC/)
   })
 
   it('passes psql the URL as -d, which psql on Windows still reads options after', () => {

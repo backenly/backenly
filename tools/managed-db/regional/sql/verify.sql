@@ -24,6 +24,8 @@ DECLARE
   allow_missing boolean := current_setting('backenly.allow_missing_extensions')::boolean;
   r record;
   rname text;
+  priv text;
+  logins text[];
   installed_in text;
   self_grant text;
   app_exists boolean := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_app');
@@ -90,8 +92,30 @@ BEGIN
     END LOOP;
   END IF;
 
-  -- Each login role has the credential this procedure set (roles.sql).
-  FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator'] LOOP
+  -- The role that creates project databases, where the region has one: it
+  -- creates databases and does nothing else, and nothing the platform runs as
+  -- holds it (roles.sql).
+  FOR r IN SELECT p.* FROM pg_roles p WHERE p.rolname = 'backenly_dbcreator' LOOP
+    IF r.rolsuper OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR r.rolinherit
+       OR NOT r.rolcreatedb OR NOT r.rolcanlogin THEN
+      problems := problems || 'role backenly_dbcreator must be LOGIN CREATEDB NOINHERIT, and NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS'::text;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid) THEN
+      problems := problems || 'role backenly_dbcreator is a member of another role'::text;
+    END IF;
+    FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator',
+                                 'anon', 'authenticated', 'service_role', 'backenly_external'] LOOP
+      CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname);
+      IF pg_has_role(rname, 'backenly_dbcreator', 'MEMBER') THEN
+        problems := problems || format('%s is a member of backenly_dbcreator', rname);
+      END IF;
+    END LOOP;
+  END LOOP;
+
+  -- Each login role has the credential this procedure set (roles.sql). The
+  -- database creator only where the region has one.
+  FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator'] LOOP
+    CONTINUE WHEN rname = 'backenly_dbcreator' AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname);
     IF NOT EXISTS (SELECT 1 FROM backenly_meta.bootstrap_credentials c WHERE c.role_name = rname) THEN
       problems := problems || format('no credential recorded for %s', rname);
     END IF;
@@ -100,11 +124,14 @@ BEGIN
   -- ── Database privileges ───────────────────────────────────────────────────
   -- Nested rather than joined with AND throughout: SQL does not promise to
   -- short-circuit, and a privilege check on a missing role raises instead of
-  -- adding to the list.
+  -- adding to the list. One privilege per check: given a list, the
+  -- has_*_privilege functions are true when ANY of it is held.
   IF app_exists THEN
-    IF NOT has_database_privilege('backenly_app', current_database(), 'CONNECT, CREATE, TEMPORARY') THEN
-      problems := problems || 'backenly_app needs CONNECT, CREATE and TEMPORARY on the database'::text;
-    END IF;
+    FOREACH priv IN ARRAY ARRAY['CONNECT', 'CREATE', 'TEMPORARY'] LOOP
+      IF NOT has_database_privilege('backenly_app', current_database(), priv) THEN
+        problems := problems || format('backenly_app needs %s on the database', priv);
+      END IF;
+    END LOOP;
     -- The text of statements PostgREST's roles ran (roles.sql).
     IF NOT pg_has_role('backenly_app', 'pg_read_all_stats', 'USAGE') THEN
       problems := problems || 'backenly_app needs the privileges of pg_read_all_stats to read the statements PostgREST runs'::text;
@@ -150,6 +177,7 @@ BEGIN
       ('public.backenly_direct_schema_change_holds(text)',              false),
       ('public.backenly_direct_shared_holds(text,text)',                false),
       ('public.backenly_direct_strip_schema_changes(text,text,text)',   false),
+      ('public.backenly_direct_login_elsewhere(text)',                  false),
       ('public.backenly_pgrst_prune_schemas()',                         false),
       ('public.backenly_pgrst_apply_owner_defaults(text)',              false),
       ('public.backenly_pgrst_apply_soft_delete(text)',                 false),
@@ -244,9 +272,11 @@ BEGIN
       END IF;
     END LOOP;
     IF app_exists THEN
-      IF NOT has_table_privilege('backenly_app', 'public.schema_drift_events', 'SELECT, UPDATE, DELETE') THEN
-        problems := problems || 'backenly_app cannot read, adopt and prune drift events'::text;
-      END IF;
+      FOREACH priv IN ARRAY ARRAY['SELECT', 'UPDATE', 'DELETE'] LOOP
+        IF NOT has_table_privilege('backenly_app', 'public.schema_drift_events', priv) THEN
+          problems := problems || format('backenly_app cannot read, adopt and prune drift events (no %s)', priv);
+        END IF;
+      END LOOP;
       IF has_table_privilege('backenly_app', 'public.schema_drift_events', 'INSERT') THEN
         problems := problems || 'backenly_app can insert drift events; only the capture triggers may'::text;
       END IF;
@@ -260,8 +290,12 @@ BEGIN
   IF to_regclass('public.regional_bodies') IS NULL THEN
     problems := problems || 'public.regional_bodies is missing'::text;
   ELSE
-    IF app_exists AND NOT has_table_privilege('backenly_app', 'public.regional_bodies', 'SELECT, INSERT, UPDATE, DELETE') THEN
-      problems := problems || 'backenly_app cannot write, read and prune regional bodies'::text;
+    IF app_exists THEN
+      FOREACH priv IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'] LOOP
+        IF NOT has_table_privilege('backenly_app', 'public.regional_bodies', priv) THEN
+          problems := problems || format('backenly_app cannot write, read and prune regional bodies (no %s)', priv);
+        END IF;
+      END LOOP;
     END IF;
     IF has_table_privilege('public', 'public.regional_bodies', 'SELECT') THEN
       problems := problems || 'PUBLIC can read regional bodies'::text;
@@ -281,8 +315,12 @@ BEGIN
     IF to_regclass(r.relation) IS NULL THEN
       problems := problems || format('%s is missing', r.relation);
     ELSE
-      IF app_exists AND NOT has_table_privilege('backenly_app', r.relation, 'SELECT, INSERT, UPDATE, DELETE') THEN
-        problems := problems || format('backenly_app cannot read and write %s', r.relation);
+      IF app_exists THEN
+        FOREACH priv IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'] LOOP
+          IF NOT has_table_privilege('backenly_app', r.relation, priv) THEN
+            problems := problems || format('backenly_app cannot read and write %s (no %s)', r.relation, priv);
+          END IF;
+        END LOOP;
       END IF;
       IF has_table_privilege('public', r.relation, 'SELECT') THEN
         problems := problems || format('PUBLIC can read %s', r.relation);
@@ -322,11 +360,30 @@ BEGIN
   -- A region's database holds every project in the region. Code one project's
   -- login created in its schema would run in the sessions that serve all of
   -- them, so no login may create anything (scripts/setup-direct-access.sql,
-  -- sections 5c and 7, which the direct-access step applies).
+  -- sections 5c and 7, which the direct-access step applies). Neither mark of
+  -- a database dedicated to one project may be here.
   IF to_regprocedure('public.backenly_direct_shared_database()') IS NOT NULL THEN
     IF NOT public.backenly_direct_shared_database() THEN
       problems := problems || 'this database is marked as dedicated to one project, but a region''s database is shared by its projects'::text;
     END IF;
+  END IF;
+  IF to_regclass('backenly_meta.tenancy') IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM backenly_meta.tenancy t WHERE t.dedicated) THEN
+      problems := problems || 'this database is marked in backenly_meta.tenancy as holding one project, but a region''s database is shared by its projects'::text;
+    END IF;
+  END IF;
+  -- The logins of this database. A login a project's own database on the same
+  -- instance made is that database's (public.backenly_direct_login_elsewhere),
+  -- and verify-project-db.sql checks it there. Where the helpers predate the
+  -- question, every read-write login is this database's, as before.
+  IF to_regprocedure('public.backenly_direct_login_elsewhere(text)') IS NOT NULL THEN
+    SELECT coalesce(array_agg(p.rolname::text ORDER BY p.rolname), '{}') INTO logins
+      FROM pg_roles p
+     WHERE p.rolname ~ '^bkn_rw_[0-9a-f]{12}$' AND NOT public.backenly_direct_login_elsewhere(p.rolname::text);
+  ELSE
+    SELECT coalesce(array_agg(p.rolname::text ORDER BY p.rolname), '{}') INTO logins
+      FROM pg_roles p
+     WHERE p.rolname ~ '^bkn_rw_[0-9a-f]{12}$';
   END IF;
   IF to_regprocedure('public.backenly_direct_schema_change_holds(text)') IS NOT NULL THEN
     FOR r IN
@@ -335,7 +392,7 @@ BEGIN
              EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
                       WHERE m.member = p.oid AND g.rolname = 'backenly_no_schema_changes') AS marked
         FROM pg_roles p
-       WHERE p.rolname ~ '^bkn_rw_[0-9a-f]{12}$'
+       WHERE p.rolname::text = ANY (logins)
        ORDER BY 1
     LOOP
       IF cardinality(r.holds) > 0 THEN
@@ -355,6 +412,7 @@ BEGIN
       FROM pg_shdescription d JOIN pg_roles a ON a.oid = d.objoid
      WHERE d.classoid = 'pg_authid'::regclass AND a.rolname ~ '^bkn_rw_[0-9a-f]{12}$'
        AND d.description LIKE 'backenly: sessions to end after a strip%'
+       AND a.rolname::text = ANY (logins)
      ORDER BY 1
   LOOP
     problems := problems || format('read-write login %s was stripped and its sessions were not ended since: SELECT public.backenly_direct_end_stripped_sessions()', r.login);
