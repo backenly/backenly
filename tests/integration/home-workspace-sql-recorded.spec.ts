@@ -6,9 +6,10 @@
  * (lib/data-plane/regional.ts, lib/data-plane/statement-cache.ts). What a change
  * records of the SQL it ran is captured by a middleware on the client that sent
  * it (lib/execution/sql-recorder.ts), so the recorder has to be on the workspace
- * client as well. A governed change installs it there (lib/changes/ledger.ts);
- * the auto-fix engine installs it on both home clients, which
- * tests/core/sql-recorder.test.ts covers end to end.
+ * client as well. lib/data-plane/regional.ts installs it on every workspace
+ * client as it creates it; the auto-fix engine and a governed change install it
+ * on the platform client, which tests/core/sql-recorder.test.ts covers end to
+ * end.
  *
  * Here a governed change for a home project runs its DDL through
  * executeWithUserContext, as the data routes, the MCP data tools and the
