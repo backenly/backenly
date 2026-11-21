@@ -292,7 +292,7 @@ suite('pooler.sql', () => {
         database,
       ])
     const listed = async () =>
-      (await rows<{ d: string }>(authUrl(), 'SELECT d FROM backenly_pooler.databases() AS d ORDER BY 1')).map((r) => r.d)
+      (await rows<{ d: string }>(authUrl(), 'SELECT database AS d FROM backenly_pooler.databases() ORDER BY 1')).map((r) => r.d)
 
     it('answers with the verifier of an active login whose role can log in, and nothing else', async () => {
       const active = login('active')
@@ -365,6 +365,17 @@ suite('pooler.sql', () => {
         OTHER_DB,
       ])
       expect(await listed()).toEqual([PROJECT_DB, OTHER_DB].sort())
+
+      // Its pool size is the smallest connection limit among its active logins,
+      // and none while every login is unlimited.
+      const poolSize = async (database: string) =>
+        (await rows<{ pool_size: number | null }>(authUrl(), 'SELECT pool_size FROM backenly_pooler.databases() WHERE database = $1', [
+          database,
+        ]))[0]?.pool_size
+      expect(await poolSize(OTHER_DB)).toBeNull()
+      await rows(adminUrl(), `ALTER ROLE ${other} CONNECTION LIMIT 2`)
+      expect(await poolSize(OTHER_DB)).toBe(2)
+
       await rows(appUrl(), `UPDATE backenly_pooler.logins SET active = false, updated_at = now() WHERE rolname = $1`, [other])
       expect(await listed()).toEqual([PROJECT_DB])
     })

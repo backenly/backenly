@@ -18,7 +18,8 @@
 --                                 sets updated_at = now() when it changes a row.
 --   backenly_pooler.databases()   the project databases the pooler lists: every
 --                                 existing p_<32 hex> database with an active
---                                 login. The pooler reads it at start and every
+--                                 login, with the pool size its logins'
+--                                 connection limit allows. The pooler reads it at start and every
 --                                 few seconds after, and serves no other
 --                                 database name: a client asking for the
 --                                 region's shared database, postgres or
@@ -195,18 +196,38 @@ AS $lookup$
 $lookup$;
 
 -- Only databases that exist, so the pooler never lists a name the server
--- would answer "does not exist" for after a login.
+-- would answer "does not exist" for after a login. With each, its pool size:
+-- the smallest connection limit among its active logins (the plan's limit,
+-- set on each login), so the pooler never opens more server connections for a
+-- login than the server lets it hold; NULL when every login is unlimited, and
+-- the pooler then uses its default.
+--
+-- An earlier form returned SETOF text; a function's result type cannot be
+-- replaced in place, so that form is dropped first.
+DO $drop_old_databases$
+BEGIN
+  IF to_regprocedure('backenly_pooler.databases()') IS NOT NULL
+     AND (SELECT p.proretset AND p.prorettype = 'text'::regtype
+            FROM pg_catalog.pg_proc AS p WHERE p.oid = 'backenly_pooler.databases()'::regprocedure) THEN
+    DROP FUNCTION backenly_pooler.databases();
+  END IF;
+END
+$drop_old_databases$;
+
 CREATE OR REPLACE FUNCTION backenly_pooler.databases()
-RETURNS SETOF text
+RETURNS TABLE (database text, pool_size integer)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $databases$
-  SELECT DISTINCT l.database
+  SELECT l.database,
+         min(NULLIF(GREATEST(r.rolconnlimit, 0), 0))::integer
     FROM backenly_pooler.logins AS l
     JOIN pg_catalog.pg_database AS d ON d.datname = l.database::name
+    LEFT JOIN pg_catalog.pg_roles AS r ON r.rolname = l.rolname::name
    WHERE l.active
+   GROUP BY l.database
    ORDER BY 1
 $databases$;
 
