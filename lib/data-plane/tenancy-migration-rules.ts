@@ -51,7 +51,6 @@ export type RefusalCode =
   | 'no_schema'
   | 'unknown_schema'
   | 'moved_schemas_present'
-  | 'direct_logins_elsewhere'
   | 'extension'
 
 export type MigrationOutcome = 'moved' | 'dry_run_ok' | 'refused' | 'aborted'

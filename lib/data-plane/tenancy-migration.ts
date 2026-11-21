@@ -49,19 +49,22 @@
  *                     branches PostgREST served are registered there (the
  *                     canonical schema registers itself), the backup role's
  *                     read, the function logins, the realtime functions and
- *                     channel rows (the same channel names), and direct
- *                     access's grants.
+ *                     channel rows (the same channel names), and the project's
+ *                     direct logins made ready there (carryDirectLogins), still
+ *                     stopped, their schema changes refused.
  *   7  verify         both sides still frozen: catalogs equal schema by schema,
  *                     every table's rows counted and checksummed as the
  *                     workspace's owner, sequences equal, row security as it
  *                     was, owners as a restore leaves them, the registry, the
- *                     extensions, the channels, the backup role's read, and the
+ *                     extensions, the channels, the backup role's read, every
+ *                     login on the data instance and still stopped, and the
  *                     project's own PostgREST answering. Any failure stops the
  *                     move: the new database is dropped, the project serves
  *                     from the shared one again, nothing is lost.
  *   8  flip           one platform transaction: the row names its database and
- *                     its epoch moves, with a History entry (kind
- *                     `tenancy_migration`) and an audit row.
+ *                     its epoch moves, its logins' credential rows keep the
+ *                     verifiers they were made ready with, with a History entry
+ *                     (kind `tenancy_migration`) and an audit row.
  *   9  fence          the old schemas stop being served, are renamed
  *                     `workspace_<id>_moved<epoch>[_<n>]` (movedSchemaName),
  *                     handed to the application role and closed to PUBLIC, the
@@ -70,15 +73,30 @@
  *                     process still resolves the project to them
  *                     (MigrationWaits.flipMs). A process that somehow still
  *                     did would fail loudly, never write to the old copy.
+ *                     Then direct access's own sync makes the logins' grants in
+ *                     the new database, and the pooler's rows are written, off.
+ *                     Where the data instance is another instance than the
+ *                     shared database's (the home region), the project's logins
+ *                     are dropped from the old instance, where they hold
+ *                     nothing any more.
  *  10  resume         the project's own PostgREST restarted on the region's
- *                     host, the pause ended, logins back with CONNECT on the
- *                     new database; then a smoke of its paths, recorded.
+ *                     host, the pause ended: each login the pause stopped back
+ *                     with the verifier its row now keeps, CONNECT on the new
+ *                     database, and its pooler row on; then a smoke of its
+ *                     paths, recorded.
  *  11  schedule_drop  the fenced schemas are dropped seven days later by the
  *                     region's retired-schema pass (scheduleSchemaDrop).
  *
  * A dry run runs 0 to 7 and then stops as a failed verification would: its
  * database dropped, the project serving from the shared one, with the
  * verification in its report. It pauses the project for as long as a move.
+ * Logins it made on the data instance are dropped there with it.
+ *
+ * DIRECT LOGINS. The read-write login keeps its password: its row is given a
+ * SCRAM verifier of the password it keeps today, so its connection details
+ * keep signing in once they go through the region's pooler. The read-only
+ * login's password is derived again, as on any project's own database, and is
+ * shown, as it always is. Function logins keep theirs (backenly_fn_role_sync).
  *
  * A RUN THAT DIED. Only one run per project at a time, held by an advisory lock
  * on the platform database for the run's whole life. A later run that finds a
@@ -121,7 +139,6 @@ import {
   PROJECT_DATABASE_TEMPLATE,
   createProjectDatabase,
   dropProjectDatabase,
-  grantBackupReadOn,
   regionDbcreatorUrl,
 } from './project-databases'
 import { asWorkspaceOwner } from './as-owner'
@@ -138,7 +155,7 @@ import {
   type LifecycleActor,
 } from '@/lib/projects/pause-lifecycle'
 import { UnknownProjectSchemaError, resolveProjectSchemas } from '@/lib/projects/delete'
-import { projectLoginNames } from '@/lib/projects/logins'
+import { dropLogins, projectLoginNames, recordRetiredLogins } from '@/lib/projects/logins'
 import { DROP_AFTER_MS, scheduleSchemaDrop } from '@/lib/postgrest/retire-schema'
 import { registerSchemaOn, servedAmong, unregisterSchemaOn } from '@/lib/postgrest/registration'
 import { regionPostgrestHostUrl } from '@/lib/postgrest/host'
@@ -147,7 +164,7 @@ import { CHANNEL_TABLE_EXISTS_SQL, DELETE_CHANNELS_SQL, READ_CHANNELS_SQL, isCha
 import { bringFunctionsCurrent, installRealtimePlatform, realtimeDatabasePool } from '@/lib/realtime/channels'
 import { isAllowedExtension } from '@/lib/services/extension-allowlist'
 import { forgetFunctionDbClient, functionRoleName, functionRolePassword } from '@/lib/services/ai-functions/function-db-role'
-import { directAccessRoleNames } from '@/lib/services/direct-access'
+import { directAccessRoleNames, type CarriedLogin } from '@/lib/services/direct-access'
 import { backupWorkspace, buildConnection, sanitizeError } from '@/lib/services/workspace-backup'
 import { REGIONAL_STATUS, TENANCY_MIGRATION_JOB_TYPE, enqueueRegionalJob } from '@/lib/queue'
 import {
@@ -266,6 +283,8 @@ interface MoveContext {
   extensions: Extension[]
   /** The project's tenancy epoch before the move. */
   epoch: number
+  /** Whether the region's data instance is the instance its shared database is on (it is not in the home region). */
+  sameInstance: boolean
 }
 
 interface Run {
@@ -277,6 +296,10 @@ interface Run {
   database: string | null
   frozen: boolean
   fnRetired: boolean
+  /** The project's direct logins, made ready in its new database (carryDirectLogins). */
+  carried: CarriedLogin[]
+  /** Logins this run made on the data instance, dropped there again if the move stops. */
+  createdOnTarget: string[]
 }
 
 function message(err: unknown): string {
@@ -563,12 +586,6 @@ async function preconditions(run: Run): Promise<Prepared> {
   const schemas = [canonical, ...found.filter((schema) => schema !== canonical)]
 
   const credentials = await prisma.databaseCredential.findMany({ where: { projectId }, select: { roleName: true, mode: true } })
-  if (credentials.length > 0 && !sameInstance(region)) {
-    throw new Refusal(
-      'direct_logins_elsewhere',
-      "the project has direct Postgres logins, and the region's data instance is not the instance its shared database is on, where they are",
-    )
-  }
   const names = projectLoginNames(projectId, credentials.map((c) => c.roleName), schemas)
   const logins = (
     await shared.$queryRaw<Array<{ rolname: string }>>`SELECT rolname::text AS rolname FROM pg_roles WHERE rolname = ANY(${names}::text[]) ORDER BY 1`
@@ -589,11 +606,24 @@ async function preconditions(run: Run): Promise<Prepared> {
   log(
     run,
     'preconditions',
-    `ok: ${schemas.length} schema(s), ${served.length} served, ${extensions.length} extension(s), ${logins.length} login(s), epoch ${row.tenancyEpoch}`,
+    `ok: ${schemas.length} schema(s), ${served.length} served, ${extensions.length} extension(s), ${logins.length} login(s), epoch ${row.tenancyEpoch}, ` +
+      `${sameInstance(region) ? 'its data instance is the same instance' : 'its data instance is another instance'}`,
   )
   return {
     kind: 'move',
-    context: { region, canonical, schemas, served, backupRole, credentials, logins, fnSchemas, extensions, epoch: row.tenancyEpoch },
+    context: {
+      region,
+      canonical,
+      schemas,
+      served,
+      backupRole,
+      credentials,
+      logins,
+      fnSchemas,
+      extensions,
+      epoch: row.tenancyEpoch,
+      sameInstance: sameInstance(region),
+    },
   }
 }
 
@@ -740,7 +770,20 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
   const { projectId } = run
   const database = run.database as string
   const write = buildConnection('write', { region: ctx.region, database })
-  log(run, 'replay', 'replaying as the application, in one transaction')
+  log(run, 'replay', 'making its logins ready there, then replaying as the application, in one transaction')
+
+  // Direct access first: each login made ready there, stopped as the pause
+  // left it, its schema changes refused (lib/services/direct-access.ts
+  // carryDirectLogins), because the copy names the read-write login in its
+  // pass-through policies, and on another instance it does not exist yet. Its
+  // grants are made by direct access's own sync once the project's row names
+  // this database, before the project serves again (settleLogins).
+  if (ctx.credentials.length > 0) {
+    const { carryDirectLogins } = await import('@/lib/services/direct-access')
+    run.carried = await carryDirectLogins(projectId, { region: ctx.region, database })
+    run.createdOnTarget.push(...run.carried.filter((c) => c.created).map((c) => c.roleName))
+  }
+
   await execFileAsync('psql', [...write.args, '-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '--file', file], {
     timeout: REPLAY_TIMEOUT_MS,
     env: write.env,
@@ -766,15 +809,20 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
 
   // The backup role's read: the helper for the canonical schema, as a new
   // project gets it, and the application's own grant on the rest.
-  if (!(await grantBackupReadOn(px, ctx.canonical))) {
+  const { grantWorkspaceBackupAccess } = await import('@/lib/services/direct-access')
+  if (!(await grantWorkspaceBackupAccess(ctx.region, ctx.canonical, database))) {
     throw new StepFailure('replay', 'its database has no grant helper, so its snapshots could not be taken')
   }
   const dataBackupRole = roleOf(regionDataInstanceUrl(ctx.region, 'backup')) ?? ctx.backupRole
   for (const schema of ctx.schemas.filter((s) => s !== ctx.canonical)) await grantBackupRead(px, dataBackupRole, schema)
 
-  // Its functions' logins, with CONNECT on this database by name.
+  // Its functions' logins, with CONNECT on this database by name; made on the
+  // data instance when it is another instance than the shared database's.
   for (const schema of ctx.fnSchemas) {
+    const role = functionRoleName(schema)
+    const [there] = await px.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${role}`
     await px.$queryRaw`SELECT public.backenly_fn_role_sync(${schema}, ${functionRolePassword(schema)}) AS role`
+    if (!there?.n) run.createdOnTarget.push(role)
   }
 
   // Realtime: the notify functions current, and the channel rows under the
@@ -793,19 +841,12 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
     )
   }
 
-  // Direct access: its read-write login keeps the schema changes it had on the
-  // shared database, none, and the sync makes its grants and pass-through
-  // policies there. Its logins are instance-wide, so they are the same roles.
-  if (ctx.credentials.length > 0) {
-    const { ro, rw, owner } = directAccessRoleNames(projectId)
-    const exists = async (role: string) =>
-      ((await px.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${role}`)[0]?.n ?? 0) > 0
-    const roRole = ctx.credentials.some((c) => c.roleName === ro) && (await exists(ro)) ? ro : null
-    const rwRole = ctx.credentials.some((c) => c.roleName === rw) && (await exists(rw)) ? rw : null
-    if (rwRole) await px.$queryRaw`SELECT public.backenly_direct_set_schema_changes(${rwRole}, false) AS ok`
-    await px.$queryRaw`SELECT public.backenly_direct_sync_schema(${ctx.canonical}, ${roRole}, ${rwRole}, ${rwRole ? owner : null}) AS ok`
-  }
-  log(run, 'replay', `replayed; ${ctx.served.length} schema(s) served there, ${channels.size} channel(s), ${ctx.fnSchemas.length} function login(s)`)
+  log(
+    run,
+    'replay',
+    `replayed; ${ctx.served.length} schema(s) served there, ${channels.size} channel(s), ${ctx.fnSchemas.length} function login(s), ` +
+      `${run.carried.length} direct login(s) (${run.createdOnTarget.length} made on the data instance)`,
+  )
 }
 
 /** The project's realtime channels in the shared database, by schema. The names stay in memory, never in a log or a report. */
@@ -1034,6 +1075,28 @@ async function verify(run: Run, ctx: MoveContext, sharedLock: PoolClient, pxLock
   const dataBackupRole = roleOf(regionDataInstanceUrl(ctx.region, 'backup')) ?? ctx.backupRole
   check('backup_read', await unreadableByBackup(px, dataBackupRole, ctx.schemas), 'the backup role reads every schema')
 
+  // Every login the project has is on the data instance, stopped until the
+  // resume, and its read-write login may not change the schema there.
+  const loginProblems: string[] = []
+  const expected = [...run.carried.map((c) => c.roleName), ...ctx.fnSchemas.map((s) => functionRoleName(s))]
+  const onTarget = await px.$queryRaw<Array<{ rolname: string; login: boolean }>>`
+    SELECT rolname::text AS rolname, rolcanlogin AS login FROM pg_roles WHERE rolname = ANY(${expected}::text[])`
+  for (const role of expected) if (!onTarget.some((r) => r.rolname === role)) loginProblems.push(`${role} is not on the data instance`)
+  for (const carried of run.carried) {
+    if (onTarget.find((r) => r.rolname === carried.roleName)?.login) loginProblems.push(`${carried.roleName} can log in before the move has ended`)
+  }
+  const rw = run.carried.find((c) => c.mode === 'READ_WRITE')
+  if (rw) {
+    const [refused] = await px.$queryRaw<Array<{ refused: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_auth_members m
+         WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')
+           AND m.member = (SELECT oid FROM pg_roles WHERE rolname = ${rw.roleName})
+      ) AS refused`
+    if (!refused?.refused) loginProblems.push(`${rw.roleName} could change the schema there`)
+  }
+  check('logins', loginProblems, `${expected.length} login(s) on the data instance, stopped until the resume, schema changes refused`)
+
   // Its own PostgREST, on the region's host, serving the new database.
   let base: string | null = null
   try {
@@ -1124,6 +1187,11 @@ async function flip(run: Run, ctx: MoveContext, verification: VerificationReport
               completedAt: now,
             },
           })
+          // Its logins' rows keep the verifiers the new database's logins were
+          // made ready with, from this commit on (carryDirectLogins).
+          for (const carried of run.carried) {
+            await tx.databaseCredential.updateMany({ where: { projectId, roleName: carried.roleName }, data: carried.kept })
+          }
           await tx.auditLog.create({
             data: {
               action: DATABASE_MOVED_ACTION,
@@ -1240,7 +1308,7 @@ async function scheduleDrop(run: Run, region: CloudRegionId, leftAs: string[]): 
   log(run, 'schedule_drop', `${leftAs.length} schema(s) dropped by the region's pass after ${MOVED_SCHEMA_DROP_AFTER_MS / 86_400_000} days`)
 }
 
-async function resume(run: Run, region: CloudRegionId, database: string, hasCredentials: boolean): Promise<void> {
+async function resume(run: Run, region: CloudRegionId, database: string): Promise<void> {
   const { projectId } = run
   log(run, 'resume', 'restarting its own PostgREST and ending the pause')
   let base: string | null = null
@@ -1258,14 +1326,6 @@ async function resume(run: Run, region: CloudRegionId, database: string, hasCred
   run.frozen = false
   await afterMigrationThawCommitted(projectId, ACTOR)
   if (thaw.deleted) run.report.attention.push('its deletion was asked for during the move, so it stays paused as a deleted project')
-  if (hasCredentials) {
-    try {
-      const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
-      await syncDirectAccessGrants(projectId)
-    } catch (err) {
-      run.report.attention.push(`direct access grants not synced: ${message(err)}`)
-    }
-  }
   log(run, 'resume', thaw.thawed ? 'serving again, from its own database' : 'the pause was not the move\'s any more; left as it is')
 }
 
@@ -1334,7 +1394,62 @@ async function smoke(run: Run, region: CloudRegionId, database: string, hasFunct
 }
 
 /** Everything after a committed flip. Never throws: the move happened, and what is left undone is in `attention`. */
-async function afterFlip(run: Run, region: CloudRegionId, database: string, epoch: number, opts: { schemas: string[] | null; hasCredentials: boolean; hasFunctionLogin: boolean; fenced?: Array<{ name: string; leftAs: string }> }): Promise<void> {
+/**
+ * The project's direct logins in its new database, once its row names it and
+ * before it serves again: direct access's grants made there by its own sync,
+ * the plan's connection limits, and the pooler's rows written, off until the
+ * resume turns them on. Then, where the data instance is another instance,
+ * every login of the project dropped from the shared database's instance,
+ * where it holds nothing any more once the old schemas are fenced. Never
+ * throws: what is left undone is in `attention`.
+ */
+async function settleLogins(run: Run, region: CloudRegionId, fenced: Array<{ name: string; leftAs: string }>, sameInstanceHere: boolean): Promise<void> {
+  const { projectId } = run
+  const credentialRoles = (await prisma.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } })).map((c) => c.roleName)
+  if (credentialRoles.length > 0) {
+    try {
+      const { applyPlanConnectionLimits, restorePoolerLogins, syncDirectAccessGrants } = await import('@/lib/services/direct-access')
+      await syncDirectAccessGrants(projectId)
+      await applyPlanConnectionLimits(projectId)
+      // Paused, so written off: the resume turns them on (lib/projects/paused-logins.ts).
+      await restorePoolerLogins(projectId)
+    } catch (err) {
+      run.report.attention.push(`direct access was not set up in its own database: ${message(err)}`)
+    }
+  }
+  if (sameInstanceHere) return
+  try {
+    const shared = regionRawClient(region, projectId)
+    const original = fenced.map((f) => f.name).filter((name) => !isMovedSchema(name))
+    const names = projectLoginNames(projectId, credentialRoles, original)
+    const there = (
+      await shared.$queryRaw<Array<{ rolname: string }>>`SELECT rolname::text AS rolname FROM pg_roles WHERE rolname = ANY(${names}::text[]) ORDER BY 1`
+    ).map((r) => r.rolname)
+    if (there.length === 0) return
+    const retired = await shared.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '10s'`)
+        return dropLogins(tx as any, there)
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    )
+    if (retired.length > 0) {
+      await recordRetiredLogins(prisma, [{ projectId, region, logins: retired }], 'tenancy migration').catch(() => {})
+      run.report.attention.push(`${retired.join(', ')} kept on the shared database's instance, unable to log in: something there still names them`)
+    }
+    log(run, 'fence', `${there.length - retired.length} login(s) dropped from the shared database's instance`)
+  } catch (err) {
+    run.report.attention.push(`the old logins were not dropped from the shared database's instance: ${message(err)}`)
+  }
+}
+
+async function afterFlip(
+  run: Run,
+  region: CloudRegionId,
+  database: string,
+  epoch: number,
+  opts: { schemas: string[] | null; hasFunctionLogin: boolean; sameInstance: boolean; fenced?: Array<{ name: string; leftAs: string }> },
+): Promise<void> {
   const { projectId } = run
   noteTenancyEpoch(projectId, epoch)
   forgetProjectDatabase(projectId)
@@ -1371,8 +1486,9 @@ async function afterFlip(run: Run, region: CloudRegionId, database: string, epoc
   } catch (err) {
     run.report.attention.push(`the drop of the old schemas was not scheduled: ${message(err)}`)
   }
+  await settleLogins(run, region, fenced, opts.sameInstance)
   try {
-    await resume(run, region, database, opts.hasCredentials)
+    await resume(run, region, database)
   } catch (err) {
     run.report.attention.push(`the project was not resumed: ${message(err)}`)
     return
@@ -1438,6 +1554,22 @@ async function standDown(run: Run, ctx: MoveContext | null): Promise<void> {
       notes.push(`${run.database} was not dropped (${message(err)}); the daily orphan sweep drops it`)
     }
   }
+  // Logins this run made on the data instance hold nothing there now that its
+  // database is gone: they go too.
+  if (ctx && databaseDropped && run.createdOnTarget.length > 0) {
+    try {
+      const retired = await dataInstanceRawClient(ctx.region).$transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '10s'`)
+          return dropLogins(tx as any, run.createdOnTarget)
+        },
+        { timeout: 60_000, maxWait: 10_000 },
+      )
+      if (retired.length > 0) notes.push(`${retired.join(', ')} kept on the data instance, unable to log in`)
+    } catch (err) {
+      notes.push(`the logins made on the data instance were not dropped: ${message(err)}`)
+    }
+  }
   run.report.cleanup = { databaseDropped, serving, detail: notes.join('; ') || 'nothing left behind' }
   log(
     run,
@@ -1475,6 +1607,8 @@ export async function migrateProjectToOwnDatabase(projectId: string, options: Mi
     database: null,
     frozen: false,
     fnRetired: false,
+    carried: [],
+    createdOnTarget: [],
   }
   const done = () => {
     report.finishedAt = new Date().toISOString()
@@ -1506,10 +1640,13 @@ export async function migrateProjectToOwnDatabase(projectId: string, options: Mi
         report.epoch = prepared.epoch
         run.frozen = true
         log(run, 'flip', `already flipped by an earlier run, to epoch ${prepared.epoch}; finishing`)
-        const credentials = await prisma.databaseCredential.count({ where: { projectId } })
         const fnRole = functionRoleName(workspaceSchemaName(projectId))
-        const [{ n }] = await regionRawClient(prepared.region, projectId).$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${fnRole}`
-        await afterFlip(run, prepared.region, prepared.database, prepared.epoch, { schemas: null, hasCredentials: credentials > 0, hasFunctionLogin: n > 0 })
+        const [{ n }] = await databaseClient(prepared.region, prepared.database, projectId).$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${fnRole}`
+        await afterFlip(run, prepared.region, prepared.database, prepared.epoch, {
+          schemas: null,
+          hasFunctionLogin: n > 0,
+          sameInstance: sameInstance(prepared.region),
+        })
         return
       }
 
@@ -1571,8 +1708,8 @@ export async function migrateProjectToOwnDatabase(projectId: string, options: Mi
       if (moved.fenced) {
         await afterFlip(run, context.region, run.database as string, moved.epoch, {
           schemas: context.schemas,
-          hasCredentials: context.credentials.length > 0,
           hasFunctionLogin: context.fnSchemas.includes(context.canonical),
+          sameInstance: context.sameInstance,
           fenced: moved.fenced,
         })
       } else {
