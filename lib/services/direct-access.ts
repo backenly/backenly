@@ -928,7 +928,9 @@ export async function carryDirectLogins(projectId: string, target: { region: Clo
         await db.$queryRaw`SELECT public.backenly_direct_retire_role(${row.roleName}) AS retired`
       }
     } finally {
-      if (!exists) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)}`)
+      // Made here, empty, a moment ago: CASCADE takes only what registering
+      // it with the database's PostgREST registry may have put in it.
+      if (!exists) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
     }
   }
 

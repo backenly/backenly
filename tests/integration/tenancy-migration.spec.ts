@@ -263,17 +263,27 @@ async function buildCluster(c: Cluster, { pooler }: { pooler: boolean }): Promis
 
   await rows(superUrlOn(c, 'postgres'), `CREATE ROLE ${ADMIN} LOGIN CREATEROLE CREATEDB BYPASSRLS PASSWORD '${ADMIN_PW}'`)
   await rows(superUrlOn(c, 'postgres'), `GRANT pg_monitor TO ${ADMIN}`)
+  // PostgreSQL 16 lets a role grant another only with the ADMIN option on it:
+  // roles.sql gives the application pg_read_all_stats and the database
+  // creator pg_signal_backend, as the RDS master can (regional-bootstrap.spec.ts).
   await rows(superUrlOn(c, 'postgres'), `GRANT pg_read_all_stats TO ${ADMIN} WITH ADMIN OPTION`)
+  await rows(superUrlOn(c, 'postgres'), `GRANT pg_signal_backend TO ${ADMIN} WITH ADMIN OPTION`)
   await rows(superUrlOn(c, 'postgres'), `CREATE DATABASE ${c.db} OWNER ${ADMIN}`)
   vectorAvailable = (await rows(superUrlOn(c), `SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`)).length > 0
 
-  bootstrap({
+  // The administrator's apply stops at the first event trigger, and must have
+  // made the roles and credentials by then: said here, with its own output,
+  // rather than as the superuser's apply missing a role.
+  const first = bootstrap({
     DATABASE_URL: adminUrlOn(c),
     BOOTSTRAP_MODE: 'apply',
     EXPECT_DATABASE: c.db,
     ...Object.fromEntries(LOGINS.map((role) => [VERIFIER_VARIABLE[role], scramSha256Verifier(passwords[role])])),
     ...(pooler ? { BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(POOLER_AUTH_PW) } : {}),
   })
+  if (!first.output.includes('step roles: applied')) {
+    throw new Error(`The ${c.name} instance's roles were not made by its administrator's apply:\n${first.output.slice(-3000)}`)
+  }
   const applied = bootstrap({ DATABASE_URL: superUrlOn(c), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: c.db })
   if (applied.status !== 0) throw new Error(`The ${c.name} instance's database was not built:\n${applied.output.slice(-3000)}`)
   await handToAdministrator(c)
@@ -301,9 +311,24 @@ function set(name: string, value: string | undefined): void {
   else process.env[name] = value
 }
 
+/** Set once the region's cluster is built; each suite refuses to start without it, naming why. */
+let regionReady = false
+
+/** Each suite's first step: the shared setup above must have finished, or its failure is the one to read. */
+function requireRegion(): void {
+  if (!regionReady) throw new Error("The region's cluster was not built, so nothing here can run; the first failure of this file says why.")
+}
+
 beforeAll(async () => {
   if (!runnable) return
   if (process.env.NODE_ENV !== 'test') throw new Error('Refusing: NODE_ENV is not test')
+  // Projects are created through the one creation path, which only Backenly
+  // Cloud's edition allows more than one of (lib/projects/provision.ts); CI's
+  // integration job leaves the edition unset, so this suite sets it, as
+  // regional-bootstrap.spec.ts does. Before anything that can fail.
+  set('BACKENLY_EDITION', 'cloud')
+  set('BACKENLY_SERVICE_REGION', REGION)
+  set('REALTIME_LISTENER_IDLE_CLOSE_MS', '0')
   bin = postgresBinaries()
   work = fs.mkdtempSync(path.join(os.tmpdir(), 'tenancy-migration-'))
   script = assembleImageTree()
@@ -320,11 +345,9 @@ beforeAll(async () => {
   set('DIRECT_DB_HOST_AP_SOUTHEAST_1', undefined)
   set('BACKENLY_DEDICATED_DATABASES_AP_SOUTHEAST_1', undefined)
   set('PGRST_HOST_URL_AP_SOUTHEAST_1', undefined)
-  set('BACKENLY_EDITION', 'cloud')
-  set('BACKENLY_SERVICE_REGION', REGION)
   set('BACKUP_DIR', path.join(work, 'backups'))
   set('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`)
-  set('REALTIME_LISTENER_IDLE_CLOSE_MS', '0')
+  regionReady = true
 })
 
 /** Close what this process holds on project databases: their listeners, lock pools, clients and pools. */
@@ -436,6 +459,8 @@ suite('a project moved from its region’s shared database into a database of it
   }
 
   beforeAll(async () => {
+    requireRegion()
+    set('BACKENLY_EDITION', 'cloud')
     ownerId = (await prisma.user.create({ data: { email: `moves-${randomUUID()}@example.test`, name: 'tenancy migration fixture' }, select: { id: true } })).id
     const project = await createProvisionedProject({ name: `moving ${randomUUID()}`, userId: ownerId, region: REGION })
     expect(project.databaseTenancy).toBe('shared')
@@ -761,6 +786,8 @@ suite('a project whose data instance is another instance, moved with its logins'
     )
 
   beforeAll(async () => {
+    requireRegion()
+    set('BACKENLY_EDITION', 'cloud')
     dataCluster = await buildCluster(dataCluster, { pooler: true })
     await closeProjectConnections()
     set('DATA_DATABASE_URL_AP_SOUTHEAST_1', loginUrlOn(dataCluster, 'backenly_app'))
@@ -856,7 +883,10 @@ suite('a project whose data instance is another instance, moved with its logins'
     const derived = await readOnlyLogin(projectId)
     expect(derived.roleName).toBe(ro)
     expect(await rows(onData(ro, derived.password), `SELECT count(*)::int AS n FROM "${schema}".notes`)).toEqual([{ n: 2 }])
-    expect(await refusal(onData(ro, derived.password), `INSERT INTO "${schema}".notes (body) VALUES ('not allowed')`)).toMatch(/permission denied/)
+    // Refused writes: the login reads only (default_transaction_read_only, and no write grant behind it).
+    expect(await refusal(onData(ro, derived.password), `INSERT INTO "${schema}".notes (body) VALUES ('not allowed')`)).toMatch(
+      /read-only transaction|permission denied/,
+    )
 
     // Through the pass-through policies the copy carried, both read the table under row security.
     expect(await rows(onData(ro, derived.password), `SELECT count(*)::int AS n FROM "${schema}".secrets`)).toEqual([{ n: 3 }])
