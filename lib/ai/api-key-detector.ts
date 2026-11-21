@@ -265,6 +265,12 @@ const KNOWN_PROVIDER_KEY_PATTERNS: RegExp[] = [
   /^pika_[A-Za-z0-9\-_]{20,}$/,
   // Twilio Account SID or full sid:token:from credential
   /^AC[0-9a-fA-F]{32}(?::[0-9a-fA-F]{32}:[+0-9]+)?$/,
+  // GitHub OAuth client secret (40-char hex string)
+  /^[0-9a-fA-F]{40}$/,
+  // Google OAuth client secret (GOCSPX-...)
+  /^GOCSPX-[A-Za-z0-9_\-]{24,40}$/,
+  // Facebook / Meta App Secret (32-char hex string)
+  /^[0-9a-fA-F]{32}$/,
   // Email sender configuration (Resend/SendGrid fromEmail)
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
 ]
@@ -311,8 +317,12 @@ const DANGEROUS_PATTERNS: DangerousSecretPattern[] = [
 
       const trimmed = val.trim()
 
-      // 1. Standalone secret: the entire value is exactly 40 base64 characters
-      if (/^[A-Za-z0-9/+=]{40}$/.test(trimmed)) return true
+      // 1. Standalone secret: the entire value is exactly 40 base64 characters.
+      // Must NOT be a pure hex string (standard GitHub OAuth client secrets, SHA hashes, etc.).
+      // Genuine AWS secret keys are raw base64 and almost always contain + or / or =.
+      if (!/^[0-9a-fA-F]{40}$/.test(trimmed) && /^[A-Za-z0-9/+=]{40}$/.test(trimmed)) {
+        if (/[+/=]/.test(trimmed)) return true
+      }
 
       // 2. Paired with an AWS access key ID (AKIA, ASIA, ABIA, ACCA)
       const hasKeyId = /\b(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/.test(trimmed)

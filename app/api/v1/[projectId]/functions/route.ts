@@ -1,12 +1,13 @@
 export const dynamic = 'force-dynamic'
 
 /**
- * POST /api/v1/[projectId]/functions
+ * /api/v1/[projectId]/functions
  *
  * Invoke a serverless AI function by name (not UUID).
- * Called by the SDK's backend.fn['functionName'].call(data) pattern.
+ * Supports both POST (with JSON body) and GET (with query parameters).
  *
- * Body: { name: string, data?: Record<string, any> }
+ * POST: { name: string, data?: Record<string, any> }
+ * GET:  ?name=functionName&param1=value1...
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -16,20 +17,16 @@ import { prisma } from '@/lib/db'
 import { FUNCTION_OFF_STATUSES } from '@/lib/services/ai-functions/status'
 import { markAsWritten, recordedV1 } from '@/lib/traffic/recorded-v1'
 
-async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
-  const params = await props.params;
+async function invokeFunction(
+  request: NextRequest,
+  params: { projectId: string },
+  name: string,
+  data: Record<string, any>,
+) {
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
 
-    let body: { name?: string; data?: Record<string, any> }
-    try {
-      body = await request.json()
-    } catch {
-      return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'Invalid JSON body', 400)
-    }
-
-    const { name, data } = body
     if (!name || typeof name !== 'string') {
       return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'Function name is required', 400)
     }
@@ -109,4 +106,30 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
   }
 }
 
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params
+  let body: { name?: string; data?: Record<string, any> }
+  try {
+    body = await request.json()
+  } catch {
+    return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'Invalid JSON body', 400)
+  }
+  return invokeFunction(request, params, body.name ?? '', body.data || {})
+}
+
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params
+  const { searchParams } = new URL(request.url)
+  const name = searchParams.get('name')
+  if (!name) {
+    return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'Function name query parameter is required (?name=...)', 400)
+  }
+  const data: Record<string, any> = {}
+  searchParams.forEach((v, k) => {
+    if (k !== 'name') data[k] = v
+  })
+  return invokeFunction(request, params, name, data)
+}
+
 export const POST = recordedV1(handlePOST)
+export const GET = recordedV1(handleGET)

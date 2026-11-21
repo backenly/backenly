@@ -13,14 +13,13 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Code2, Copy, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { IconButton, KitButton, KitCheckbox, KitConfirmDialog, KitField, KitInput, KitModal, KitNote, KitSelect, OverflowMenu } from '@/components/inspector/kit'
 import { EmptyLine, Fact, Facts, Panel, Row as ListRow, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { ErrorRow, RefusedLine } from '@/components/console/states'
 import { FOCUS } from '@/components/console/tokens'
 import { addColumn, addConstraint, dropColumn, renameColumn, type IndexInfo, type RelationshipInfo, type TableInfo } from '@/lib/api/database'
 import { isForeignKeyShaped, suggestForeignKeyColumn } from '@/lib/db/fk-shape'
-import { Check, X } from 'lucide-react'
 import { isReservedColumn, type Column } from './values'
 
 const TYPES: Array<{ value: string; label: string }> = [
@@ -244,6 +243,8 @@ export function TableStructure({
         )}
 
         <WhenRowsChange projectId={projectId} table={table} />
+
+        <TableEndpointsSection projectId={projectId} table={table} columns={columns} />
       </div>
 
       {adding && (
@@ -534,5 +535,152 @@ function AddColumnDialog({
         {error && <RefusedLine>{error}</RefusedLine>}
       </div>
     </KitModal>
+  )
+}
+
+// ─── REST Endpoints & Schema Models ──────────────────────────────────────────
+
+function mapColumnToTsType(col: Column): string {
+  const t = col.type.toLowerCase()
+  if (t.includes('int') || t.includes('numeric') || t.includes('float') || t.includes('double') || t.includes('decimal')) return 'number'
+  if (t.includes('bool')) return 'boolean'
+  if (t.includes('json')) return 'Record<string, unknown>'
+  if (t.includes('time') || t.includes('date')) return 'string /* ISO 8601 */'
+  if (t.includes('uuid')) return 'string /* UUID */'
+  return 'string'
+}
+
+function generateTsInterface(name: string, columns: readonly Column[], forInput = false): string {
+  const filtered = forInput ? columns.filter((c) => !isReservedColumn(c.name) && c.name !== 'id') : columns
+  const fields = filtered.map((c) => {
+    const tsType = mapColumnToTsType(c)
+    const optional = forInput && (c.nullable || c.default !== null) ? '?' : ''
+    return `  ${c.name}${optional}: ${tsType}`
+  })
+  return `interface ${name} {\n${fields.join('\n')}\n}`
+}
+
+function TableEndpointsSection({ projectId, table, columns }: { projectId: string; table: string; columns: readonly Column[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const base = `/api/v1/${projectId}/db/${encodeURIComponent(table)}`
+  const modelName = table.charAt(0).toUpperCase() + table.slice(1).replace(/s$/, '')
+
+  const endpoints = [
+    {
+      id: 'list',
+      method: 'GET',
+      badgeClass: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+      path: base,
+      title: 'List records',
+      desc: 'Filter with ?field=eq.value, sort with ?order=field.desc, paginate with ?limit=N&offset=N',
+      reqModel: null,
+      resModel: `{\n  "data": Array<${modelName}>,\n  "count": number\n}`,
+      curl: `curl -X GET "https://backenly.com${base}?limit=20" \\\n  -H "apikey: <PROJECT_API_KEY>"`,
+    },
+    {
+      id: 'create',
+      method: 'POST',
+      badgeClass: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+      path: base,
+      title: 'Create record',
+      desc: 'Insert a new record into the table and return the created row',
+      reqModel: generateTsInterface(`${modelName}Input`, columns, true),
+      resModel: `{\n  "data": ${modelName}\n}`,
+      curl: `curl -X POST "https://backenly.com${base}" \\\n  -H "apikey: <PROJECT_API_KEY>" \\\n  -H "Content-Type: application/json" \\\n  -d '{"..."}'`,
+    },
+    {
+      id: 'read',
+      method: 'GET',
+      badgeClass: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+      path: `${base}/:id`,
+      title: 'Get single record',
+      desc: 'Retrieve a single record by its primary key',
+      reqModel: null,
+      resModel: `{\n  "data": ${modelName}\n}`,
+      curl: `curl -X GET "https://backenly.com${base}/<ROW_ID>" \\\n  -H "apikey: <PROJECT_API_KEY>"`,
+    },
+    {
+      id: 'update',
+      method: 'PATCH',
+      badgeClass: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+      path: `${base}/:id`,
+      title: 'Update record',
+      desc: 'Partially update columns on an existing record',
+      reqModel: `Partial<${modelName}Input>`,
+      resModel: `{\n  "data": ${modelName}\n}`,
+      curl: `curl -X PATCH "https://backenly.com${base}/<ROW_ID>" \\\n  -H "apikey: <PROJECT_API_KEY>" \\\n  -H "Content-Type: application/json" \\\n  -d '{"..."}'`,
+    },
+    {
+      id: 'delete',
+      method: 'DELETE',
+      badgeClass: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+      path: `${base}/:id`,
+      title: 'Delete record',
+      desc: 'Permanently remove a record from the table',
+      reqModel: null,
+      resModel: `{\n  "success": true\n}`,
+      curl: `curl -X DELETE "https://backenly.com${base}/<ROW_ID>" \\\n  -H "apikey: <PROJECT_API_KEY>"`,
+    },
+  ]
+
+  const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {})
+
+  return (
+    <Section id="structure-endpoints" title="REST Endpoints & Models" count={endpoints.length}>
+      <Panel>
+        <div className="divide-y divide-white/[0.06]">
+          {endpoints.map((ep) => {
+            const isOpen = expanded === ep.id
+            return (
+              <div key={ep.id} className="p-[14px] sm:p-[16px]">
+                <div className="flex flex-wrap items-center justify-between gap-[10px]">
+                  <div className="flex items-center gap-[10px]">
+                    <span className={`inline-flex items-center justify-center rounded px-[6px] py-[2px] font-mono text-[11px] font-bold border ${ep.badgeClass}`}>
+                      {ep.method}
+                    </span>
+                    <span className="font-mono text-[12.5px] text-zinc-200">{ep.path}</span>
+                  </div>
+                  <div className="flex items-center gap-[8px]">
+                    <button
+                      type="button"
+                      onClick={() => setExpanded(isOpen ? null : ep.id)}
+                      className={`inline-flex items-center gap-[5px] text-[12px] text-zinc-400 hover:text-zinc-200 ${FOCUS}`}
+                    >
+                      <Code2 className="h-[13px] w-[13px]" />
+                      <span>{isOpen ? 'Hide Models' : 'Models & Schema'}</span>
+                      {isOpen ? <ChevronDown className="h-[13px] w-[13px]" /> : <ChevronRight className="h-[13px] w-[13px]" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copy(ep.curl)}
+                      title="Copy curl command"
+                      className={`inline-flex items-center gap-[4px] rounded px-[6px] py-[3px] text-[11.5px] text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-200 ${FOCUS}`}
+                    >
+                      <Copy className="h-[12px] w-[12px]" />
+                      <span>cURL</span>
+                    </button>
+                  </div>
+                </div>
+                <p className="mt-[4px] text-[12px] text-zinc-400">{ep.desc}</p>
+                {isOpen && (
+                  <div className="mt-[12px] grid grid-cols-1 gap-[12px] sm:grid-cols-2">
+                    {ep.reqModel && (
+                      <div className="rounded-[4px] border border-white/[0.08] bg-black/40 p-[10px]">
+                        <p className="mb-[6px] text-[11px] font-medium uppercase tracking-wider text-zinc-400">Request Body Schema</p>
+                        <pre className="font-mono text-[11.5px] leading-[17px] text-zinc-300 overflow-x-auto">{ep.reqModel}</pre>
+                      </div>
+                    )}
+                    <div className="rounded-[4px] border border-white/[0.08] bg-black/40 p-[10px]">
+                      <p className="mb-[6px] text-[11px] font-medium uppercase tracking-wider text-zinc-400">Response Envelope</p>
+                      <pre className="font-mono text-[11.5px] leading-[17px] text-zinc-300 overflow-x-auto">{ep.resModel}</pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </Panel>
+    </Section>
   )
 }

@@ -38,14 +38,83 @@ export function fmtMegabytes(mb: number): string {
   return fmtBytes(mb * MIB)
 }
 
-/** "$12.40": an amount of money, to the cent. */
-export function fmtCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+export type CurrencyCode = 'USD' | 'EUR' | 'GBP' | 'INR' | 'CAD' | 'AUD' | 'JPY'
+
+export interface CurrencyConfig {
+  code: CurrencyCode
+  symbol: string
+  rate: number // units per 1 USD
+  locale: string
+}
+
+export const CURRENCIES: Record<CurrencyCode, CurrencyConfig> = {
+  USD: { code: 'USD', symbol: '$', rate: 1.0, locale: 'en-US' },
+  EUR: { code: 'EUR', symbol: '€', rate: 0.92, locale: 'de-DE' },
+  GBP: { code: 'GBP', symbol: '£', rate: 0.79, locale: 'en-GB' },
+  INR: { code: 'INR', symbol: '₹', rate: 86.5, locale: 'en-IN' },
+  CAD: { code: 'CAD', symbol: 'CA$', rate: 1.38, locale: 'en-CA' },
+  AUD: { code: 'AUD', symbol: 'A$', rate: 1.54, locale: 'en-AU' },
+  JPY: { code: 'JPY', symbol: '¥', rate: 155.0, locale: 'ja-JP' },
+}
+
+export function detectUserCurrency(): CurrencyCode {
+  if (typeof window === 'undefined') return 'USD'
+  try {
+    const saved = localStorage.getItem('backenly_currency') as CurrencyCode
+    if (saved && CURRENCIES[saved]) return saved
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+    if (timeZone.includes('Calcutta') || timeZone.includes('Kolkata') || timeZone.includes('India')) return 'INR'
+    if (timeZone.includes('London')) return 'GBP'
+    if (timeZone.includes('Europe') || timeZone.includes('Paris') || timeZone.includes('Berlin')) return 'EUR'
+    if (timeZone.includes('Tokyo')) return 'JPY'
+    if (timeZone.includes('Toronto') || timeZone.includes('Vancouver')) return 'CAD'
+    if (timeZone.includes('Sydney') || timeZone.includes('Melbourne')) return 'AUD'
+  } catch {
+    // fallback
+  }
+  return 'USD'
+}
+
+let activeCurrency: CurrencyCode = 'USD'
+if (typeof window !== 'undefined') {
+  activeCurrency = detectUserCurrency()
+}
+
+export function setPreferredCurrency(code: CurrencyCode) {
+  activeCurrency = code
+  if (typeof window !== 'undefined') {
+    try { localStorage.setItem('backenly_currency', code) } catch {}
+  }
+}
+
+export function getPreferredCurrency(): CurrencyCode {
+  return activeCurrency
+}
+
+/** "$12.40": an amount of money, to the cent, with optional regional converted amount. */
+export function fmtCents(cents: number, overrideCurrency?: CurrencyCode): string {
+  const currencyCode = overrideCurrency ?? activeCurrency
+  const usdDollars = cents / 100
+  const usdFormatted = `$${usdDollars.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  if (currencyCode === 'USD') return usdFormatted
+  const cfg = CURRENCIES[currencyCode]
+  if (!cfg) return usdFormatted
+  const converted = usdDollars * cfg.rate
+  const localFormatted = `${cfg.symbol}${converted.toLocaleString(cfg.locale, { minimumFractionDigits: cfg.code === 'JPY' ? 0 : 2, maximumFractionDigits: cfg.code === 'JPY' ? 0 : 2 })}`
+  return `${usdFormatted} (~${localFormatted})`
 }
 
 /** "$50": a limit or a payment, which are whole dollars; cents only when there are any. */
-export function fmtDollars(cents: number): string {
-  return `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`
+export function fmtDollars(cents: number, overrideCurrency?: CurrencyCode): string {
+  const currencyCode = overrideCurrency ?? activeCurrency
+  const usdDollars = cents / 100
+  const usdFormatted = `$${usdDollars.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`
+  if (currencyCode === 'USD') return usdFormatted
+  const cfg = CURRENCIES[currencyCode]
+  if (!cfg) return usdFormatted
+  const converted = usdDollars * cfg.rate
+  const localFormatted = `${cfg.symbol}${converted.toLocaleString(cfg.locale, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`
+  return `${usdFormatted} (~${localFormatted})`
 }
 
 function toDate(value: string | number | Date): Date {

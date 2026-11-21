@@ -344,6 +344,53 @@ function InboxLink({ projectId }: { projectId: string }) {
   )
 }
 
+// ── Unpublished draft indicator ──────────────────────────────────────────────
+
+/**
+ * Unpublished draft indicator: displays when working draft differs from published
+ * version or has pending changes, so developers immediately notice when they are behind.
+ */
+function UnpublishedDraftPill({ projectId }: { projectId: string }) {
+  const [hasDrift, setHasDrift] = useState(false)
+  const pathname = usePathname() ?? ''
+
+  useEffect(() => {
+    let cancelled = false
+    const checkDrift = () => {
+      fetch(`/api/projects/${projectId}/rollback`, { credentials: 'include' })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (cancelled || !data?.versions) return
+          const versions = data.versions
+          const drifted = versions.length > 0 && !versions.some((v: any) => v.isActive)
+          setHasDrift(drifted)
+        })
+        .catch(() => {})
+    }
+    checkDrift()
+    const timer = setInterval(checkDrift, 15000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [projectId])
+
+  // Don't show while on the deploy page itself
+  if (!hasDrift || pathname.endsWith('/deploy')) return null
+
+  return (
+    <Link
+      href={`/app/projects/${projectId}/deploy`}
+      title="Working draft has unpublished changes. Click to review and deploy."
+      className="hidden sm:inline-flex items-center gap-1.5 h-[28px] px-2.5 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[12px] font-medium transition-colors hover:bg-amber-500/20 hover:border-amber-500/40"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse" />
+      <span>Unpublished draft</span>
+      <span className="text-amber-400/80 font-normal">Publish →</span>
+    </Link>
+  )
+}
+
 // ── Connect agent ────────────────────────────────────────────────────────────
 
 /**
@@ -410,6 +457,7 @@ export function TopBar() {
 
       {/* ── Right cluster ────────────────────────────────────────────────── */}
       <div className="ml-auto flex flex-shrink-0 items-center gap-1 sm:gap-1.5">
+        {projectId && <UnpublishedDraftPill projectId={projectId} />}
         <ConnectAgentButton projectId={projectId} />
         <SearchTrigger />
         <InboxLink projectId={projectId} />

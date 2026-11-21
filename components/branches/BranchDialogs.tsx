@@ -7,6 +7,7 @@
  */
 
 import { useState } from 'react'
+import { Info } from 'lucide-react'
 import { KitButton, KitCheckbox, KitConfirmDialog, KitField, KitInput, KitModal } from '@/components/inspector/kit'
 import { RefusedLine } from '@/components/console/states'
 import { EDGE, WELL } from '@/components/console/tokens'
@@ -122,6 +123,19 @@ export function NewBranchDialog({
             spellCheck={false}
           />
         </KitField>
+
+        <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-3 text-xs text-purple-200">
+          <div className="flex items-start gap-2.5">
+            <Info className="h-4 w-4 shrink-0 text-purple-400 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-semibold text-purple-300">1-Level Schema Snapshot</span>
+              <p className="text-zinc-400 leading-relaxed text-[11px]">
+                Backenly branches are direct, isolated PostgreSQL snapshots of production <code className="text-purple-300">main</code>. Sub-branching from active preview branches is not permitted to ensure conflict-free SQL replay.
+              </p>
+            </div>
+          </div>
+        </div>
+
         <KitCheckbox
           checked={includeData}
           onChange={setIncludeData}

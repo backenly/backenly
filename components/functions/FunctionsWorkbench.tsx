@@ -644,7 +644,8 @@ function FunctionPane({
   const [filter, setFilter] = useState<'all' | 'failed'>('all')
   const [openFirst, setOpenFirst] = useState(false)
   const endpoint = endpointOf(fn)
-  const endpointUrl = endpoint ? `${typeof window !== 'undefined' ? window.location.origin : ''}${endpoint.path}` : null
+  const endpointPath = endpoint ? endpoint.path.replace(':id', projectId).replace('[id]', projectId) : null
+  const endpointUrl = endpoint && endpointPath ? `${typeof window !== 'undefined' ? window.location.origin : ''}${endpointPath}` : null
   const state = fnState(fn)
   const off = fn.status === 'inactive'
   const kind = triggerKind(fn)

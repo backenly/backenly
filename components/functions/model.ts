@@ -98,7 +98,7 @@ export function triggerWords(fn: Pick<AiFunction, 'triggerType' | 'triggerTable'
     case 'on_webhook':
       return 'On an incoming webhook'
     case 'manual':
-      return 'Run by hand'
+      return 'POST / GET endpoint'
     default:
       return fn.triggerType
   }
@@ -122,10 +122,15 @@ export function payloadLabel(fn: Pick<AiFunction, 'triggerType' | 'triggerTable'
   }
 }
 
-export function endpointOf(fn: Pick<AiFunction, 'triggerType' | 'triggerTable'>): { method: string; path: string } | null {
-  if (fn.triggerType !== 'manual' || !fn.triggerTable || !HTTP_ENDPOINT_RE.test(fn.triggerTable)) return null
-  const [method, path] = fn.triggerTable.trim().split(/\s+/)
-  return path ? { method: method.toUpperCase(), path } : null
+export function endpointOf(fn: Pick<AiFunction, 'triggerType' | 'triggerTable'> & { name?: string }): { method: string; path: string } | null {
+  if (fn.triggerType === 'manual' && fn.triggerTable && HTTP_ENDPOINT_RE.test(fn.triggerTable)) {
+    const [method, path] = fn.triggerTable.trim().split(/\s+/)
+    return path ? { method: method.toUpperCase(), path } : null
+  }
+  if (fn.triggerType === 'manual') {
+    return { method: 'POST / GET', path: `/api/v1/:id/fn/${fn.name ?? 'function'}` }
+  }
+  return null
 }
 
 /** Admin-gated business endpoints authenticate with the project's x-admin-key. */
