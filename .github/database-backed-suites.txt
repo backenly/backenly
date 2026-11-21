@@ -1638,7 +1638,12 @@ tests/integration/project-database-sessions.spec.ts
 # delivers the webhook event its outbox held, and fences the old schemas from
 # the project's logins; a second run is refused; deletion finds what the move
 # left; and the region's own database closes to PUBLIC only once no project
-# there is shared. Real databases, roles and pg_dump/psql are the property.
+# there is shared. Then, onto a second cluster standing for a data instance
+# that is another instance (as the home region's is), a project's read-only,
+# read-write and function logins move with it: each signs in there, the
+# read-write one with its old password, the pooler is served the server's
+# verifiers, and none is left on the old instance. Real databases, roles and
+# pg_dump/psql are the property.
 tests/integration/tenancy-migration.spec.ts
 
 # A regional project's customer data on platform rows stays in its region: a
