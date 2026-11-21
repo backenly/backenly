@@ -434,11 +434,12 @@ export function databaseOfRecord(projectId: string, region: CloudRegionId, row: 
   return { region, tenancy, database: row.databaseName, instance, epoch }
 }
 
-/** A project's region, checked, with the row it was read from and that row's epoch. */
+/** A project's region, checked, with the row it was read from, that row's epoch, and when it was read. */
 interface Placement {
   region: CloudRegionId
   row: ProjectPlacementRow
   epoch: number
+  readAt: number
 }
 
 // A project's region is recorded once, at creation, and never changes, so it
@@ -450,17 +451,46 @@ interface Placement {
 const PLACEMENT_CACHE_MAX = 10_000
 const placements = new EpochCache<Placement>(PLACEMENT_CACHE_MAX)
 
+/**
+ * How long a SHARED project's placement is used before it is read again.
+ *
+ * A shared project's data may be moved to a database of its own
+ * (lib/data-plane/tenancy-migration.ts), and a process that never reads that
+ * project's serving state (a background pass, a dashboard route) is told of
+ * the move by nothing else. So its placement is read again once it is this
+ * old: FRESH_MS plus STALE_SERVING_GRACE_MS (lib/projects/serving-state.ts),
+ * the bound a pause already has. The move waits at least this long after its
+ * flip before the project serves again, so no process acts on the old
+ * placement after that. A project with a database of its own is not moved
+ * again, and its placement is kept until its epoch moves.
+ */
+export const SHARED_PLACEMENT_MAX_AGE_MS = 75_000
+
+/** One platform read per project at a time, however many callers need it at once. */
+const placementReads = new Map<string, Promise<Placement | null>>()
+
+function readPlacement(projectId: string): Promise<Placement | null> {
+  const running = placementReads.get(projectId)
+  if (running) return running
+  const read = (async () => {
+    const row = await prisma.project.findUnique({ where: { id: projectId }, select: PLACEMENT_COLUMNS })
+    if (!row) return null
+    return { region: regionOfRecord(projectId, row.region), row, epoch: epochOfRecord(row), readAt: Date.now() }
+  })().finally(() => {
+    if (placementReads.get(projectId) === read) placementReads.delete(projectId)
+  })
+  placementReads.set(projectId, read)
+  return read
+}
+
 async function placementOf(projectId: string, atLeastEpoch?: number): Promise<Placement | null> {
+  if (atLeastEpoch !== undefined) placements.note(projectId, atLeastEpoch)
+  const cached = placements.peek(projectId)
+  if (cached && (cached.row.databaseTenancy ?? 'shared') === 'shared' && Date.now() - cached.readAt > SHARED_PLACEMENT_MAX_AGE_MS) {
+    placements.forget(projectId)
+  }
   try {
-    return await placements.get(
-      projectId,
-      async () => {
-        const row = await prisma.project.findUnique({ where: { id: projectId }, select: PLACEMENT_COLUMNS })
-        if (!row) return null
-        return { region: regionOfRecord(projectId, row.region), row, epoch: epochOfRecord(row) }
-      },
-      atLeastEpoch,
-    )
+    return await placements.get(projectId, () => readPlacement(projectId))
   } catch (err) {
     if (err instanceof EpochBehindError) {
       throw new UnknownProjectDatabaseError(

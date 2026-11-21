@@ -163,6 +163,9 @@ export async function planRestoreTo(projectId: string, afterSeq: number): Promis
   const plan: RangePlan = { afterSeq, steps: [], kept: [], stop: null }
   for (const r of rows) {
     const entry = { id: r.id, seq: r.seq, summary: label(r) }
+    // A move to a database of its own changed no table: the changes on either
+    // side of it are restored where the data is now.
+    if (r.kind === 'tenancy_migration') continue
     if (r.kind === 'snapshot_restore') {
       plan.stop = { ...entry, recordId: r.id, code: 'SNAPSHOT', reason: `#${r.seq} restored a snapshot, which History cannot undo. Restore an earlier snapshot from Database → Snapshots instead.` }
       break

@@ -119,11 +119,22 @@ export async function dropOrRetireSchemas(
  * any the pass cannot drop). Pass the transaction that retired them when it is
  * the platform's own, so the record commits with it. `database` names the
  * project's own database when the schemas are in it; omitted or null, they are
- * in the region's own database.
+ * in the region's own database. `afterMs`, when given, is how long they wait
+ * instead of DROP_AFTER_MS: what a move to a database of its own leaves behind
+ * is kept for days (lib/data-plane/tenancy-migration.ts), never less than
+ * DROP_AFTER_MS.
  */
 export async function scheduleSchemaDrop(
   platform: Pick<Prisma.TransactionClient, 'backgroundJob'>,
-  entry: { projectId: string; region: CloudRegionId; schemas: string[]; logins?: string[]; via?: string; database?: string | null },
+  entry: {
+    projectId: string
+    region: CloudRegionId
+    schemas: string[]
+    logins?: string[]
+    via?: string
+    database?: string | null
+    afterMs?: number
+  },
   now: Date = new Date(),
 ): Promise<void> {
   const schemas = entry.schemas.filter((schema) => isProjectOwnedSchema(entry.projectId, schema))
@@ -147,7 +158,7 @@ export async function scheduleSchemaDrop(
       },
       attempts: 0,
       maxAttempts: RETRY_DELAYS_MS.length,
-      runAt: new Date(now.getTime() + DROP_AFTER_MS),
+      runAt: new Date(now.getTime() + Math.max(DROP_AFTER_MS, entry.afterMs ?? DROP_AFTER_MS)),
       // Null as a purge's is: the project may already be gone.
       projectId: null,
     },
