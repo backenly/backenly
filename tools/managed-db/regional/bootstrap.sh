@@ -9,6 +9,13 @@
 # extensions the data plane uses. It holds no platform tables: those stay in
 # the home region.
 #
+# Where the region's launch config names the connection pooler's secret, the
+# same apply also makes the pooler's login, backenly_pooler_auth, and beside
+# the region's database a database of the pooler's own, backenly_pooler, with
+# the table and lookup the pooler reads customers' logins through
+# (sql/pooler.sql, services/pooler). That is the step `pooler`, which a region
+# without that login neither runs nor reports.
+#
 #   BOOTSTRAP_MODE=check bash tools/managed-db/regional/bootstrap.sh         # report, write nothing
 #   BOOTSTRAP_MODE=apply bash tools/managed-db/regional/bootstrap.sh         # converge
 #
@@ -42,6 +49,13 @@
 #   BACKENLY_DBCREATOR_VERIFIER      the same, for the role that creates project
 #                                      databases; that role is made only by an
 #                                      apply that supplies it
+#   BACKENLY_POOLER_AUTH_VERIFIER    the same, for the connection pooler's login;
+#                                      made only by an apply that supplies it,
+#                                      and with it the step pooler. DATABASE_URL
+#                                      must then be a postgresql:// URL that
+#                                      names the region's database, because the
+#                                      step reaches backenly_pooler by replacing
+#                                      that name.
 #   BOOTSTRAP_ROTATE                 optional, comma-separated roles whose existing
 #                                      password is to be replaced deliberately
 #   BOOTSTRAP_REHEARSAL              true only on a stock PostgreSQL 16 without
@@ -70,6 +84,8 @@
 # ── Output a launcher may read ────────────────────────────────────────────────
 #   step <id>: pending | current | changed           (check)
 #   step <id>: applied | re-applied                  (apply, template)
+#                                      step pooler only where backenly_pooler_auth exists
+#   database backenly_pooler: created | exists       (apply, where step pooler runs)
 #   credential <role>: missing | unrecorded | recorded <time>
 #   template backenly_project_template: created | exists           (template)
 #   db <name>: current | applied <step,...> | failed <step>        (project-dbs)
@@ -186,7 +202,8 @@ credentials() {
       FROM (VALUES ('backenly_app', 'BACKENLY_APP_VERIFIER', false),
                    ('backenly_backup', 'BACKENLY_BACKUP_VERIFIER', false),
                    ('backenly_authenticator', 'BACKENLY_AUTHENTICATOR_VERIFIER', false),
-                   ('backenly_dbcreator', 'BACKENLY_DBCREATOR_VERIFIER', true)) AS v(role_name, variable, optional)
+                   ('backenly_dbcreator', 'BACKENLY_DBCREATOR_VERIFIER', true),
+                   ('backenly_pooler_auth', 'BACKENLY_POOLER_AUTH_VERIFIER', true)) AS v(role_name, variable, optional)
       LEFT JOIN LATERAL ($join) c ON true
      ORDER BY 1"
 }
@@ -224,10 +241,24 @@ run_project_step() {
 # DATABASE_URL with that database's name in place of the region's, so the same
 # server, administrator and connection options.
 use_database() {
+  TARGET_URL="$(url_for_database "$1")"
+  PSQL=(psql -X -q -v ON_ERROR_STOP=1 -v allow_missing_extensions="$REHEARSAL" -d "$TARGET_URL")
+}
+
+# DATABASE_URL with another database's name in place of the region's.
+url_for_database() {
   local base="${DATABASE_URL%%\?*}" query=""
   case "$DATABASE_URL" in *\?*) query="?${DATABASE_URL#*\?}" ;; esac
-  TARGET_URL="${base%/*}/$1$query"
-  PSQL=(psql -X -q -v ON_ERROR_STOP=1 -v allow_missing_extensions="$REHEARSAL" -d "$TARGET_URL")
+  printf '%s' "${base%/*}/$1$query"
+}
+
+# Whether DATABASE_URL is a postgresql:// URL naming a database, which the
+# modes and steps that reach another database on the instance replace.
+names_a_database() {
+  case "${DATABASE_URL%%\?*}" in
+    *://*/?*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # The project modes reach other databases by name from DATABASE_URL, so it must
@@ -235,11 +266,10 @@ use_database() {
 # (below); and they rely on the roles the region's apply makes, from this
 # image's roles.sql (the role-level settings a clone needs among them).
 require_region_applied() {
-  local base="${DATABASE_URL%%\?*}"
-  case "$base" in
-    *://*/?*) ;;
-    *) echo "refusing: BOOTSTRAP_MODE=$MODE needs DATABASE_URL as a postgresql:// URL that names the region's database"; exit 2 ;;
-  esac
+  if ! names_a_database; then
+    echo "refusing: BOOTSTRAP_MODE=$MODE needs DATABASE_URL as a postgresql:// URL that names the region's database"
+    exit 2
+  fi
   require_template_owner
   local have; have="$(recorded roles)"
   if [ -z "$have" ]; then
@@ -446,6 +476,50 @@ project_dbs_mode() {
   echo "Project databases converged and verified: $current current, $changed applied, 0 failed."
 }
 
+# ── The connection pooler's database ─────────────────────────────────────────
+# backenly_pooler, on the same instance as the region's database: the table of
+# customers' logins and the lookup the pooler (services/pooler) reads them
+# through, as backenly_pooler_auth. Only where that role exists, which an
+# apply makes only when given its verifier (sql/roles.sql), so a region whose
+# launch config names no pooler secret runs and reports none of this. The step
+# is recorded in the region's own ledger, beside every other.
+POOLER_DATABASE=backenly_pooler
+POOLER_FILES="$HERE/sql/pooler.sql|$HERE/sql/verify-pooler.sql"
+
+pooler_role_exists() {
+  [ "$("${PSQL[@]}" -tA -c "SELECT count(*) FROM pg_roles WHERE rolname = 'backenly_pooler_auth'")" = 1 ]
+}
+
+# psql on backenly_pooler: DATABASE_URL with that database's name, so the same
+# server, administrator and connection options. Leaves PSQL and TARGET_URL as
+# they are for the steps that follow.
+pooler_psql() {
+  psql -X -q -v ON_ERROR_STOP=1 -d "$(url_for_database "$POOLER_DATABASE")" "$@"
+}
+
+# The database, created by the administrator if missing (CREATE DATABASE runs
+# outside any transaction, so on its own), then sql/pooler.sql inside it, which
+# ends by verifying what it declares.
+pooler_install() {
+  if [ "$("${PSQL[@]}" -tA -c "SELECT count(*) FROM pg_database WHERE datname = '$POOLER_DATABASE'")" = 0 ]; then
+    "${PSQL[@]}" -c "CREATE DATABASE $POOLER_DATABASE TEMPLATE template0"
+    echo "  database $POOLER_DATABASE: created"
+  else
+    echo "  database $POOLER_DATABASE: exists"
+  fi
+  pooler_psql -f "$HERE/sql/pooler.sql"
+}
+
+# The region's database verified, and then, where the pooler's login exists,
+# its database. Returns the first failure's status rather than relying on
+# errexit, so a caller may also test it.
+verify_region() {
+  "${PSQL[@]}" -f "$HERE/sql/verify.sql" || return $?
+  if pooler_role_exists; then
+    pooler_psql -f "$HERE/sql/verify-pooler.sql" || return $?
+  fi
+}
+
 if [ "$MODE" = template ] || [ "$MODE" = project-dbs ]; then
   echo
   if [ "$MODE" = template ]; then echo "Project database template ($MODE)"; else echo "Project databases ($MODE)"; fi
@@ -471,11 +545,22 @@ export BACKENLY_APP_VERIFIER="${BACKENLY_APP_VERIFIER:-}"
 export BACKENLY_BACKUP_VERIFIER="${BACKENLY_BACKUP_VERIFIER:-}"
 export BACKENLY_AUTHENTICATOR_VERIFIER="${BACKENLY_AUTHENTICATOR_VERIFIER:-}"
 export BACKENLY_DBCREATOR_VERIFIER="${BACKENLY_DBCREATOR_VERIFIER:-}"
+export BACKENLY_POOLER_AUTH_VERIFIER="${BACKENLY_POOLER_AUTH_VERIFIER:-}"
 export BOOTSTRAP_ROTATE="${BOOTSTRAP_ROTATE:-}"
 
 # 1. Roles first: the PostgREST files grant to public.backenly_app_role(), which
 #    must already resolve to the application role rather than to the installer.
 step roles "$HERE/sql/roles.sql"
+# 1b. The connection pooler's database, where its login exists: made by this
+#     apply's roles step when given its verifier, or by an earlier apply. It
+#     needs backenly_app and backenly_pooler_auth, which the roles step makes.
+if pooler_role_exists; then
+  if ! names_a_database; then
+    echo "refusing: the step pooler reaches database $POOLER_DATABASE through DATABASE_URL, which must then be a postgresql:// URL that names the region's database"
+    exit 2
+  fi
+  step pooler "$POOLER_FILES" pooler_install
+fi
 # 2. The PostgREST registry, DDL sync and function roles, in their own order.
 step postgrest "$POSTGREST_FILES" postgrest_install
 # 3. The one platform-shaped table a regional database holds, before the capture
@@ -508,17 +593,20 @@ credentials
 # the apply then fails the run if the database still does not verify. Failing
 # here would refuse the one run that converges it. Every other check, and a
 # pre-apply check whose steps are all current, fails on what does not verify.
+#
+# Where the pooler's login exists, verifying includes its database
+# (verify_region).
 if [ "$APPLY" = true ]; then
-  "${PSQL[@]}" -f "$HERE/sql/verify.sql"
+  verify_region
   echo "Regional database initialised and verified."
 elif [ "$PENDING" -gt 0 ]; then
   echo "Check only: nothing was written. $PENDING step(s) not applied yet."
 elif [ "$CHANGED" -eq 0 ]; then
-  "${PSQL[@]}" -f "$HERE/sql/verify.sql"
+  verify_region
   echo "Check only: nothing was written. Every step is recorded, and the database verifies."
 else
   verified=0
-  "${PSQL[@]}" -f "$HERE/sql/verify.sql" || verified=$?
+  verify_region || verified=$?
   if [ "$verified" -eq 0 ]; then
     echo "Check only: nothing was written. $CHANGED step(s) changed since applied, and the database verifies."
   elif [ "$PRE_APPLY" = true ]; then

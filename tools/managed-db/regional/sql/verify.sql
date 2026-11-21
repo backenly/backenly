@@ -104,7 +104,8 @@ BEGIN
       problems := problems || 'role backenly_dbcreator is a member of another role'::text;
     END IF;
     FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator',
-                                 'anon', 'authenticated', 'service_role', 'backenly_external'] LOOP
+                                 'anon', 'authenticated', 'service_role', 'backenly_external',
+                                 'backenly_pooler_auth'] LOOP
       CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname);
       IF pg_has_role(rname, 'backenly_dbcreator', 'MEMBER') THEN
         problems := problems || format('%s is a member of backenly_dbcreator', rname);
@@ -112,10 +113,47 @@ BEGIN
     END LOOP;
   END LOOP;
 
+  -- The connection pooler's login, where the region has one: it can log in,
+  -- holds nothing itself, and nothing the platform runs as holds it
+  -- (roles.sql). What it may do in database backenly_pooler is checked there,
+  -- by verify-pooler.sql, which bootstrap.sh runs after this file.
+  FOR r IN SELECT p.* FROM pg_roles p WHERE p.rolname = 'backenly_pooler_auth' LOOP
+    IF r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR r.rolinherit
+       OR NOT r.rolcanlogin THEN
+      problems := problems || 'role backenly_pooler_auth must be LOGIN NOINHERIT, and NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'::text;
+    END IF;
+    IF r.rolconnlimit <> 10 THEN
+      problems := problems || format('role backenly_pooler_auth must have CONNECTION LIMIT 10, not %s', r.rolconnlimit);
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid) THEN
+      problems := problems || format('role backenly_pooler_auth is a member of %s; it may hold no role',
+        (SELECT string_agg(m.roleid::regrole::text, ', ' ORDER BY m.roleid::regrole::text) FROM pg_auth_members m WHERE m.member = r.oid));
+    END IF;
+    FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator',
+                                 'anon', 'authenticated', 'service_role', 'backenly_external'] LOOP
+      CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname);
+      IF pg_has_role(rname, 'backenly_pooler_auth', 'MEMBER') THEN
+        problems := problems || format('%s is a member of backenly_pooler_auth', rname);
+      END IF;
+    END LOOP;
+    -- Its database, made by the administrator that runs the procedure (the
+    -- step `pooler` of bootstrap.sh), and the step that made it.
+    IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'backenly_pooler') THEN
+      problems := problems || 'database backenly_pooler is missing; an apply makes it (the step pooler)'::text;
+    ELSIF NOT EXISTS (SELECT 1 FROM pg_database d WHERE d.datname = 'backenly_pooler' AND pg_has_role(current_user, d.datdba, 'MEMBER')) THEN
+      problems := problems || format('database backenly_pooler belongs to %s, not to %s, which runs the procedure',
+        (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'backenly_pooler'), current_user);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM backenly_meta.bootstrap_steps s WHERE s.step = 'pooler') THEN
+      problems := problems || 'step pooler is not recorded in backenly_meta.bootstrap_steps, though backenly_pooler_auth exists'::text;
+    END IF;
+  END LOOP;
+
   -- Each login role has the credential this procedure set (roles.sql). The
-  -- database creator only where the region has one.
-  FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator'] LOOP
-    CONTINUE WHEN rname = 'backenly_dbcreator' AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname);
+  -- database creator and the pooler's login only where the region has them.
+  FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator',
+                               'backenly_pooler_auth'] LOOP
+    CONTINUE WHEN rname IN ('backenly_dbcreator', 'backenly_pooler_auth') AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname);
     IF NOT EXISTS (SELECT 1 FROM backenly_meta.bootstrap_credentials c WHERE c.role_name = rname) THEN
       problems := problems || format('no credential recorded for %s', rname);
     END IF;
