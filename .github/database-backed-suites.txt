@@ -1624,6 +1624,19 @@ tests/integration/project-database-resolution.spec.ts
 # retryable 503. Real databases and sessions are the property.
 tests/integration/project-database-sessions.spec.ts
 
+# A shared project moved into a database of its own, on a PostgreSQL 16 cluster
+# the suite builds with initdb and the regional procedure (template, database
+# creator and roles, as tests/integration/regional-bootstrap.spec.ts builds
+# them): a dry run verifies and leaves the project exactly as it was; a failed
+# verification stops with its database gone and nothing lost; the move carries
+# every row (counted and checksummed under FORCE ROW LEVEL SECURITY), sequence,
+# branch, vault, allowlisted extension, realtime channel and function login,
+# delivers the webhook event its outbox held, and fences the old schemas from
+# the project's logins; a second run is refused; deletion finds what the move
+# left; and the region's own database closes to PUBLIC only once no project
+# there is shared. Real databases, roles and pg_dump/psql are the property.
+tests/integration/tenancy-migration.spec.ts
+
 # A regional project's customer data on platform rows stays in its region: a
 # second database stands in for another region's, holding the real
 # regional_bodies table. Webhook and trigger payloads and replies, and function
