@@ -16,13 +16,19 @@
  * (workspaceChannelName in lib/security/workspace-schema.ts).
  *
  * The platform objects are installed by the application itself, as the
- * application role, the first time a process needs them in a region. Nothing
+ * application role, the first time a process needs them in a database. Nothing
  * has to be run by hand for realtime to work, on Cloud or self-hosted.
+ *
+ * Each lives in the database holding the project's data
+ * (lib/data-plane/regional.ts): its region's own database for a shared project,
+ * as always, and the project's own database for a project that has one. A
+ * channel is NOTIFYed and LISTENed in one database only, so the channel row,
+ * the platform objects and every statement about them go there.
  */
 
 import { randomBytes } from 'crypto'
 import type { Pool } from 'pg'
-import { projectRegion, regionPool } from '@/lib/data-plane/regional'
+import { databasePool, projectDatabase, regionPool } from '@/lib/data-plane/regional'
 import type { CloudRegionId } from '@/lib/regions'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import {
@@ -45,13 +51,46 @@ import {
   type RealtimePlatformStatus,
 } from './channel-sql'
 
+/** The database a project's realtime channel is kept and NOTIFYed in. */
+export interface RealtimeDatabase {
+  region: CloudRegionId
+  /** The project's own database; null for its region's own (shared) database. */
+  database: string | null
+}
+
+/** "us-east-1:control" for a region's own database, "us-east-1:p_..." for a project's own. */
+export function realtimeDatabaseKey(target: RealtimeDatabase): string {
+  return `${target.region}:${target.database ?? 'control'}`
+}
+
+/** Where the project's channel is kept: the database holding its data. */
+export async function projectRealtimeDatabase(projectId: string): Promise<RealtimeDatabase> {
+  const placement = await projectDatabase(projectId)
+  return { region: placement.region, database: placement.tenancy === 'dedicated' ? placement.database : null }
+}
+
 /**
- * This module's connections to a region, as the application role. Asked for on
- * every use, never kept: lib/data-plane/regional.ts owns the pools and may
- * close them.
+ * This module's connections to a region's own database, as the application
+ * role. Asked for on every use, never kept: lib/data-plane/regional.ts owns the
+ * pools and may close them.
  */
 export function realtimePool(region: CloudRegionId, projectId?: string): Pool {
   return regionPool(region, 'realtime-channels', { max: 4 }, projectId)
+}
+
+/**
+ * This module's connections to `target`: realtimePool for a region's own
+ * database, and a small pool on a project's own database (counted against its
+ * data instance's cap). Asked for on every use, never kept.
+ */
+export async function realtimeDatabasePool(target: RealtimeDatabase, projectId?: string): Promise<Pool> {
+  if (target.database === null) return realtimePool(target.region, projectId)
+  return databasePool(target.region, target.database, 'realtime-channels', { max: 4 }, projectId)
+}
+
+/** realtimeDatabasePool for the database holding a project's data. */
+async function projectRealtimePool(projectId: string): Promise<Pool> {
+  return realtimeDatabasePool(await projectRealtimeDatabase(projectId), projectId)
 }
 
 // ── Platform objects ─────────────────────────────────────────────────────────
@@ -88,18 +127,19 @@ export async function installRealtimePlatform(pool: Pool): Promise<'current' | '
   }
 }
 
-const installs = new Map<CloudRegionId, Promise<void>>()
+const installs = new Map<string, Promise<void>>()
 
-/** Once per region per process; a failure is forgotten, so the next caller tries again. */
-export function ensureRealtimePlatform(region: CloudRegionId, projectId?: string): Promise<void> {
-  const known = installs.get(region)
+/** Once per database per process; a failure is forgotten, so the next caller tries again. */
+export function ensureRealtimePlatform(target: RealtimeDatabase, projectId?: string): Promise<void> {
+  const key = realtimeDatabaseKey(target)
+  const known = installs.get(key)
   if (known) return known
   const install = Promise.resolve()
-    .then(() => installRealtimePlatform(realtimePool(region, projectId)))
+    .then(async () => installRealtimePlatform(await realtimeDatabasePool(target, projectId)))
     .then(() => undefined)
-  installs.set(region, install)
+  installs.set(key, install)
   install.catch(() => {
-    if (installs.get(region) === install) installs.delete(region)
+    if (installs.get(key) === install) installs.delete(key)
   })
   return install
 }
@@ -116,18 +156,18 @@ function isMissingPlatform(err: unknown): boolean {
  * carry them), install again and run once more.
  */
 async function onPlatform<T>(
-  region: CloudRegionId,
+  target: RealtimeDatabase,
   projectId: string | undefined,
   run: (pool: Pool) => Promise<T>,
 ): Promise<T> {
-  await ensureRealtimePlatform(region, projectId)
+  await ensureRealtimePlatform(target, projectId)
   try {
-    return await run(realtimePool(region, projectId))
+    return await run(await realtimeDatabasePool(target, projectId))
   } catch (err) {
     if (!isMissingPlatform(err)) throw err
-    installs.delete(region)
-    await ensureRealtimePlatform(region, projectId)
-    return run(realtimePool(region, projectId))
+    installs.delete(realtimeDatabaseKey(target))
+    await ensureRealtimePlatform(target, projectId)
+    return run(await realtimeDatabasePool(target, projectId))
   }
 }
 
@@ -140,8 +180,8 @@ function newChannelName(): string {
 
 async function resolveChannel(projectId: string, createSql: string): Promise<string | null> {
   const schema = workspaceSchemaName(projectId)
-  const region = await projectRegion(projectId)
-  return onPlatform(region, projectId, async (pool) => {
+  const target = await projectRealtimeDatabase(projectId)
+  return onPlatform(target, projectId, async (pool) => {
     // Two statements: an insert that lost to another process's sees that
     // process's row only in a statement of its own.
     await pool.query(createSql, [schema, newChannelName()])
@@ -169,11 +209,11 @@ export function currentProjectChannel(projectId: string): Promise<string | null>
   return resolveChannel(projectId, CREATE_CHANNEL_FOR_EXISTING_SCHEMA_SQL)
 }
 
-/** The channels of these schemas, for the ones that have one. One query. */
-export async function channelsOfSchemas(region: CloudRegionId, schemas: string[]): Promise<Map<string, string>> {
+/** The channels of these schemas kept in `target`, for the ones that have one. One query. */
+export async function channelsOfSchemas(target: RealtimeDatabase, schemas: string[]): Promise<Map<string, string>> {
   const found = new Map<string, string>()
   if (schemas.length === 0) return found
-  const rows = await onPlatform(region, undefined, async (pool) => {
+  const rows = await onPlatform(target, undefined, async (pool) => {
     const result = await pool.query<{ schema_name: string; channel: unknown }>(READ_CHANNELS_SQL, [schemas])
     return result.rows
   })
@@ -191,9 +231,9 @@ export async function channelsOfSchemas(region: CloudRegionId, schemas: string[]
  */
 export async function notifyProjectChannel(projectId: string, payload: string): Promise<boolean> {
   const schema = workspaceSchemaName(projectId)
-  const region = await projectRegion(projectId)
+  const pool = await projectRealtimePool(projectId)
   try {
-    const { rowCount } = await realtimePool(region, projectId).query(NOTIFY_CHANNEL_SQL, [schema, payload])
+    const { rowCount } = await pool.query(NOTIFY_CHANNEL_SQL, [schema, payload])
     return (rowCount ?? 0) > 0
   } catch (err) {
     if (isMissingPlatform(err)) return false
@@ -214,9 +254,9 @@ export async function notifyProjectChannel(projectId: string, payload: string): 
  */
 export async function rotateProjectChannel(projectId: string): Promise<'rotated' | 'absent'> {
   const schema = workspaceSchemaName(projectId)
-  const region = await projectRegion(projectId)
+  const pool = await projectRealtimePool(projectId)
   try {
-    const { rowCount } = await realtimePool(region, projectId).query(ROTATE_CHANNEL_SQL, [
+    const { rowCount } = await pool.query(ROTATE_CHANNEL_SQL, [
       schema,
       newChannelName(),
       CHANNEL_ROTATED_FRAME,
@@ -299,8 +339,7 @@ export function bringProjectFunctionsCurrent(projectId: string): Promise<SchemaF
   if (running) return running
   const check = (async () => {
     const schema = workspaceSchemaName(projectId)
-    const region = await projectRegion(projectId)
-    const { states, failures } = await bringFunctionsCurrent(realtimePool(region, projectId), [schema])
+    const { states, failures } = await bringFunctionsCurrent(await projectRealtimePool(projectId), [schema])
     if (failures.length > 0) throw failures[0].error
     return states.get(schema) ?? { notify: 'absent', presence: 'absent' }
   })().finally(() => {

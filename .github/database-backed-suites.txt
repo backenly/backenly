@@ -1613,6 +1613,17 @@ tests/integration/project-region.spec.ts
 # the Prisma model does on the same rows. Real databases are the property.
 tests/integration/project-database-resolution.spec.ts
 
+# A project with a database of its own holds its sessions there: real databases
+# named as projects' own are where its change lock is taken (another process
+# waits for it there, the region's same key stays free), where a change reads
+# the catalog it records, and where its realtime channel is NOTIFYed and heard,
+# by that project's subscribers only; a project database's listener closes after
+# its last stream and past the cap a stream is refused in so many words; pooled
+# workspace queries leave no search_path or timeout on the connection; and the
+# cap on a process's connections to a data instance waits, then refuses with a
+# retryable 503. Real databases and sessions are the property.
+tests/integration/project-database-sessions.spec.ts
+
 # A regional project's customer data on platform rows stays in its region: a
 # second database stands in for another region's, holding the real
 # regional_bodies table. Webhook and trigger payloads and replies, and function
