@@ -15,7 +15,9 @@
  *   projectDatabaseUrl(id, role)     the project's database's connection string
  *   workspaceRawClient(id)           raw SQL on the project's database
  *   projectPool(id, name)            a pg pool on the project's database
- *   projectPostgrest(id)             the PostgREST serving the project's region
+ *   projectPostgrest(id)             the PostgREST serving the project: its region's,
+ *                                    or for a database of its own, its own on the
+ *                                    region's PostgREST host
  *   projectApiOrigin(id, home)       the address the project's API is called at
  *   projectDriftEvents(id)           the schema drift events, kept where captured
  *
@@ -1003,6 +1005,13 @@ export async function projectDriftEvents(projectId: string): Promise<DriftEventS
 export interface RegionPostgrest {
   url: string
   jwtSecret: string
+  /**
+   * Only for a project with a database of its own: that database, served by
+   * the project's own PostgREST on the region's PostgREST host. A token for it
+   * must name it (lib/postgrest/gateway.ts internalClaimsFor's `database`),
+   * which the host requires. Absent for a region's shared PostgREST.
+   */
+  database?: string
 }
 
 /**
@@ -1020,9 +1029,58 @@ export function regionPostgrest(region: CloudRegionId, env: Env = process.env): 
   return { url, jwtSecret }
 }
 
-/** The PostgREST serving this project's region, or null when this process has none for it. */
-export async function projectPostgrest(projectId: string): Promise<RegionPostgrest | null> {
-  return regionPostgrest(await projectRegion(projectId))
+/**
+ * The PostgREST serving this project. A shared project's is its region's
+ * (regionPostgrest), exactly as before, or null when this process has none.
+ *
+ * A project with a database of its own is served by its own PostgREST, run by
+ * the region's PostgREST host (services/pgrst-host) at
+ * PGRST_HOST_URL[_REGION]/p/<projectId>, with tokens signed with the region's
+ * POSTGREST_JWT_SECRET[_REGION], which the host shares. Without either it is
+ * refused with RegionNotConfiguredError naming the variable, never null: null
+ * would let a caller fall back to the region's shared PostgREST, which does
+ * not serve that database.
+ */
+export async function projectPostgrest(projectId: string, env: Env = process.env): Promise<RegionPostgrest | null> {
+  const placement = await projectDatabase(projectId)
+  if (placement.tenancy !== 'dedicated') return regionPostgrest(placement.region, env)
+  return ownDatabasePostgrest(projectId, placement.region, placement.database as string, env)
+}
+
+/** Each region whose PostgREST host is not configured, said once per process. */
+const saidNoHost = new Set<string>()
+
+/**
+ * The PostgREST serving a project whose data is in `database`, its own, in
+ * `region`: the region's PostgREST host, at the project's path, with the
+ * region's PostgREST secret. Refused with RegionNotConfiguredError naming the
+ * variable when either is unset; never the region's shared PostgREST.
+ */
+export async function ownDatabasePostgrest(
+  projectId: string,
+  region: CloudRegionId,
+  database: string,
+  env: Env = process.env,
+): Promise<RegionPostgrest> {
+  refuseBadName(database)
+  // Loaded when needed: lib/postgrest/host.ts uses this module's naming.
+  const { PGRST_HOST_URL_SETTING, postgrestHostUrl } = await import('@/lib/postgrest/host')
+  const refuse = (variable: string): never => {
+    const message =
+      `No PostgREST for project ${projectId}, which has a database of its own in ${region}: ${variable} is not set. ` +
+      `Such a project is served only by its region's PostgREST host, so nothing was sent to the region's shared PostgREST.`
+    if (!saidNoHost.has(variable)) {
+      saidNoHost.add(variable)
+      console.error(`[PostgREST] ${message}`)
+    }
+    throw new RegionNotConfiguredError(region, variable, projectId, message)
+  }
+  const url = postgrestHostUrl(projectId, region, env)
+  if (!url) refuse(regionalVariable(PGRST_HOST_URL_SETTING, region))
+  const secretVariable = regionalVariable('POSTGREST_JWT_SECRET', region)
+  const jwtSecret = env[secretVariable]
+  if (!jwtSecret || !jwtSecret.trim()) refuse(secretVariable)
+  return { url: url as string, jwtSecret: jwtSecret as string, database }
 }
 
 /**
