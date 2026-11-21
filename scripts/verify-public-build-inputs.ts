@@ -185,9 +185,10 @@ function compiledFiles(): string[] {
 
 /** Shape, never the value: these are public, but a log is not a place for them. */
 function describe(name: string, value: string): string {
-  // The URL and the pricing publication switch are recorded verbatim: a
-  // release record must say whether an image advertises usage pricing.
-  if (['NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_USAGE_PRICING'].includes(name)) return value
+  // The URL and the publication switches are recorded verbatim: a release
+  // record must say whether an image advertises usage pricing or the
+  // migration guide.
+  if (['NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_USAGE_PRICING', 'NEXT_PUBLIC_MIGRATION'].includes(name)) return value
   return `configured, ${value.length} chars`
 }
 

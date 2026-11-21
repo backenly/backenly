@@ -59,7 +59,7 @@ export function WhatMoves({ plan }: { plan: MovePlan }) {
       )}
       {plan.rules && (
         <Fact label="Access rules">
-          {n(plan.rules.count)} {plan.rules.word}, rewritten for Backenly. Until you approve them, only your server key can read
+          {n(plan.rules.count)} {plan.rules.word}, translated for Backenly. Until you approve them, only your server key can read
           or write those tables.
         </Fact>
       )}
@@ -79,8 +79,9 @@ export function WhatMoves({ plan }: { plan: MovePlan }) {
 /**
  * Supabase as the import's Connect step reads it: the project's Session pooler
  * connection string (it works on every network; the direct host is IPv6 only)
- * and what Backenly found there. No password is shown; the importer reads with
- * it and never stores it.
+ * and what Backenly found there. No password is shown; the importer only reads
+ * with it, keeps it sealed while the move runs and erases it when it ends
+ * (lib/import/sandbox.ts).
  */
 function SupabaseFound({ plan }: { plan: MovePlan }) {
   return (
@@ -102,7 +103,7 @@ function SupabaseFound({ plan }: { plan: MovePlan }) {
         <Fact label="Storage">
           {plural(plan.files?.count ?? 0, 'file', 'files')}, {bytes(plan.files?.bytes ?? 0)}
         </Fact>
-        <Fact label="Access">Read only</Fact>
+        <Fact label="Access">Reads only, never writes</Fact>
       </dl>
     </div>
   )
@@ -149,7 +150,7 @@ function PostgresFound({ plan }: { plan: MovePlan }) {
         <Fact label="Tables">
           {plural(plan.tables.length, 'table', 'tables')}, {n(rowsTotal(plan))} rows
         </Fact>
-        <Fact label="Access">Read only</Fact>
+        <Fact label="Access">Reads only, never writes</Fact>
       </dl>
     </div>
   )
