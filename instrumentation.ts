@@ -298,6 +298,21 @@ export async function register() {
         )
       })
 
+      // ── Project databases no project names, dropped, 03:50 UTC ─────────────
+      //
+      // A creation that stopped between cloning a project's database and
+      // writing the row that records it leaves a database nothing names
+      // (lib/data-plane/project-databases.ts). Those more than an hour old are
+      // dropped on every data instance home has a database creator connection
+      // for, as the purge above reaches every region from home. Nothing to do
+      // where no region has one.
+      cron.platform('50 3 * * *', async () => {
+        const { sweepOrphanProjectDatabases } = await import('./lib/data-plane/project-databases')
+        await sweepOrphanProjectDatabases().catch((err: any) =>
+          console.error('[ProjectDatabases] Orphan sweep error:', err?.message)
+        )
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')
@@ -817,18 +832,20 @@ export async function register() {
         }
       })
 
-      // ── Direct Postgres allowlists — every 5 minutes, from home ───────────
-      // Each region's database endpoint admits only the addresses its projects
-      // allow, kept on a prefix list (lib/services/direct-access-allowlist.ts).
-      // Every change to a project's addresses syncs at once; this repairs what
-      // a failed sync, a purge or an edit made outside Backenly left. The
-      // addresses are platform records and the home web task holds every
-      // region's setting, so it runs once, at home. A no-op, said once, where
-      // no region has a prefix list (a self-hosted deployment).
+      // ── Connection pooler logins — every 5 minutes, from home ─────────────
+      // The pooler serves a project database's login from its row in that
+      // data instance's backenly_pooler.logins (lib/data-plane/pooler.ts).
+      // Each login's row is written as it is made, rotated or revoked; this
+      // writes one a failure or a later-offered pooler left missing, turns a
+      // row back on once its project is no longer paused, and removes the rows
+      // of logins and databases that are gone (lib/services/direct-access.ts).
+      // The logins are platform records and the home web task holds every
+      // region's data instance setting, so it runs once, at home. Nothing to do
+      // where no region offers the pooler (POOLER_HOST[_<REGION>] unset).
       cron.platform('*/5 * * * *', async () => {
-        const { syncDirectAccessAllowlists } = await import('./lib/services/direct-access-allowlist')
-        await syncDirectAccessAllowlists().catch((err: any) =>
-          console.error('[DirectDbAllowlist] Error:', err?.message)
+        const { reconcilePoolerLogins } = await import('./lib/services/direct-access')
+        await reconcilePoolerLogins().catch((err: any) =>
+          console.error('[DirectAccess] pooler logins pass error:', err?.message)
         )
       })
 

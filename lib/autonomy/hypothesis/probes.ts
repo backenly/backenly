@@ -16,8 +16,8 @@
 
 import { queryWorkspaceAsOwner, resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { usesLegacyGucs } from '@/lib/postgrest/rls-translation'
-import { probePostgrest } from '@/lib/postgrest/health'
-import { isRegionError, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { probeProjectPostgrest } from '@/lib/postgrest/health'
+import { isRegionError, projectPostgrest, workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ProbeContext {
   projectId: string
@@ -240,14 +240,15 @@ export const postgrestVisibility: ProbeFn = async ctx => {
   const table = requireTable(ctx)
   const postgrest = await projectPostgrest(ctx.projectId)
   if (!postgrest) return { outcome: 'not_applicable', detail: 'PostgREST not configured' }
-  const { url: baseUrl, jwtSecret: secret } = postgrest
+  const { url: baseUrl, jwtSecret: secret, database } = postgrest
 
   // No per-project engine check: PostgREST is the only data plane, so this
   // probe applies to every project wherever PostgREST is configured at all.
 
   const { mintInternalToken, internalClaimsFor, upstreamUrl } = await import('@/lib/postgrest/gateway')
   const token = mintInternalToken(
-    internalClaimsFor({ projectId: ctx.projectId, serviceRole: true }),
+    // A project with a database of its own is asked on its own PostgREST, with a token naming it.
+    internalClaimsFor({ projectId: ctx.projectId, serviceRole: true, database }),
     secret,
   )
   const res = await fetch(upstreamUrl(baseUrl, table, 'limit=0'), {
@@ -297,10 +298,12 @@ export const keyScope: ProbeFn = async () => {
 // ── all_tenants_failing ─────────────────────────────────────────────────────
 //
 // "All tenants" means all of the project's region: each region has its own
-// PostgREST and database, so these ask about the region the project is in.
+// PostgREST and database, so these ask about the region the project is in. A
+// project with a database of its own has a PostgREST of its own, which these
+// ask instead (probeProjectPostgrest).
 
 export const postgrestReachable: ProbeFn = async ctx => {
-  const status = await probePostgrest(await projectRegion(ctx.projectId))
+  const status = await probeProjectPostgrest(ctx.projectId)
   if (status.state === 'not_configured') return { outcome: 'not_applicable' }
   return {
     outcome: status.state === 'unreachable' ? 'unreachable' : 'reachable',
@@ -309,7 +312,7 @@ export const postgrestReachable: ProbeFn = async ctx => {
 }
 
 export const schemaCacheState: ProbeFn = async ctx => {
-  const status = await probePostgrest(await projectRegion(ctx.projectId))
+  const status = await probeProjectPostgrest(ctx.projectId)
   if (status.state === 'not_configured') return { outcome: 'not_applicable' }
   return {
     outcome: status.state === 'schema_cache_failed' ? 'failed' : 'ok',

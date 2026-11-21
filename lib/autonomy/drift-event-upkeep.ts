@@ -28,12 +28,49 @@
  * filters turn those lines into alarms (backenly-infra
  * aws/REGIONS_REFERENCE_ARCHITECTURE.md, section 8); the capture triggers also
  * log BACKENLY_DRIFT_CAPTURE_FAILED to the database log when a write fails.
+ *
+ * A project with a database of its own captures its events in that database,
+ * so each pass also walks every project database of the region, a few at a
+ * time (lib/data-plane/project-databases.ts forEachProjectDatabase), each with
+ * a report and a line of its own that names it (`database`). The region's own
+ * line keeps its shape. An event in a project database is held when the
+ * project's row names that database; one in the region's own database, when
+ * the project is in the region and shares it.
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { regionDriftEvents, regionOfRecord, regionRawClient, type PendingGroup } from '@/lib/data-plane/regional'
+import {
+  DriftEventStore,
+  databaseClient,
+  regionDriftEvents,
+  regionOfRecord,
+  regionRawClient,
+  type PendingGroup,
+  type WorkspaceRawClient,
+} from '@/lib/data-plane/regional'
+import { forEachProjectDatabase } from '@/lib/data-plane/project-databases'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import type { CloudRegionId } from '@/lib/regions'
+
+/**
+ * The database a pass reads: a region's own (a region id alone), or a
+ * project's own database in it.
+ */
+export type DriftTarget = CloudRegionId | { region: CloudRegionId; database: string | null }
+
+function partsOf(target: DriftTarget): { region: CloudRegionId; database: string | null } {
+  return typeof target === 'string' ? { region: target, database: null } : target
+}
+
+function driftClient(target: DriftTarget): WorkspaceRawClient {
+  const { region, database } = partsOf(target)
+  return database === null ? regionRawClient(region) : databaseClient(region, database)
+}
+
+function driftStore(target: DriftTarget): DriftEventStore {
+  const { region, database } = partsOf(target)
+  return database === null ? regionDriftEvents(region) : new DriftEventStore(databaseClient(region, database))
+}
 
 /** The two event triggers scripts/setup-direct-access.sql installs, and their functions. */
 const CAPTURE = [
@@ -53,9 +90,9 @@ export interface DriftCaptureHealth {
   problems: string[]
 }
 
-/** Is the capture apparatus in this region's database complete and able to write? */
-export async function driftCaptureHealth(region: CloudRegionId): Promise<DriftCaptureHealth> {
-  const db = regionRawClient(region)
+/** Is the capture apparatus in this database complete and able to write? */
+export async function driftCaptureHealth(target: DriftTarget): Promise<DriftCaptureHealth> {
+  const db = driftClient(target)
   const triggers = await db.$queryRawUnsafe<Array<{ name: string; enabled: string }>>(
     `SELECT evtname::text AS name, evtenabled::text AS enabled FROM pg_event_trigger
       WHERE evtname = ANY($1::text[])`,
@@ -110,9 +147,9 @@ export interface DriftEventBacklog {
   orphaned: number
 }
 
-export async function driftEventBacklog(region: CloudRegionId, now: Date = new Date()): Promise<DriftEventBacklog> {
-  const groups = await pendingByProject(region)
-  const held = await projectsHeldIn(region, namedProjects(groups))
+export async function driftEventBacklog(target: DriftTarget, now: Date = new Date()): Promise<DriftEventBacklog> {
+  const groups = await pendingByProject(target)
+  const held = await projectsHeldIn(target, namedProjects(groups))
   let pending = 0
   let orphaned = 0
   let oldest: Date | null = null
@@ -133,8 +170,8 @@ export async function driftEventBacklog(region: CloudRegionId, now: Date = new D
 }
 
 /** Pending events, grouped by the project they name, with the oldest capture of each. */
-async function pendingByProject(region: CloudRegionId, capturedBefore?: Date): Promise<PendingGroup[]> {
-  return regionDriftEvents(region).pendingByProject({ capturedBefore })
+async function pendingByProject(target: DriftTarget, capturedBefore?: Date): Promise<PendingGroup[]> {
+  return driftStore(target).pendingByProject({ capturedBefore })
 }
 
 function namedProjects(groups: Array<{ projectId: string | null }>): string[] {
@@ -142,14 +179,25 @@ function namedProjects(groups: Array<{ projectId: string | null }>): string[] {
 }
 
 /**
- * Which of these projects this region holds. Adoption runs per project, in its
- * region, so a pending event naming any other project (one since deleted,
- * typically) or none at all is never cleared by it.
+ * Which of these projects this database holds. Adoption runs per project, on
+ * the database holding its data, so a pending event naming any other project
+ * (one since deleted, typically) or none at all is never cleared by it. A
+ * region's own database holds the projects of the region that share it; a
+ * project database, the project whose row names it.
  */
-async function projectsHeldIn(region: CloudRegionId, projectIds: string[]): Promise<Set<string>> {
+async function projectsHeldIn(target: DriftTarget, projectIds: string[]): Promise<Set<string>> {
   if (projectIds.length === 0) return new Set()
-  const rows = await prisma.project.findMany({ where: { id: { in: projectIds } }, select: { id: true, region: true } })
-  return new Set(rows.filter((row) => regionOfRecord(row.id, row.region) === region).map((row) => row.id))
+  const { region, database } = partsOf(target)
+  const rows = await prisma.project.findMany({
+    where: { id: { in: projectIds } },
+    select: { id: true, region: true, databaseTenancy: true, databaseName: true },
+  })
+  return new Set(
+    rows
+      .filter((row) => regionOfRecord(row.id, row.region) === region)
+      .filter((row) => (database === null ? row.databaseTenancy !== 'dedicated' : row.databaseTenancy === 'dedicated' && row.databaseName === database))
+      .map((row) => row.id),
+  )
 }
 
 /** Retention window in days: DRIFT_EVENT_RETENTION_DAYS, at least 7, default 90. */
@@ -160,12 +208,12 @@ export function driftEventRetentionDays(env: Readonly<Record<string, string | un
 
 /** Delete adopted or ignored events resolved more than `days` ago. Pending events stay. */
 export async function pruneResolvedDriftEvents(
-  region: CloudRegionId,
+  target: DriftTarget,
   days: number = driftEventRetentionDays(),
   now: Date = new Date(),
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
-  return regionDriftEvents(region).deleteResolvedBefore(cutoff)
+  return driftStore(target).deleteResolvedBefore(cutoff)
 }
 
 /**
@@ -175,22 +223,24 @@ export async function pruneResolvedDriftEvents(
  * region no longer holds.
  */
 export async function pruneOrphanedDriftEvents(
-  region: CloudRegionId,
+  target: DriftTarget,
   days: number = driftEventRetentionDays(),
   now: Date = new Date(),
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
-  const groups = await pendingByProject(region, cutoff)
+  const groups = await pendingByProject(target, cutoff)
   const named = namedProjects(groups)
-  const held = await projectsHeldIn(region, named)
+  const held = await projectsHeldIn(target, named)
   const gone = named.filter((projectId) => !held.has(projectId))
   const unnamed = groups.some((group) => group.projectId === null)
   if (gone.length === 0 && !unnamed) return 0
-  return regionDriftEvents(region).deletePendingBefore(cutoff, { projectIds: gone, unnamed })
+  return driftStore(target).deletePendingBefore(cutoff, { projectIds: gone, unnamed })
 }
 
 export interface DriftUpkeepReport {
   region: CloudRegionId
+  /** The project database this report is about; absent for the region's own database. */
+  database?: string
   health: DriftCaptureHealth | null
   backlog: DriftEventBacklog | null
   pruned: number | null
@@ -199,10 +249,54 @@ export interface DriftUpkeepReport {
   errors: string[]
 }
 
+/** One database's upkeep: its report, and its line. */
+async function upkeepOne(target: DriftTarget, now: Date): Promise<DriftUpkeepReport> {
+  const { region, database } = partsOf(target)
+  const report: DriftUpkeepReport = {
+    region,
+    ...(database === null ? {} : { database }),
+    health: null,
+    backlog: null,
+    pruned: null,
+    prunedOrphans: null,
+    errors: [],
+  }
+  const step = async <T>(name: string, run: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await run()
+    } catch (err) {
+      report.errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
+      return null
+    }
+  }
+  report.health = await step('health', () => driftCaptureHealth(target))
+  report.backlog = await step('backlog', () => driftEventBacklog(target, now))
+  report.pruned = await step('prune', () => pruneResolvedDriftEvents(target, driftEventRetentionDays(), now))
+  report.prunedOrphans = await step('prune orphans', () => pruneOrphanedDriftEvents(target, driftEventRetentionDays(), now))
+
+  // One line per database, in a fixed shape the metric filters match on: the
+  // region's own as it always was, a project database's naming it.
+  console.log(JSON.stringify({
+    event: 'drift_event_upkeep',
+    region,
+    ...(database === null ? {} : { database }),
+    capture: report.health?.status ?? 'unknown',
+    problems: report.health?.problems ?? [],
+    pending: report.backlog?.pending ?? null,
+    oldestPendingSeconds: report.backlog?.oldestPendingSeconds ?? null,
+    orphaned: report.backlog?.orphaned ?? null,
+    pruned: report.pruned,
+    prunedOrphans: report.prunedOrphans,
+    errors: report.errors,
+  }))
+  return report
+}
+
 /**
- * One upkeep pass over `regions`, by default the one this process serves. Each
- * step's failure is recorded in its region's report and logged; one region's
- * problem never hides another's.
+ * One upkeep pass over `regions`, by default the one this process serves: each
+ * region's own database, then each project database of the region, a few at a
+ * time. Each step's failure is recorded in its database's report and logged;
+ * one database's problem never hides another's.
  */
 export async function runDriftEventUpkeep(
   now: Date = new Date(),
@@ -210,34 +304,29 @@ export async function runDriftEventUpkeep(
 ): Promise<DriftUpkeepReport[]> {
   const reports: DriftUpkeepReport[] = []
   for (const region of regions) {
-    const report: DriftUpkeepReport = { region, health: null, backlog: null, pruned: null, prunedOrphans: null, errors: [] }
-    const step = async <T>(name: string, run: () => Promise<T>): Promise<T | null> => {
-      try {
-        return await run()
-      } catch (err) {
-        report.errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
-        return null
+    reports.push(await upkeepOne(region, now))
+    try {
+      const walked = await forEachProjectDatabase(region, (ref) => upkeepOne({ region, database: ref.database }, now))
+      for (const { ref, result } of walked) {
+        if (result.status === 'fulfilled') reports.push(result.value)
+        else {
+          reports.push({
+            region,
+            database: ref.database,
+            health: null,
+            backlog: null,
+            pruned: null,
+            prunedOrphans: null,
+            errors: [`upkeep: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`],
+          })
+        }
       }
+    } catch (err) {
+      // The list of the region's project databases could not be read: said on the region's report, and logged.
+      const message = `project databases: ${err instanceof Error ? err.message : String(err)}`
+      reports[reports.length - 1].errors.push(message)
+      console.error(`[DriftUpkeep] region=${region} ${message}`)
     }
-    report.health = await step('health', () => driftCaptureHealth(region))
-    report.backlog = await step('backlog', () => driftEventBacklog(region, now))
-    report.pruned = await step('prune', () => pruneResolvedDriftEvents(region, driftEventRetentionDays(), now))
-    report.prunedOrphans = await step('prune orphans', () => pruneOrphanedDriftEvents(region, driftEventRetentionDays(), now))
-
-    // One line per region, in a fixed shape the metric filters match on.
-    console.log(JSON.stringify({
-      event: 'drift_event_upkeep',
-      region,
-      capture: report.health?.status ?? 'unknown',
-      problems: report.health?.problems ?? [],
-      pending: report.backlog?.pending ?? null,
-      oldestPendingSeconds: report.backlog?.oldestPendingSeconds ?? null,
-      orphaned: report.backlog?.orphaned ?? null,
-      pruned: report.pruned,
-      prunedOrphans: report.prunedOrphans,
-      errors: report.errors,
-    }))
-    reports.push(report)
   }
   return reports
 }

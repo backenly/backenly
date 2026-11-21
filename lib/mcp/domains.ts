@@ -284,8 +284,6 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       keyId: 'From list_api_keys.',
       key: 'UPPER_SNAKE_CASE.',
       value: '', mode: 'Default READ_ONLY.',
-      allowAddress: 'IPv4 address or CIDR, at most /16.',
-      removeAddress: '',
       url: 'The frontend\'s URL.',
     },
   },

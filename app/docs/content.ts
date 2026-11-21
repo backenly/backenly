@@ -675,7 +675,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Connect your app',
-        body: 'The Direct tab has the REST base URL, TypeScript types and an OpenAPI spec, the list of origins allowed to call from a browser, and read-only or read-write PostgreSQL connection strings.',
+        body: 'The Direct tab has the REST base URL, TypeScript types and an OpenAPI spec, and the list of origins allowed to call from a browser. The Postgres tab has read-only and read-write PostgreSQL logins for psql, ORMs and BI tools.',
       },
     ],
     prompts: ['Call Backenly’s read_backend_state tool and tell me what exists in this project.'],
@@ -689,6 +689,8 @@ await backend.auth.signIn({ email, password })
       'After approval, the exact parked call runs without being reinterpreted. Poll `check_approval` until its status is final. If it fails, read `resultSummary` and check the current state before asking again, because a call can stop after applying part of its work.',
       'A key is a credential. Keep it out of your repository. Revoke agent keys you stop using, and disconnect agents you signed in from the browser, on the Agents tab; your app’s keys are revoked in [Settings](/docs/settings).',
       '`pg_dump` exports (full, schema only, or data only) restore on any PostgreSQL, so your data is never locked in.',
+      'A project with a database of its own is reached through Backenly’s connection pooler at `<region>.db.backenly.com` with `sslmode=verify-full`: port 5432 (session pooling) for migrations, psql and pg_dump, and port 6543 (transaction pooling) for application traffic and serverless functions. With Prisma, put the 6543 string in `url` and the 5432 string in `directUrl`. A read-write login’s password is shown once, when the login is made or rotated; a lost one is rotated.',
+      'A project still in its region’s shared database has no direct connection string: read with `run_query`, change rows through the REST API, change the schema with `apply_migration`, and take a `pg_dump` export from Connect → Postgres → Backups.',
     ],
   },
   {

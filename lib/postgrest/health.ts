@@ -20,7 +20,16 @@
  */
 
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
-import { regionRawClient, regionSetting, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import {
+  databaseClient,
+  isRegionError,
+  projectDatabase,
+  projectPostgrest,
+  regionRawClient,
+  regionSetting,
+  type WorkspaceRawClient,
+} from '@/lib/data-plane/regional'
+import { internalClaimsFor, mintInternalToken } from './gateway'
 
 export type PostgrestStatus =
   | { state: 'healthy'; latencyMs: number }
@@ -78,16 +87,81 @@ export async function probePostgrest(region: CloudRegionId = HOME_REGION): Promi
 }
 
 /**
+ * Probe the PostgREST serving one project with a database of its own: its own
+ * process on the region's PostgREST host, asked at its root as any request is,
+ * with a service_role token naming the project and its database (the host
+ * refuses anything else). A host answer that is not PostgREST's own (the host
+ * at its cap, the project's process failing to start) reads as unreachable.
+ * `not_configured` when this process has no host address or secret for the
+ * region: the project is then served by nothing here, which is never read as
+ * healthy by a heal (lib/postgrest/supervisor.ts).
+ */
+export async function probeDedicatedPostgrest(projectId: string): Promise<PostgrestStatus> {
+  let target
+  try {
+    target = await projectPostgrest(projectId)
+  } catch (err) {
+    if (isRegionError(err)) return { state: 'not_configured' }
+    throw err
+  }
+  if (!target?.database) return { state: 'not_configured' }
+
+  const started = Date.now()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
+  try {
+    const token = mintInternalToken(internalClaimsFor({ projectId, serviceRole: true, database: target.database }), target.jwtSecret)
+    const res = await fetch(target.url.replace(/\/$/, '') + '/', {
+      method: 'GET',
+      headers: { authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+    const text = await res.text()
+    if (res.status === 503 && text.includes('PGRST002')) {
+      return { state: 'schema_cache_failed', detail: text.slice(0, 300) }
+    }
+    if (!res.ok) {
+      return { state: 'unreachable', detail: `HTTP ${res.status}: ${text.slice(0, 200)}` }
+    }
+    return { state: 'healthy', latencyMs: Date.now() - started }
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return { state: 'unreachable', detail: aborted ? `no response within ${PROBE_TIMEOUT_MS}ms` : String(err) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * The PostgREST serving a project: its own, for a project with a database of
+ * its own (probeDedicatedPostgrest), or its region's (probePostgrest).
+ */
+export async function probeProjectPostgrest(projectId: string): Promise<PostgrestStatus> {
+  const placement = await projectDatabase(projectId)
+  if (placement.tenancy === 'dedicated') return probeDedicatedPostgrest(projectId)
+  return probePostgrest(placement.region)
+}
+
+/**
  * Remove registered schemas that no longer exist — the cause of a wedged cache.
  *
  * Returns the number pruned. Runs before any restart is considered: restarting
  * without pruning would rebuild the cache from the same broken list and wedge
  * again, turning a self-heal into a restart loop.
  *
- * The registry is in the database the region's PostgREST serves.
+ * The registry is in the database the PostgREST serves: a region's own (a
+ * region id), or a project's own database, whose registry its own PostgREST
+ * alone reads.
  */
-export async function pruneDanglingSchemas(region: CloudRegionId = HOME_REGION): Promise<number> {
-  const db = regionRawClient(region)
+export async function pruneDanglingSchemas(
+  target: CloudRegionId | { region: CloudRegionId; database: string | null } = HOME_REGION,
+): Promise<number> {
+  const db =
+    typeof target === 'string'
+      ? regionRawClient(target)
+      : target.database === null
+        ? regionRawClient(target.region)
+        : databaseClient(target.region, target.database)
   const before = await currentSchemas(db)
   await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_prune_schemas()`)
   const after = await currentSchemas(db)

@@ -191,8 +191,12 @@ A self-hosted install runs the same image against its own PostgreSQL 16:
    and so does a role with `CREATEDB CREATEROLE`):
    create `backenly_app` and `backenly_pooler_auth` (both `LOGIN`), set the
    latter's password, create the database `backenly_pooler`, and run
-   `tools/managed-db/regional/sql/pooler.sql` in it. The header of that file
-   lists the steps exactly.
+   `tools/managed-db/regional/sql/pooler.sql` in it with `psql -f`, which also
+   reads `sql/verify-pooler.sql` beside it. The header of that file lists the
+   steps exactly. On Backenly Cloud the regional procedure does all of this
+   (`tools/managed-db/regional/bootstrap.sh`, the step `pooler`), and keeps
+   the lookup role's password in the secret its launch config names
+   (`secrets.poolerAuth`).
 2. For each login customers should reach through the pooler, set its verifier
    on the server, grant it `CONNECT` on its own database only, and insert the
    same verifier and that database into `backenly_pooler.logins` (as
@@ -234,5 +238,9 @@ server connection is released, or when the runtime's stop timeout ends.
   and the entrypoint's rendering and refusals (`check`).
 - `tests/integration/pooler-auth.spec.ts`: a login with a computed verifier on
   a real PostgreSQL 16, and every grant `pooler.sql` makes.
+- `tests/integration/regional-bootstrap.spec.ts`: the regional procedure
+  making `backenly_pooler_auth` and `backenly_pooler` as an administrator that
+  is not a superuser, verifying them, refusing to replace the role's password
+  unasked, and rotating it when asked.
 - `scripts/test/pooler-image.sh` (the `connection pooler image` CI job): the
   image itself against a PostgreSQL 16 that requires TLS, on both ports.

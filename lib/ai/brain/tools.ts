@@ -1131,11 +1131,9 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     "The backend briefing: everything Backenly's autonomous operator detected, fixed, or queued while nobody was watching. Returns open findings with evidence, changes awaiting human approval in the Review Queue, fixes auto-applied in the last 24h, pending external schema drift, and the latest restore point. Call this FIRST when starting a session on an existing backend, or when the user asks \"what happened?\" / \"any issues?\". Side-effect free.",
     {}),
   fn('get_database_credentials',
-    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). Where the region's database endpoint admits only allowed addresses (`data.allowlistEnforced`), that endpoint is shared by the projects in the region and admits an address any of them allows; the login's password is what reaches this project. Allow the public IPv4 address you connect from with allowAddress (one address, or a CIDR range no wider than /16), take one off with removeAddress; `data.allowedAddresses` lists this project's, and `data.notAdmittedAddresses` those past its plan's number. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
+    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's data — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Postgres); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). A project with a database of its own is reached through Backenly's connection pooler: data.connectionString is port 5432 (session pooling: migrations, psql, pg_dump) and data.transactionConnectionString port 6543 (transaction pooling: application traffic, serverless), both sslmode=verify-full; for Prisma put 6543 in url and 5432 in directUrl. The read-write login's password there is shown only when the login is made or rotated (data.passwordShown is 'once' and the strings carry [YOUR-PASSWORD]): ask the person for it, or ask them to rotate it. Where nothing outside Backenly can reach the project's database, the answer says why and what works instead. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
     {
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
-      allowAddress: { type: 'string', description: 'A public IPv4 address, or a CIDR range no wider than /16, to allow to connect.' },
-      removeAddress: { type: 'string', description: 'An allowed address to take off the list.' },
     }),
   fn('adopt_external_schema',
     "Adopt schema changes made over a direct database connection (psql / migration tool) into Backenly's governed contract: registers new tables (REST API + RLS), refreshes altered ones, prunes dropped ones, re-baselines the schema snapshot, re-syncs access grants. Bookkeeping only — never executes DDL. Call after running your own migrations via the READ_WRITE connection string so the platform and your schema agree.",
@@ -3726,8 +3724,8 @@ export async function dispatchTool(
       const mode = args.mode === 'READ_WRITE' ? 'READ_WRITE' as const : 'READ_ONLY' as const
       const da = await import('@/lib/services/direct-access')
       const status = await da.getDirectAccessStatus(ctx.projectId)
-      // Nothing outside Backenly can reach this region's database yet, so no
-      // string is issued, and the answer says what does work instead.
+      // Nothing outside Backenly can reach this project's database, so no
+      // string is issued, and the answer says why and what does work instead.
       if (!status.available) {
         return finalize({
           ok: false,
@@ -3736,78 +3734,35 @@ export async function dispatchTool(
             `${status.unavailable ?? da.DIRECT_ACCESS_UNAVAILABLE_MESSAGE} Read with run_query (SQL, read-only, ` +
             'nothing to install), change rows through the REST API, change the schema with apply_migration, and take a ' +
             'full pg_dump file from Connect → Postgres → Backups.',
-          data: { available: false },
+          data: { available: false, ...(status.unavailableReason ? { reason: status.unavailableReason } : {}) },
         })
       }
-
-      /** The allowlist as every answer carries it. */
-      const addressDataOf = (list: typeof status.allowlist) =>
-        list
-          ? {
-              allowlistEnforced: list.enforced,
-              allowedAddresses: list.addresses.map((a) => a.cidr),
-              ...(list.addresses.some((a) => !a.admitted) ? { notAdmittedAddresses: list.addresses.filter((a) => !a.admitted).map((a) => a.cidr) } : {}),
-              addressLimit: list.limit,
-            }
-          : {}
-
-      // ── Allowed addresses: what may connect, asked for in the same call ────
-      //
-      // Where the region's endpoint admits only allowed addresses, no string
-      // connects until the project allows one. allowAddress / removeAddress
-      // change the list as a governed change on the agent's own History entry
-      // (lib/services/direct-access-addresses.ts), validated first: a range
-      // wider than /16, a private range or an IPv6 address is refused with why.
-      const addresses = await import('@/lib/services/direct-access-addresses')
-      const did: string[] = []
-      try {
-        if (args.removeAddress !== undefined) {
-          const removed = await addresses.removeAddress(ctx.projectId, args.removeAddress)
-          did.push(
-            `Removed ${removed.cidr} from the allowed addresses. New connections from it are refused unless another project ` +
-              'in this region allows it too; connections already open stay open until a login\'s password is rotated.',
-          )
-        }
-        if (args.allowAddress !== undefined) {
-          const allowed = await addresses.allowAddress(ctx.projectId, args.allowAddress)
-          did.push(allowed.added ? `Allowed ${allowed.address.cidr} to connect.` : `${allowed.address.cidr} was already allowed.`)
-          if (allowed.sync.status === 'failed') did.push('The database endpoint has not taken it yet; Backenly tries again within five minutes.')
-        }
-      } catch (err) {
-        if (!(err instanceof addresses.AllowedAddressError)) throw err
-        return finalize({ ok: false, code: err.code, summary: err.message, data: addressDataOf(status.allowlist) })
-      }
-      const allowlist = did.length > 0 ? await addresses.allowlistState(ctx.projectId) : status.allowlist
-      const notAdmitted = allowlist?.enforced ? addresses.notAdmittedLine(allowlist) : null
-      const addressLines = [
-        ...did,
-        ...(allowlist?.enforced && allowlist.addresses.length === 0
-          ? [
-              'Allow an address first: this project allows no address yet. The database endpoint is shared by the projects in ' +
-                'this region and refuses an address none of them allows, so allow the public IPv4 address you connect from: call ' +
-                'this again with allowAddress (one address, or a range no wider than /16), or ask the person to press Allow my ' +
-                'address in Connect → Postgres.',
-            ]
-          : []),
-        ...(notAdmitted ? [notAdmitted] : []),
-      ]
-      const addressData = addressDataOf(allowlist)
 
       const existing = status.credentials.find((c) => c.mode === mode)
 
       const describe = (c: typeof status.credentials[number], provisioned: boolean) => ({
         ok: true as const,
         summary: clip([
-          ...addressLines,
-          `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (${c.caBundle ? 'TLS, the server verified with the CA bundle' : 'TLS required'}, search_path pinned to ${status.schema}).`,
-          ...(c.verifyCaConnectionString && c.nodePostgres && c.caBundle
+          `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (${status.pooler ? 'through the connection pooler, sslmode=verify-full' : 'TLS required'}, search_path pinned to ${status.schema}).`,
+          ...(status.pooler && c.transactionConnectionString
             ? [
-                'data.connectionString is for psql, pg_dump, psycopg and other libpq tools (verify-full through hostaddr); ' +
-                  'data.verifyCaConnectionString for Go (pgx), Python (asyncpg), Rust (sqlx) and other clients that read sslmode=verify-ca. ' +
-                  `Both name the CA bundle as sslrootcert=${c.caBundle.file}: download it from ${c.caBundle.url} into the folder the client runs in, or give its full path.`,
-                'node-postgres (and Drizzle or Prisma on it) checks the host name even under verify-ca, so give it data.nodePostgres ' +
-                  "instead of a string: its host is the endpoint's address, and pass ssl as { ca: <the CA file's contents>, servername: " +
-                  'data.nodePostgres.ssl.servername }, which verifies the server in full.',
+                `data.connectionString is port ${status.pooler.sessionPort}, session pooling: migrations, psql, pg_dump and anything that holds a session. ` +
+                  `data.transactionConnectionString is port ${status.pooler.transactionPort}, transaction pooling: application traffic and serverless functions. ` +
+                  `Prisma: url on ${status.pooler.transactionPort}, directUrl (Prisma Migrate) on ${status.pooler.sessionPort}. ` +
+                  "The psql and pg_dump commands add sslrootcert=system, which psql 16 or later reads as the system's trusted roots.",
+              ]
+            : []),
+          ...(c.passwordShown === 'once' && !c.password
+            ? [
+                "The password is not in these strings: a read-write login's password on this database is shown only when the login is made or " +
+                  'rotated, and nothing keeps it. Ask the person for the one they saved, or ask them to rotate the login in Connect → Postgres, ' +
+                  'and put it in place of [YOUR-PASSWORD].',
+              ]
+            : []),
+          ...(c.passwordShown === 'rotate'
+            ? [
+                'This login was made before the project had a database of its own, so it does not connect through the pooler yet: ' +
+                  'ask the person to rotate it in Connect → Postgres, which gives it a password that does.',
               ]
             : []),
           ...(typeof status.connectionLimit === 'number' ? [`Each login may hold ${status.connectionLimit} connections at once on this project's plan.`] : []),
@@ -3829,10 +3784,9 @@ export async function dispatchTool(
           port: c.port,
           database: c.database,
           schema: status.schema,
+          passwordShown: c.passwordShown,
           connectionString: c.connectionString,
-          ...(c.verifyCaConnectionString ? { verifyCaConnectionString: c.verifyCaConnectionString } : {}),
-          ...(c.nodePostgres ? { nodePostgres: c.nodePostgres } : {}),
-          ...(c.caBundle ? { caBundle: c.caBundle } : {}),
+          ...(c.transactionConnectionString ? { transactionConnectionString: c.transactionConnectionString, transactionPort: c.transactionPort } : {}),
           ...(typeof status.connectionLimit === 'number' ? { connectionLimit: status.connectionLimit } : {}),
           psqlCommand: c.psqlCommand,
           pgDumpCommand: c.pgDumpCommand,
@@ -3851,7 +3805,6 @@ export async function dispatchTool(
         readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
         readWriteArmed: status.credentials.some((c) => c.mode === 'READ_WRITE'),
         armReadWriteUrl: armUrl,
-        ...addressData,
       }
 
       if (existing) return finalize(withAccess(describe(existing, false), access))
@@ -3864,11 +3817,10 @@ export async function dispatchTool(
         needsUser: true,
         code: 'WRITE_ACCESS_NOT_ARMED',
         summary:
-          (did.length > 0 ? `${did.join(' ')}\n` : '') +
           'Read-write database access is not armed for this project, so there is no read-write connection ' +
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +
-          'Give the human that link and ask them to create read-write credentials (Connect → Direct). The login ' +
+          'Give the human that link and ask them to create read-write credentials (Connect → Postgres). The login ' +
           'reads and writes rows; schema changes over it stay refused unless the owner allows them there, which a ' +
           'database other projects share never lets them do. Then ' +
           'call this tool again with mode=READ_WRITE.\n' +

@@ -14,6 +14,10 @@
  * (backenly-infra, aws/REGIONS_RUNBOOK.md): identifiers, never a secret value.
  * Its `secrets.dbcreator`, where present, is where the password of the role
  * that creates project databases is kept; without it that role is not made.
+ * Its `secrets.poolerAuth`, where present, is where the password of the
+ * connection pooler's login (backenly_pooler_auth, services/pooler) is kept;
+ * with it the apply also makes the pooler's database, backenly_pooler (the
+ * step pooler, bootstrap.sh). Without it neither is made.
  *
  * A project can have a database of its own on the region's instance, cloned
  * from a template. `template` builds or converges that template, and
@@ -30,8 +34,12 @@
  * written to its secret through the CLI's standard input, never an argument,
  * and given to the procedure only as its SCRAM verifier. The task definition,
  * the task's overrides, its log and this script's output hold no password.
+ * Each secret holds what its reader expects (ROLES[role].stored): a connection
+ * string for the services that connect to the region's database, and the
+ * password alone for the connection pooler, which is given its server's host
+ * separately and reads its password as POOLER_AUTH_PASSWORD.
  *
- * NO HALF-SET CREDENTIAL. A new connection string is stored as an AWSPENDING
+ * NO HALF-SET CREDENTIAL. A new credential is stored as an AWSPENDING
  * version of its secret and becomes AWSCURRENT only after the procedure has set
  * that password, so a run that fails or is refused leaves every service's
  * current secret as it was, and the next run starts over.
@@ -64,30 +72,63 @@ export interface LaunchConfig {
   logGroup: string
   logStreamPrefix: string
   database: { host: string; port: number; name: string }
-  secrets: { app: string; direct: string; backup: string; authenticator: string; postgrestJwt: string; dbcreator?: string }
+  secrets: {
+    app: string
+    direct: string
+    backup: string
+    authenticator: string
+    postgrestJwt: string
+    dbcreator?: string
+    poolerAuth?: string
+  }
 }
 
 export type Mode = 'check' | 'apply' | 'template' | 'project-dbs'
 const MODES: Mode[] = ['check', 'apply', 'template', 'project-dbs']
 
-/** The login roles the procedure sets passwords for, and where each password is kept. */
+/**
+ * What a role's secret holds: a connection string to the region's database
+ * (connectionString), or the password alone, for a reader that is given the
+ * server separately.
+ */
+export type StoredAs = 'url' | 'password'
+
+/** The login roles the procedure sets passwords for, where each password is kept, and as what. */
 export const ROLES = {
-  backenly_app: { verifier: 'BACKENLY_APP_VERIFIER', secrets: ['app', 'direct'] },
-  backenly_backup: { verifier: 'BACKENLY_BACKUP_VERIFIER', secrets: ['backup'] },
-  backenly_authenticator: { verifier: 'BACKENLY_AUTHENTICATOR_VERIFIER', secrets: ['authenticator'] },
+  backenly_app: { verifier: 'BACKENLY_APP_VERIFIER', secrets: ['app', 'direct'], stored: 'url' },
+  backenly_backup: { verifier: 'BACKENLY_BACKUP_VERIFIER', secrets: ['backup'], stored: 'url' },
+  backenly_authenticator: { verifier: 'BACKENLY_AUTHENTICATOR_VERIFIER', secrets: ['authenticator'], stored: 'url' },
   // Made only where the region's config names its secret (sql/roles.sql makes
   // it only when given its verifier).
-  backenly_dbcreator: { verifier: 'BACKENLY_DBCREATOR_VERIFIER', secrets: ['dbcreator'] },
-} as const satisfies Record<string, { verifier: string; secrets: ReadonlyArray<keyof LaunchConfig['secrets']> }>
+  backenly_dbcreator: { verifier: 'BACKENLY_DBCREATOR_VERIFIER', secrets: ['dbcreator'], stored: 'url' },
+  // The same. The pooler is given its server's host and reads this password
+  // as POOLER_AUTH_PASSWORD (services/pooler/README.md): 64 hex characters,
+  // which fits what it accepts.
+  backenly_pooler_auth: { verifier: 'BACKENLY_POOLER_AUTH_VERIFIER', secrets: ['poolerAuth'], stored: 'password' },
+} as const satisfies Record<
+  string,
+  { verifier: string; secrets: ReadonlyArray<keyof LaunchConfig['secrets']>; stored: StoredAs }
+>
 
 export type ManagedRole = keyof typeof ROLES
 const MANAGED_ROLES = Object.keys(ROLES) as ManagedRole[]
 /** The roles every region has. */
 export const REQUIRED_ROLES: ManagedRole[] = ['backenly_app', 'backenly_backup', 'backenly_authenticator']
 
-/** The roles this region's procedure manages: every region's, and the database creator where its secret is configured. */
+/**
+ * The roles this region's procedure manages: every region's, and the database
+ * creator and the pooler's login where their secrets are configured.
+ */
 export function managedRoles(config: LaunchConfig): ManagedRole[] {
-  return config.secrets.dbcreator ? [...REQUIRED_ROLES, 'backenly_dbcreator'] : [...REQUIRED_ROLES]
+  const roles: ManagedRole[] = [...REQUIRED_ROLES]
+  if (config.secrets.dbcreator) roles.push('backenly_dbcreator')
+  if (config.secrets.poolerAuth) roles.push('backenly_pooler_auth')
+  return roles
+}
+
+/** What a role's secret is given for `password`: a connection string, or the password itself. */
+export function secretValue(role: ManagedRole, password: string, db: LaunchConfig['database']): string {
+  return ROLES[role].stored === 'password' ? password : connectionString(role, password, db)
 }
 
 /** A refusal: the inputs or the database's state rule the run out before anything is written. */
@@ -170,6 +211,9 @@ export function projectDatabasesInput(names: string[]): string {
   return `sha256:${createHash('sha256').update(sorted.map((n) => `${n}\n`).join('')).digest('hex')}`
 }
 
+/** The secrets a region's config may leave out, or give as null: the roles behind them are made only where they are named. */
+const OPTIONAL_SECRETS: ReadonlyArray<'dbcreator' | 'poolerAuth'> = ['dbcreator', 'poolerAuth']
+
 /** The region stack's db_procedure_launch_config output, checked before anything runs. */
 export function loadConfig(json: string): LaunchConfig {
   let raw: unknown
@@ -192,15 +236,16 @@ export function loadConfig(json: string): LaunchConfig {
   const db = c.database
   if (!db || !present(db.host) || !present(db.name) || !Number.isInteger(db.port)) throw new Refusal('the config has no database host, port and name')
   const secrets = c.secrets
-  for (const key of ['app', 'direct', 'backup', 'authenticator', 'postgrestJwt', 'dbcreator'] as const) {
+  for (const key of ['app', 'direct', 'backup', 'authenticator', 'postgrestJwt', 'dbcreator', 'poolerAuth'] as const) {
     const arn = secrets?.[key]
-    // The database creator's is optional: a region without it makes no such role.
-    if (key === 'dbcreator' && (arn === undefined || arn === null)) continue
+    // The database creator's and the pooler's are optional: a region without
+    // one makes no such role.
+    if ((OPTIONAL_SECRETS as ReadonlyArray<string>).includes(key) && (arn === undefined || arn === null)) continue
     if (!present(arn)) throw new Refusal(`the config has no ${key} secret`)
     // A credential for this region's database is kept in this region, never elsewhere.
     if (!arn!.startsWith(`arn:aws:secretsmanager:${c.region}:`)) throw new Refusal(`the ${key} secret is not in ${c.region}: ${arn}`)
   }
-  if (secrets && secrets.dbcreator === null) delete secrets.dbcreator
+  for (const key of OPTIONAL_SECRETS) if (secrets && secrets[key] === null) delete secrets[key]
   return c as LaunchConfig
 }
 
@@ -524,11 +569,11 @@ export async function launch(
   for (const role of planned) {
     const password = generatePassword()
     env[ROLES[role].verifier] = scramSha256Verifier(password)
-    const url = connectionString(role, password, config.database)
+    const value = secretValue(role, password, config.database)
     for (const key of ROLES[role].secrets) {
       const arn = config.secrets[key]
       if (!arn) throw new Refusal(`the config has no ${key} secret for ${role}`)
-      pending.push({ key, arn, versionId: await putPending(aws, arn, url) })
+      pending.push({ key, arn, versionId: await putPending(aws, arn, value) })
     }
   }
   // The roles whose existing password is replaced; a missing one is simply set.

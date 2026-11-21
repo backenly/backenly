@@ -18,14 +18,19 @@ const TAG_LENGTH = 16
 
 let cachedKey: Buffer | null = null
 
-function getMasterKey(): Buffer {
-  if (cachedKey) return cachedKey
+function masterSecret(): string {
   const raw = process.env.ENV_VAR_ENCRYPTION_KEY || process.env.JWT_SECRET
   if (!raw) {
     throw new Error(
       'projectEnvCrypto: neither ENV_VAR_ENCRYPTION_KEY nor JWT_SECRET is set. Cannot encrypt project env vars.',
     )
   }
+  return raw
+}
+
+function getMasterKey(): Buffer {
+  if (cachedKey) return cachedKey
+  const raw = masterSecret()
   // HKDF-SHA256 → derive an AES-256 key from whatever secret the env provides.
   // hkdfSync returns an ArrayBuffer in modern Node — wrap into a Buffer for the
   // cipher APIs.
@@ -72,6 +77,21 @@ export function decryptValue(row: EncryptedValue): string {
   decipher.setAuthTag(tag)
   const plaintext = Buffer.concat([decipher.update(cipher), decipher.final()])
   return plaintext.toString('utf8')
+}
+
+/**
+ * A key for another purpose, derived (HKDF-SHA256) from the same master secret
+ * under its own `info`. It is not the key encryptValue uses, and neither can
+ * be worked out from the other. For a value Backenly must be able to produce
+ * again without storing it (lib/services/direct-access.ts: the password of a
+ * project database's read-only login, which the platform signs in with).
+ */
+export function derivedKey(info: string, length = KEY_LENGTH): Buffer {
+  if (!info || info === 'backenly/project-env-var/v1') {
+    throw new Error('projectEnvCrypto.derivedKey: give a purpose of its own')
+  }
+  const derived = crypto.hkdfSync('sha256', Buffer.from(masterSecret(), 'utf8'), Buffer.alloc(0), info, length)
+  return Buffer.from(derived as ArrayBuffer)
 }
 
 /**
