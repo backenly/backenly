@@ -204,11 +204,15 @@ $lookup$;
 --
 -- An earlier form returned SETOF text; a function's result type cannot be
 -- replaced in place, so that form is dropped first.
+-- (Looked up with to_regprocedure, which answers NULL for a missing function,
+-- never with a ::regprocedure cast, which fails while planning when it is missing.)
 DO $drop_old_databases$
+DECLARE
+  old_form regprocedure := to_regprocedure('backenly_pooler.databases()');
 BEGIN
-  IF to_regprocedure('backenly_pooler.databases()') IS NOT NULL
-     AND (SELECT p.proretset AND p.prorettype = 'text'::regtype
-            FROM pg_catalog.pg_proc AS p WHERE p.oid = 'backenly_pooler.databases()'::regprocedure) THEN
+  IF old_form IS NOT NULL AND EXISTS (
+       SELECT 1 FROM pg_catalog.pg_proc AS p
+        WHERE p.oid = old_form AND p.proretset AND p.prorettype = 'text'::regtype) THEN
     DROP FUNCTION backenly_pooler.databases();
   END IF;
 END
