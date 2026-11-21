@@ -97,8 +97,10 @@ BEGIN
        OR NOT r.rolcreatedb OR NOT r.rolcanlogin THEN
       problems := problems || 'role backenly_dbcreator must be LOGIN CREATEDB NOINHERIT, and NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS'::text;
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid) THEN
-      problems := problems || 'role backenly_dbcreator is a member of another role'::text;
+    -- pg_signal_backend is the one role it may hold, as verify.sql says: DROP
+    -- DATABASE ... WITH (FORCE) ends only the sessions its owner may signal.
+    IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid AND m.roleid <> 'pg_signal_backend'::regrole) THEN
+      problems := problems || 'role backenly_dbcreator is a member of a role other than pg_signal_backend'::text;
     END IF;
     FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator',
                                  'anon', 'authenticated', 'service_role', 'backenly_external'] LOOP
