@@ -23,6 +23,8 @@
  */
 
 import { createHash, createHmac, randomBytes } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 
 import {
   SCRAM_ITERATIONS,
@@ -143,6 +145,17 @@ describe('scramSha256Verifier', () => {
       expect(serverKey).toHaveLength(32)
       expect(isScramVerifier(v)).toBe(true)
     }
+  })
+
+  it('fits the pooler’s login table exactly', () => {
+    // The CHECK on backenly_pooler.logins.verifier, read from the SQL file, so
+    // a verifier this code makes can always be stored there.
+    const sql = fs.readFileSync(path.join(process.cwd(), 'tools/managed-db/regional/sql/pooler.sql'), 'utf8')
+    const check = /verifier\s+text\s+NOT NULL\s+CHECK \(verifier ~ '([^']+)'\)/.exec(sql)
+    expect(check).not.toBeNull()
+    const shape = new RegExp(check![1])
+    for (let i = 0; i < 20; i++) expect(scramSha256Verifier(randomBytes(32).toString('hex'))).toMatch(shape)
+    expect(scramSha256Verifier('x'.repeat(32), { iterations: 8192 })).not.toMatch(shape)
   })
 
   it('refuses what clients would hash differently, and iteration counts the pooler cannot use', () => {

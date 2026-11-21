@@ -791,6 +791,22 @@ tests/integration/migration-ownership-recovery.spec.ts
 # fails the three that pin the strict check and the signal.
 tests/integration/regional-bootstrap.spec.ts
 
+# ── The connection pooler's logins ──────────────────────────────────────────
+#
+# Customers connect PostgreSQL clients to their project's own database through
+# services/pooler, which signs a login in to the server with the keys from the
+# client's own SCRAM proof, so the server must hold exactly the verifier
+# lib/data-plane/scram.ts computed. Proven on a PostgreSQL 16 cluster the suite
+# creates with initdb (it creates backenly_app and backenly_pooler_auth by
+# their real names): the verifier is stored byte for byte and the plain
+# password logs in through node-postgres and libpq; and
+# tools/managed-db/regional/sql/pooler.sql, run twice by psql as an
+# administrator that is not a superuser, leaves lookup() answering only for
+# active logins, backenly_pooler_auth able to do nothing else, backenly_app
+# able to write the logins and nothing more, and PUBLIC nothing. Needs
+# PostgreSQL 16 server binaries (PG_BINDIR); fails rather than skips in CI.
+tests/integration/pooler-auth.spec.ts
+
 # ── Credential rotation ─────────────────────────────────────────────────────
 #
 # A rotation proven only by "the new password works" is not proven: the point of
