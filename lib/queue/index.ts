@@ -492,6 +492,16 @@ export async function failPurgeJob(id: string, error: string) {
 /** Snapshots taken and restored for another region: what the console's snapshot panel lists. */
 export const SNAPSHOT_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
 
+/**
+ * Moving one project's data from its region's shared database into a database
+ * of its own (lib/data-plane/tenancy-migration.ts), started by an operator
+ * (scripts/migrate-project-databases.ts) and run in the project's region,
+ * where pg_dump and psql reach both databases. Once: a move that stops is
+ * started again by a person, never by the queue. Its row is the record of the
+ * run: `result` says how far it got while it runs and how it ended after.
+ */
+export const TENANCY_MIGRATION_JOB_TYPE = 'tenancy_migration' as const
+
 /** The work one region may ask another to do. */
 export const REGIONAL_JOB_TYPES = [
   ...SNAPSHOT_JOB_TYPES,
@@ -501,6 +511,7 @@ export const REGIONAL_JOB_TYPES = [
   'evolution_undo',
   'evolution_rerequest',
   'evolution_assess',
+  TENANCY_MIGRATION_JOB_TYPE,
 ] as const
 export type RegionalJobType = (typeof REGIONAL_JOB_TYPES)[number]
 

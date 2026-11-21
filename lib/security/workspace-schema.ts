@@ -130,6 +130,34 @@ export function isChangeVaultSchema(schemaName: string): boolean {
   return /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_r[0-9]+$/i.test(schemaName)
 }
 
+/**
+ * The name a schema is given in the database a project's data moved out of
+ * (lib/data-plane/tenancy-migration.ts): `workspace_<uuid>_moved<epoch>` for
+ * its canonical schema, `workspace_<uuid>_moved<epoch>_<n>` for each other one
+ * (a branch or a change vault, numbered in the order they were listed), the
+ * epoch being the one the move gave the project. Short enough for PostgreSQL's
+ * 63-byte identifiers, which a branch's own name with a suffix would not be.
+ *
+ * Still the project's own (isProjectOwnedSchema), so deleting the project
+ * finds and drops it. Never served and never a branch or a vault: anything that
+ * walks a database's workspace schemas to register, repair or report them
+ * skips it (isMovedSchema), as it skips a vault.
+ */
+export function movedSchemaName(projectId: unknown, epoch: number, index = 0): string {
+  assertValidProjectId(projectId)
+  if (!Number.isInteger(epoch) || epoch < 1) throw new Error(`Not a tenancy epoch: ${epoch}`)
+  if (!Number.isInteger(index) || index < 0) throw new Error(`Not a schema index: ${index}`)
+  const name = `workspace_${projectId}_moved${epoch}${index === 0 ? '' : `_${index}`}`
+  // PostgreSQL would cut a longer name short, silently, and two could then collide.
+  if (name.length > 63) throw new Error(`${name} is longer than a PostgreSQL identifier`)
+  return name
+}
+
+/** True for a schema left behind, fenced, by a move to a database of its own (movedSchemaName). */
+export function isMovedSchema(schemaName: string): boolean {
+  return /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_moved[0-9]+(?:_[0-9]+)?$/i.test(schemaName)
+}
+
 // ─── Reserved workspace tables — single source of truth ───────────────────────
 //
 // A workspace schema holds two kinds of tables:

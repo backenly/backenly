@@ -81,7 +81,7 @@ import { isScramVerifier, SCRAM_SALT_BYTES, scramSha256Verifier } from '@/lib/da
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
-import { assertValidProjectId } from '@/lib/security/workspace-schema'
+import { assertValidProjectId, quoteIdent } from '@/lib/security/workspace-schema'
 import { decryptValue, derivedKey, encryptValue } from '@/lib/security/projectEnvCrypto'
 import { rotateProjectChannel } from '@/lib/realtime/channels'
 import { directPostgresAllowanceFor } from '@/lib/entitlements/direct-postgres'
@@ -849,6 +849,103 @@ async function provisionRole(
   }).catch(() => {})
 
   return { row, password }
+}
+
+/** A login carried into the database a project moves into, and what its credential row is to keep once the move commits. */
+export interface CarriedLogin {
+  mode: DirectAccessMode
+  roleName: string
+  /** Made on the target's instance by this move, so a move that stops drops it there. */
+  created: boolean
+  /** The verifier the row keeps from the flip on, encrypted as every credential row is. */
+  kept: { passwordCipher: string; passwordIv: string; passwordTag: string }
+}
+
+/**
+ * A project's direct logins, made ready in the database of its own it is
+ * moving into (lib/data-plane/tenancy-migration.ts), before its schemas are
+ * copied in, which name them, and before its row names that database. The
+ * project is paused for the move, its logins stopped, and they
+ * stay stopped here: the resume brings back each one the pause stopped, from
+ * what its credential row then keeps (lib/projects/paused-logins.ts), and with
+ * it the pooler's row (restorePoolerLogins).
+ *
+ * What each row is to keep, as on any project database (newLoginSecret): a
+ * SCRAM verifier. The read-write login's of the password its row keeps today,
+ * so its existing connection details keep signing in once they go through the
+ * pooler. The read-only login's re-derived, because the platform signs in as
+ * it and must be able to produce its password (readOnlyPasswordFrom). A row
+ * that keeps a verifier already keeps it.
+ *
+ * A login the target's instance does not have (the data instance is another
+ * instance than the shared database's, as in the home region) is made there,
+ * with that verifier, and stopped at once, NOLOGIN with no password, as the
+ * pause left its old self. One it has (the same instance) is left as it is.
+ * The read-write login's schema changes are refused there, as the shared
+ * database refused them: allowing them later is setSchemaChanges's decision,
+ * and only where the region offers the pooler.
+ *
+ * Nothing is written to the credential rows here: the move writes `kept` in
+ * the transaction that flips the project, so a move that stops leaves them as
+ * they were. Throws when a password cannot be carried (SCRAM takes printable
+ * ASCII without spaces): rotate it first.
+ */
+export async function carryDirectLogins(projectId: string, target: { region: CloudRegionId; database: string }): Promise<CarriedLogin[]> {
+  assertValidProjectId(projectId)
+  const rows = await prisma.databaseCredential.findMany({ where: { projectId } })
+  if (rows.length === 0) return []
+  const db = databaseClient(target.region, target.database, projectId)
+  const schema = await resolveWorkspaceSchema(projectId)
+  const secrets = rows.map((row) => {
+    const mode = row.mode as DirectAccessMode
+    const stored = storedSecret(row)
+    if (isScramVerifier(stored)) return { row, mode, verifier: stored }
+    if (mode === 'READ_ONLY') return { row, mode, verifier: newLoginSecret(row.roleName, 'READ_ONLY').verifier }
+    try {
+      return { row, mode, verifier: scramSha256Verifier(stored) }
+    } catch {
+      throw new Error(`The read-write login ${row.roleName} has a password SCRAM cannot carry. Rotate it, then move the project.`)
+    }
+  })
+  const present = new Set(
+    (
+      await db.$queryRaw<Array<{ rolname: string }>>`
+        SELECT rolname::text AS rolname FROM pg_roles WHERE rolname = ANY(${rows.map((r) => r.roleName)}::text[])`
+    ).map((r) => r.rolname),
+  )
+  const missing = secrets.filter((s) => !present.has(s.row.roleName))
+
+  // Made before the project's schema is copied in, because the copy names
+  // them (the read-write login's pass-through policies). The helper wants the
+  // schema the login is for: the database is new and holds none yet, so it is
+  // made empty for the helper and dropped again, and the copy makes it.
+  if (missing.length > 0) {
+    const [{ exists }] = await db.$queryRaw<Array<{ exists: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${schema}) AS exists`
+    if (!exists) await db.$executeRawUnsafe(`CREATE SCHEMA ${quoteIdent(schema)}`)
+    try {
+      for (const { row, mode, verifier } of missing) {
+        await db.$queryRaw`SELECT public.backenly_direct_create_role(${row.roleName}, ${verifier}, ${schema}, ${mode})`
+        await db.$queryRaw`SELECT public.backenly_direct_retire_role(${row.roleName}) AS retired`
+      }
+    } finally {
+      // Made here, empty, a moment ago: CASCADE takes only what registering
+      // it with the database's PostgREST registry may have put in it.
+      if (!exists) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
+    }
+  }
+
+  const carried: CarriedLogin[] = secrets.map(({ row, mode, verifier }) => {
+    const enc = encryptValue(verifier)
+    return {
+      mode,
+      roleName: row.roleName,
+      created: !present.has(row.roleName),
+      kept: { passwordCipher: enc.valueCipher, passwordIv: enc.valueIv, passwordTag: enc.valueTag },
+    }
+  })
+  const rw = carried.find((c) => c.mode === 'READ_WRITE')
+  if (rw) await db.$queryRaw`SELECT public.backenly_direct_set_schema_changes(${rw.roleName}, false) AS ok`
+  return carried
 }
 
 /**

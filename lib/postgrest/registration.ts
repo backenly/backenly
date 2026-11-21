@@ -56,7 +56,7 @@ function registryClient(target: RegistryTarget): WorkspaceRawClient {
   if (typeof target === 'string') return regionRawClient(target)
   return target.database === null ? regionRawClient(target.region) : databaseClient(target.region, target.database)
 }
-import { isChangeVaultSchema, projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { isChangeVaultSchema, isMovedSchema, projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 /**
  * The database a schema is registered in: its project's, in that project's
@@ -272,6 +272,30 @@ export async function registerSchemaByName(schema: string): Promise<Registration
 }
 
 /**
+ * registerSchemaByName in the database `db` reaches, rather than the one the
+ * schema's project resolves to: for a project whose data is being moved to a
+ * database of its own (lib/data-plane/tenancy-migration.ts), whose schemas are
+ * registered in the new database before its row names it. The same branch
+ * parity check, and the same refusal of a name the registry does not serve.
+ * Never throws; nothing is cached, since the cache is keyed by name and the
+ * same name may be served by another database.
+ */
+export async function registerSchemaOn(db: WorkspaceRawClient, schema: string): Promise<RegistrationResult> {
+  if (BRANCH_SCHEMA_RE.test(schema)) {
+    const parity = await verifyBranchProtection(db, schema.replace(/_br_[a-z0-9_]+$/, ''), schema)
+    if (!parity.ok) {
+      return { registered: false, schema, error: `Refusing to serve branch ${schema}: ${parity.reason}.` }
+    }
+  }
+  try {
+    await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_register_schema($1)`, schema)
+    return { registered: true, schema }
+  } catch (err) {
+    return { registered: false, schema, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
  * Every workspace schema that exists in Postgres but is missing from the
  * PostgREST registry.
  *
@@ -301,8 +325,9 @@ export async function unregisteredSchemas(target: RegistryTarget = HOME_REGION):
   )
 
   // A change vault is unregistered by design (lib/changes/preserve.ts): it
-  // keeps what a schema change removed and is never served.
-  return existing.map(e => e.schema_name).filter(s => !registered.has(s) && !isChangeVaultSchema(s))
+  // keeps what a schema change removed and is never served. So is what a move
+  // to a database of its own left behind (lib/data-plane/tenancy-migration.ts).
+  return existing.map(e => e.schema_name).filter(s => !registered.has(s) && !isChangeVaultSchema(s) && !isMovedSchema(s))
 }
 
 /** Raw SQL on the database the schemas are in: a client, or a transaction on it. */
