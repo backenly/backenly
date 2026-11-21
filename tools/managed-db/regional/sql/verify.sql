@@ -93,15 +93,23 @@ BEGIN
   END IF;
 
   -- The role that creates project databases, where the region has one: it
-  -- creates databases and does nothing else, and nothing the platform runs as
-  -- holds it (roles.sql).
+  -- creates and drops databases and does nothing else, holds the privileges of
+  -- pg_signal_backend and of no other role (DROP DATABASE ... WITH (FORCE)
+  -- needs them), and nothing the platform runs as holds it (roles.sql).
   FOR r IN SELECT p.* FROM pg_roles p WHERE p.rolname = 'backenly_dbcreator' LOOP
     IF r.rolsuper OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR r.rolinherit
        OR NOT r.rolcreatedb OR NOT r.rolcanlogin THEN
       problems := problems || 'role backenly_dbcreator must be LOGIN CREATEDB NOINHERIT, and NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS'::text;
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid) THEN
-      problems := problems || 'role backenly_dbcreator is a member of another role'::text;
+    IF EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid AND m.roleid <> 'pg_signal_backend'::regrole) THEN
+      problems := problems || format('role backenly_dbcreator is a member of %s; pg_signal_backend is the only role it may hold',
+        (SELECT string_agg(m.roleid::regrole::text, ', ') FROM pg_auth_members m
+          WHERE m.member = r.oid AND m.roleid <> 'pg_signal_backend'::regrole));
+    END IF;
+    IF NOT pg_has_role(r.oid, 'pg_signal_backend', 'USAGE') THEN
+      problems := problems || 'role backenly_dbcreator lacks the privileges of pg_signal_backend, so DROP DATABASE ... WITH (FORCE) cannot end the sessions in a project database'::text;
+    ELSIF pg_has_role(r.oid, 'pg_signal_backend', 'SET') THEN
+      problems := problems || 'role backenly_dbcreator can SET ROLE pg_signal_backend; it should hold its privileges only'::text;
     END IF;
     FOREACH rname IN ARRAY ARRAY['backenly_app', 'backenly_backup', 'backenly_authenticator',
                                  'anon', 'authenticated', 'service_role', 'backenly_external',

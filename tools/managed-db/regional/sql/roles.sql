@@ -25,13 +25,18 @@
 --                           is a member may not change the schema.
 --   backenly_dbcreator      creates the databases of projects that have one of
 --                           their own, by cloning backenly_project_template
---                           (sql/project-db.sql). LOGIN CREATEDB NOINHERIT, and
---                           otherwise the defaults: no other attribute, a member
---                           of no role, and no role the platform runs as is a
---                           member of it. Made only by a run that supplies its
---                           verifier, so a region with no use for it yet does
---                           not get it; once made, its password is kept like
---                           the others'.
+--                           (sql/project-db.sql), and drops them. LOGIN
+--                           CREATEDB NOINHERIT, and otherwise the defaults: no
+--                           other attribute, a member of pg_signal_backend and
+--                           of no other role, and no role the platform runs as
+--                           is a member of it. pg_signal_backend (with INHERIT,
+--                           without SET) because DROP DATABASE ... WITH (FORCE)
+--                           ends the sessions in the database only where the
+--                           role dropping it may signal them, and the logins of
+--                           a project's database are not the creator's. Made
+--                           only by a run that supplies its verifier, so a
+--                           region with no use for it yet does not get it; once
+--                           made, its password is kept like the others'.
 --   backenly_pooler_auth    the connection pooler's login (services/pooler): it
 --                           reads the verifier of a customer's login through
 --                           backenly_pooler.lookup in database backenly_pooler
@@ -298,7 +303,14 @@ BEGIN
   -- ── backenly_dbcreator ────────────────────────────────────────────────────
   -- Made only by a run that supplies its verifier (decided above). CREATEDB is
   -- named because cloning needs it; the administrator holds it, which is what
-  -- lets it give it. Never granted to any role, and no role is granted to it.
+  -- lets it give it. Never granted to any role. The one role granted to it is
+  -- pg_signal_backend, so that DROP DATABASE ... WITH (FORCE) as the database's
+  -- owner can end the sessions of the project's logins in it: PostgreSQL ends
+  -- only sessions the dropping role may signal, and pg_signal_backend is what
+  -- lets a role signal another's (never a superuser's). With INHERIT, because
+  -- the role is NOINHERIT and the check reads inherited privileges; without
+  -- SET, so it can never become pg_signal_backend. Granting it needs the ADMIN
+  -- option on pg_signal_backend, which the RDS master holds.
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_dbcreator')
      AND 'backenly_dbcreator' = ANY (to_set) THEN
     CREATE ROLE backenly_dbcreator LOGIN NOINHERIT CREATEDB;
@@ -306,6 +318,15 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_dbcreator') THEN
     ALTER ROLE backenly_dbcreator WITH NOINHERIT NOCREATEROLE;
+    IF NOT pg_has_role('backenly_dbcreator', 'pg_signal_backend', 'USAGE') THEN
+      BEGIN
+        GRANT pg_signal_backend TO backenly_dbcreator WITH INHERIT TRUE, SET FALSE;
+      EXCEPTION WHEN insufficient_privilege THEN
+        RAISE EXCEPTION 'refusing: % cannot give backenly_dbcreator the privileges of pg_signal_backend; it needs the ADMIN option on pg_signal_backend. Grant it as a role that has it, then run this again',
+          current_user;
+      END;
+      RAISE NOTICE 'gave backenly_dbcreator the privileges of pg_signal_backend';
+    END IF;
   END IF;
 
   -- ── backenly_pooler_auth ──────────────────────────────────────────────────

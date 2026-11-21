@@ -109,8 +109,11 @@ describe('roles.sql', () => {
   it('makes the database creator able to create databases and nothing else, and never grants it', () => {
     expect(code).toMatch(/CREATE ROLE backenly_dbcreator LOGIN NOINHERIT CREATEDB;/)
     expect(code.match(/CREATE ROLE backenly_dbcreator/g)).toHaveLength(1)
-    // Granted to no role, and no role granted to it, anywhere the procedure or
-    // the helpers it installs could do it.
+    // The one role granted to it: pg_signal_backend, inherited and never SET,
+    // so DROP DATABASE ... WITH (FORCE) can end the sessions in the database.
+    expect(code.match(/GRANT\s+pg_signal_backend\s+TO\s+backenly_dbcreator\s+WITH\s+INHERIT\s+TRUE,\s+SET\s+FALSE;/g)).toHaveLength(1)
+    // Granted to no role, and no other role granted to it, anywhere the
+    // procedure or the helpers it installs could do it.
     const everySql = [
       ...['roles.sql', 'project-db.sql', 'verify.sql', 'verify-project-db.sql'].map((f) => read(`${DIR}/sql/${f}`)),
       read('scripts/setup-direct-access.sql'),
@@ -120,7 +123,7 @@ describe('roles.sql', () => {
     ].map(withoutComments)
     for (const sql of everySql) {
       expect(sql).not.toMatch(/GRANT\s+backenly_dbcreator\b/i)
-      expect(sql).not.toMatch(/\bTO\s+backenly_dbcreator\b/i)
+      expect(sql.replace(/GRANT\s+pg_signal_backend\s+TO\s+backenly_dbcreator\b/g, '')).not.toMatch(/\bTO\s+backenly_dbcreator\b/i)
     }
   })
 

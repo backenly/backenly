@@ -352,6 +352,9 @@ beforeAll(async () => {
   // another only with the ADMIN option on it, which is what roles.sql needs to
   // give the application pg_read_all_stats.
   await rows(superUrl('postgres'), `GRANT pg_read_all_stats TO ${ADMIN} WITH ADMIN OPTION`)
+  // And pg_signal_backend, which roles.sql gives the database creator so that
+  // DROP DATABASE ... WITH (FORCE) can end the sessions in a project database.
+  await rows(superUrl('postgres'), `GRANT pg_signal_backend TO ${ADMIN} WITH ADMIN OPTION`)
   await rows(superUrl('postgres'), `CREATE DATABASE ${DB} OWNER ${ADMIN}`)
 
   vectorAvailable = (await rows(superUrl(), `SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`)).length > 0
@@ -1480,10 +1483,23 @@ suite('a project’s own database, cloned from the region’s template', () => {
       await rows(
         superUrl(),
         `SELECT rolcreatedb, rolcreaterole, rolsuper, rolinherit, rolbypassrls,
-                (SELECT count(*)::int FROM pg_auth_members m WHERE m.member = r.oid) AS member_of
+                (SELECT array_agg(m.roleid::regrole::text) FROM pg_auth_members m WHERE m.member = r.oid) AS member_of,
+                pg_has_role(r.oid, 'pg_signal_backend', 'USAGE') AS signals,
+                pg_has_role(r.oid, 'pg_signal_backend', 'SET') AS becomes
            FROM pg_roles r WHERE rolname = 'backenly_dbcreator'`,
       ),
-    ).toEqual([{ rolcreatedb: true, rolcreaterole: false, rolsuper: false, rolinherit: false, rolbypassrls: false, member_of: 0 }])
+    ).toEqual([
+      {
+        rolcreatedb: true,
+        rolcreaterole: false,
+        rolsuper: false,
+        rolinherit: false,
+        rolbypassrls: false,
+        member_of: ['pg_signal_backend'],
+        signals: true,
+        becomes: false,
+      },
+    ])
     // It reads nothing in the region's database, and creates nothing there.
     expect(await refusal(creatorUrl(), `SELECT count(*) FROM public.schema_drift_events`)).toMatch(/permission denied/)
     expect(await refusal(creatorUrl(), `CREATE SCHEMA creator_probe`)).toMatch(/permission denied/)
