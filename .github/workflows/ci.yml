@@ -348,6 +348,53 @@ jobs:
             console.log('install flags OK');
           "
 
+  # ── PostgREST host image ────────────────────────────────────────────────────
+  # services/pgrst-host runs one PostgREST process per project database. Its
+  # behaviour is tested in the static and integration jobs; this builds the
+  # image itself, so a Dockerfile that no longer builds, carries a different
+  # PostgREST, runs as root, or starts without its configuration fails here
+  # rather than in a release.
+  pgrst-host-image:
+    name: PostgREST host image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build --platform linux/amd64 -f services/pgrst-host/Dockerfile -t backenly-pgrst-host:ci .
+      - name: Runs as a non-root user, with the pinned PostgREST
+        run: |
+          set -euo pipefail
+          uid="$(docker run --rm --entrypoint id backenly-pgrst-host:ci -u)"
+          echo "runs as uid $uid"
+          test "$uid" != "0"
+          tag="$(sed -n 's/^ARG POSTGREST_IMAGE=postgrest\/postgrest:v\([0-9.]*\)@.*/\1/p' services/pgrst-host/Dockerfile)"
+          test -n "$tag"
+          docker run --rm --entrypoint /usr/local/bin/postgrest backenly-pgrst-host:ci --version | tee version.txt
+          grep -F "$tag" version.txt
+      - name: Refuses to start unconfigured, answers /ready configured, refuses an unauthenticated request
+        run: |
+          set -euo pipefail
+          if docker run --rm backenly-pgrst-host:ci; then
+            echo "the host started without PGRST_HOST_JWT_SECRET and PGRST_HOST_DB_URI"; exit 1
+          fi
+          docker run -d --name pgrst-host -p 127.0.0.1:3200:3200 \
+            -e PGRST_HOST_JWT_SECRET="$(openssl rand -hex 32)" \
+            -e PGRST_HOST_DB_URI=postgresql://authenticator:unused@127.0.0.1:1/postgres \
+            backenly-pgrst-host:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3200/ready; then echo; break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3200/ready
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3200/p/00000000-0000-4000-8000-000000000000/items)"
+          echo "unauthenticated request -> $code"
+          test "$code" = "401"
+          docker logs pgrst-host
+          docker rm -f pgrst-host > /dev/null
+
   # ── Database-backed ─────────────────────────────────────────────────────────
   # The second half of #7: suites that were never named in any job and need a
   # real database to run at all.
@@ -442,7 +489,12 @@ jobs:
         run: npx tsc --noEmit -p tsconfig.json
 
       # The flagship proof. No edition, no overlay, no private repository.
+      # With the heap docker/web.Dockerfile gives the same build: next build
+      # type-checks the whole tree in one worker, which outgrows Node's default
+      # heap and dies before reporting anything.
       - name: Build
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm run build
 
   # dead database. They now use TEST_DATABASE_URL like everything else.
@@ -546,6 +598,24 @@ jobs:
           "$PG_BINDIR/initdb" --version | grep -E '\(PostgreSQL\) 16\.'
           "$PG_BINDIR/psql" --version | grep -E '\(PostgreSQL\) 16\.'
           test -f /usr/share/postgresql/16/extension/vector.control
+
+      # tests/integration/pgrst-host.spec.ts runs the PostgREST host with the
+      # real postgrest binary, one child per project database. The binary is
+      # taken from the very image and digest services/pgrst-host/Dockerfile
+      # copies it from, so the suite tests what the image runs. It is a static
+      # executable and runs on the runner as it is.
+      - name: PostgREST binary for the PostgREST host suite
+        run: |
+          set -euo pipefail
+          image="$(sed -n 's/^ARG POSTGREST_IMAGE=//p' services/pgrst-host/Dockerfile)"
+          test -n "$image"
+          docker pull -q "$image"
+          cid="$(docker create "$image")"
+          mkdir -p "$RUNNER_TEMP/postgrest"
+          docker cp "$cid:/bin/postgrest" "$RUNNER_TEMP/postgrest/postgrest"
+          docker rm "$cid" > /dev/null
+          "$RUNNER_TEMP/postgrest/postgrest" --version
+          echo "PGRST_HOST_BINARY=$RUNNER_TEMP/postgrest/postgrest" >> "$GITHUB_ENV"
 
       # One worker, one file at a time: these share one database and several
       # seed and delete the same User and Project rows. --forceExit for the same
@@ -1313,7 +1383,9 @@ jobs:
       - name: build and start the app
         run: |
           set -euo pipefail
-          npm run build
+          # The heap docker/web.Dockerfile gives the same build (see the
+          # default OSS build job); set for the build only, not the server.
+          NODE_OPTIONS=--max-old-space-size=6144 npm run build
           # Started detached and waited for. `npm run dev` would also work but
           # rebuilds on demand, which makes the first navigation in every spec
           # look like a slow page rather than a slow compile.

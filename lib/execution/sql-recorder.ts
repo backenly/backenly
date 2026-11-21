@@ -44,8 +44,9 @@
  * are kept for a home project's repairs, and dropped for a project kept in
  * another region and for a held action, whose records keep the statement text
  * only. The recorder goes on each client a governed action's statements are
- * sent from: the platform client, and the workspace client of the project's
- * region (lib/data-plane/regional.ts), which for a home project is the home
+ * sent from: the platform client, and every workspace client
+ * (lib/data-plane/regional.ts installs it as it creates each region's client
+ * and each project database's), which for a home project is the home
  * workspace client rather than the platform one. Text and values are both
  * bounded in size: an audit row is a record, not a log sink.
  */
@@ -166,15 +167,17 @@ export function isCapturing(): boolean {
 let installedOn = new WeakSet<object>()
 
 /**
- * Attach the recorder to a Prisma client: the platform client, or the workspace
- * client of a project's region (lib/data-plane/regional.ts).
+ * Attach the recorder to a Prisma client: the platform client, or a workspace
+ * client (lib/data-plane/regional.ts).
  *
- * Idempotent per client, and installed lazily, by the auto-fix engine and by a
- * governed change (lib/changes/ledger.ts), rather than at module load: a
- * middleware on a shared client is a global side effect, and it should exist
- * because something is about to capture, not because a module was imported. A
- * client created later, as a workspace client is after disconnectRegionalClients,
- * gets it at the next install.
+ * Idempotent per client. The platform client gets it lazily, from the auto-fix
+ * engine and a governed change (lib/changes/ledger.ts), rather than at module
+ * load: a middleware on the shared client is a global side effect, and it
+ * should exist because something is about to capture, not because a module
+ * was imported. Workspace clients get it from the code that creates them,
+ * before anything is sent on them, so none is missed: a region's client
+ * created again after disconnectRegionalClients, or a client opened for a
+ * project's own database.
  *
  * `$use` mutates the existing client in place. `$extends` would return a new one
  * and every `import { prisma }` in the codebase would keep the un-extended

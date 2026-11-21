@@ -46,12 +46,7 @@ export async function detectPendingSchemaDrift(projectId: string): Promise<RawFi
   // that fails throws: computeDesiredStateDiff then reports this invariant as
   // not checked. It used to answer [] ("no drift"), which turned an unreadable
   // event table into a clean bill of health for exactly the changes it records.
-  const events = await (await projectDriftEvents(projectId)).findMany({
-    where: { projectId, status: 'pending' },
-    orderBy: { capturedAt: 'asc' },
-    take: 200,
-    select: { id: true, roleName: true, commandTag: true, objectIdentity: true, capturedAt: true },
-  })
+  const events = await (await projectDriftEvents(projectId)).pending(projectId, { take: 200 })
   if (events.length === 0) return []
 
   const commands: Record<string, number> = {}
@@ -136,10 +131,7 @@ export async function adoptExternalSchema(
   registerTable?: (tableName: string) => Promise<boolean>,
 ): Promise<AdoptExternalSchemaResult> {
   const driftEvents = await projectDriftEvents(projectId)
-  const events = await driftEvents.findMany({
-    where: { projectId, status: 'pending' },
-    select: { id: true, commandTag: true, objectIdentity: true, schemaName: true },
-  })
+  const events = await driftEvents.pending(projectId)
 
   const { resolveWorkspaceSchema } = await import('@/lib/services/workspace-pool')
   const schema = await resolveWorkspaceSchema(projectId)
@@ -296,13 +288,10 @@ export async function adoptExternalSchema(
 
   const marked =
     outcome === 'unverified'
-      ? { count: 0 }
-      : await driftEvents.updateMany({
-          // Only the events this pass read: one captured while it ran has not
-          // been reconciled, and retiring it would lose the only record of it.
-          where: { projectId, status: 'pending', id: { in: events.map(e => e.id) } },
-          data: { status: 'adopted', resolvedAt: new Date() },
-        })
+      ? 0
+      : // Only the events this pass read: one captured while it ran has not
+        // been reconciled, and retiring it would lose the only record of it.
+        await driftEvents.adopt(projectId, events.map(e => e.id), new Date())
 
   await prisma.auditLog.create({
     data: {
@@ -312,7 +301,7 @@ export async function adoptExternalSchema(
       details: JSON.stringify({
         outcome,
         reason,
-        adoptedEvents: marked.count,
+        adoptedEvents: marked,
         registeredTables,
         refreshedTables,
         prunedTables,
@@ -325,7 +314,7 @@ export async function adoptExternalSchema(
   return {
     outcome,
     reason,
-    adoptedEvents: marked.count,
+    adoptedEvents: marked,
     registeredTables,
     refreshedTables,
     prunedTables,
@@ -341,7 +330,7 @@ export async function adoptExternalSchema(
  */
 export async function reapDriftFindings(projectId: string): Promise<number> {
   const pending = await projectDriftEvents(projectId)
-    .then((events) => events.count({ where: { projectId, status: 'pending' } }))
+    .then((events) => events.countPending(projectId))
     .catch(() => -1)
   if (pending !== 0) return 0 // events remain (or count failed) — never reap on uncertainty
 
