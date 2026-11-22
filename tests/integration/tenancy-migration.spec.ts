@@ -926,6 +926,27 @@ suite('a project whose data instance is another instance, moved with its logins'
     }
   })
 
+  it("refuses a project whose policy names a role the data instance does not have, before anything is made", async () => {
+    const LEGACY = 'tenancy_legacy_reader'
+    const databases = async () =>
+      (await rows<{ datname: string }>(superUrlOn(dataCluster, dataCluster.db), `SELECT datname::text AS datname FROM pg_database ORDER BY 1`)).map((r) => r.datname)
+    const before = await databases()
+    await rows(superUrl(), `CREATE ROLE ${LEGACY} NOLOGIN; CREATE POLICY legacy_read ON "${schema}".secrets FOR SELECT TO ${LEGACY} USING (true)`)
+    try {
+      const { migrateProjectToOwnDatabase } = await import('@/lib/data-plane/tenancy-migration')
+      const report = await migrateProjectToOwnDatabase(projectId, { waits: FAST })
+      expect(report).toMatchObject({ outcome: 'refused', code: 'policy_role' })
+      expect(report.reason).toContain(LEGACY)
+      expect(await databases()).toEqual(before)
+      expect(await prisma.project.findUnique({ where: { id: projectId }, select: { databaseTenancy: true, pausedAt: true } })).toEqual({
+        databaseTenancy: 'shared',
+        pausedAt: null,
+      })
+    } finally {
+      await rows(superUrl(), `DROP POLICY IF EXISTS legacy_read ON "${schema}".secrets; DROP ROLE IF EXISTS ${LEGACY}`)
+    }
+  })
+
   it('signs each login in on the other instance, the read-write one with its old password, and leaves none behind', async () => {
     // Before: on the region's instance, and nowhere on the data instance.
     expect(await roles(superUrl(), [ro, rw, fnRole])).toEqual([ro, rw, fnRole].sort())

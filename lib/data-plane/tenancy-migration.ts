@@ -184,11 +184,14 @@ import {
   defaultWaits,
   CARRIED_GRANTEES,
   dropPoliciesSql,
+  mapPolicyRoles,
+  policyRolesMissing,
   postgrestProbeTable,
   privilegeDifferences,
   privilegeStatements,
   splitRestoreList,
   type ObjectPrivileges,
+  withPolicyRoles,
   type MigrationCheck,
   type MigrationReport,
   type MigrationStep,
@@ -296,6 +299,8 @@ interface MoveContext {
   epoch: number
   /** Whether the region's data instance is the instance its shared database is on (it is not in the home region). */
   sameInstance: boolean
+  /** The application's role in the shared database, which a policy made TO CURRENT_USER names (mapPolicyRoles). */
+  sourceApp: string
 }
 
 interface Run {
@@ -614,6 +619,34 @@ async function preconditions(run: Run): Promise<Prepared> {
     }
   }
 
+  // Every role the moved schemas' policies name must be one the data instance
+  // has, the application's own (named as the data instance names it), or one
+  // of the project's logins, made there before the replay
+  // (tenancy-migration-rules.ts mapPolicyRoles has why).
+  const [{ app: sourceApp }] = await shared.$queryRawUnsafe<Array<{ app: string }>>(`SELECT current_user::text AS app`)
+  const named = (
+    await shared.$queryRaw<Array<{ role: string }>>`
+      SELECT DISTINCT r.rolname::text AS role
+        FROM pg_policy pol
+        JOIN pg_class c ON c.oid = pol.polrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN LATERAL unnest(pol.polroles) AS pr(roid)
+        JOIN pg_roles r ON r.oid = pr.roid
+       WHERE n.nspname = ANY(${schemas}::text[])`
+  ).map((r) => r.role)
+  if (named.length > 0) {
+    const onDataInstance = new Set(
+      (
+        await dataInstanceRawClient(region).$queryRaw<Array<{ rolname: string }>>`
+          SELECT rolname::text AS rolname FROM pg_roles WHERE rolname = ANY(${named}::text[])`
+      ).map((r) => r.rolname),
+    )
+    const missing = policyRolesMissing(named, onDataInstance, sourceApp, new Set(credentials.map((c) => c.roleName)))
+    if (missing.length > 0) {
+      throw new Refusal('policy_role', `a policy names ${missing.join(', ')}, which the region's data instance does not have`)
+    }
+  }
+
   const served = await servedAmong(shared, schemas)
   log(
     run,
@@ -635,6 +668,7 @@ async function preconditions(run: Run): Promise<Prepared> {
       extensions,
       epoch: row.tenancyEpoch,
       sameInstance: sameInstance(region),
+      sourceApp,
     },
   }
 }
@@ -786,7 +820,11 @@ async function dump(run: Run, ctx: MoveContext): Promise<string> {
  * source's policies and the comments on them. Returns the script and every
  * file made on the way, which the caller removes: they hold the project's rows.
  */
-async function replayScript(file: string, schemas: string[]): Promise<{ script: string; made: string[] }> {
+async function replayScript(
+  file: string,
+  schemas: string[],
+  app: { from: string; to: string },
+): Promise<{ script: string; made: string[]; mapped: number }> {
   const base = file.replace(/\.dump$/, '')
   const restList = `${base}.rest.list`
   const policyList = `${base}.policies.list`
@@ -808,8 +846,9 @@ async function replayScript(file: string, schemas: string[]): Promise<{ script: 
     await restore(policyList, policySql)
     await fs.promises.rename(restSql, script)
     await fs.promises.appendFile(script, dropPoliciesSql(schemas))
-    await fs.promises.appendFile(script, await fs.promises.readFile(policySql))
-    return { script, made }
+    const restored = mapPolicyRoles(await fs.promises.readFile(policySql, 'utf8'), app.from, app.to)
+    await fs.promises.appendFile(script, restored.sql)
+    return { script, made, mapped: restored.mapped }
   } catch (err) {
     await removeFiles(made)
     throw err
@@ -838,7 +877,12 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
     run.createdOnTarget.push(...run.carried.filter((c) => c.created).map((c) => c.roleName))
   }
 
-  const { script, made } = await replayScript(file, ctx.schemas)
+  // The application's role there: the role the replay runs as, which a policy
+  // made TO CURRENT_USER names in this database from now on.
+  const px = databaseClient(ctx.region, database, projectId)
+  const [{ app }] = await px.$queryRawUnsafe<Array<{ app: string }>>(`SELECT current_user::text AS app`)
+  const { script, made, mapped } = await replayScript(file, ctx.schemas, { from: ctx.sourceApp, to: app })
+  if (mapped > 0) log(run, 'replay', `${mapped} policy(ies) for the application name its role here, ${app}, not ${ctx.sourceApp}`)
   try {
     await execFileAsync('psql', [...write.args, '-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '--file', script], {
       timeout: REPLAY_TIMEOUT_MS,
@@ -849,7 +893,6 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
     await removeFiles(made)
   }
 
-  const px = databaseClient(ctx.region, database, projectId)
   const present = (
     await px.$queryRaw<Array<{ name: string }>>`SELECT nspname::text AS name FROM pg_namespace WHERE nspname = ANY(${ctx.schemas}::text[])`
   ).map((r) => r.name)
@@ -1114,7 +1157,7 @@ async function verify(run: Run, ctx: MoveContext, sharedLock: PoolClient, pxLock
   const owners = new Set([app, directAccessRoleNames(projectId).owner])
 
   for (const schema of ctx.schemas.filter((s) => there.includes(s))) {
-    const before = await readCatalogOn(sharedLock, schema)
+    const before = withPolicyRoles(await readCatalogOn(sharedLock, schema), ctx.sourceApp, app)
     const after = await readCatalogOn(pxLock, schema)
     catalogProblems.push(...catalogDifferences(before, after).map((d) => `${schema}: ${d}`))
 

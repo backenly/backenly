@@ -15,11 +15,14 @@ import {
   defaultWaits,
   describeOutcome,
   dropPoliciesSql,
+  mapPolicyRoles,
   parseMigrationArgs,
+  policyRolesMissing,
   postgrestProbeTable,
   privilegeDifferences,
   privilegeStatements,
   splitRestoreList,
+  withPolicyRoles,
 } from '@/lib/data-plane/tenancy-migration-rules'
 import type { CatalogSnapshot, TableState } from '@/lib/changes/catalog'
 import {
@@ -287,5 +290,73 @@ describe("PUBLIC's and the API roles' privileges, carried exactly", () => {
     // Only the carried grantees and plain privilege names are ever written into a statement.
     expect(() => privilegeStatements({ ...notes, grants: ['postgres SELECT'] })).toThrow()
     expect(() => privilegeStatements({ ...notes, grants: ['anon SELECT; DROP TABLE x'] })).toThrow()
+  })
+})
+
+describe("a policy made for the application, named as the database it moved to names the application's role", () => {
+  // As pg_restore writes the policies of a project whose structural evolution made its ladder TO CURRENT_USER on an
+  // instance whose application role is backenly_user, beside direct access's and a person's own.
+  const restored = [
+    '--',
+    '-- Name: users bkn_evo_hsee_48cfce7883; Type: POLICY; Schema: workspace_0b1c; Owner: -',
+    '--',
+    '',
+    'CREATE POLICY bkn_evo_hsee_48cfce7883 ON workspace_0b1c.users FOR SELECT TO backenly_user USING ((current_setting(\'bkn.evo_48cfce7883\'::text, true) = \'on\'::text));',
+    '',
+    'CREATE POLICY bkn_evo_hlck_48cfce7883 ON workspace_0b1c.users FOR UPDATE TO backenly_user USING ((current_setting(\'bkn.evo_48cfce7883\'::text, true) = \'on\'::text)) WITH CHECK (false);',
+    '',
+    'CREATE POLICY bkn_evo_own_48cfce7883 ON workspace_0b1c.user_oauths TO backenly_user USING (true) WITH CHECK (true);',
+    '',
+    'CREATE POLICY bkn_direct_read ON workspace_0b1c.users FOR SELECT TO backenly_external USING (true);',
+    '',
+    "CREATE POLICY \"Owner, or backenly_user\" ON workspace_0b1c.\"Notes\" AS RESTRICTIVE FOR DELETE TO authenticated, backenly_user, \"odd\"\"role\" USING ((CURRENT_USER = 'backenly_user'::name));",
+    '',
+    "CREATE POLICY everyone ON workspace_0b1c.notes USING ((owner_id = auth.uid()));",
+    '',
+    "COMMENT ON POLICY bkn_evo_own_48cfce7883 ON workspace_0b1c.user_oauths IS 'TO backenly_user';",
+    '',
+  ].join('\n')
+
+  it("renames the application's role in each policy's TO list, and nowhere else", () => {
+    const { sql, mapped } = mapPolicyRoles(restored, 'backenly_user', 'backenly_app')
+    expect(mapped).toBe(4)
+    expect(sql).toContain('ON workspace_0b1c.users FOR SELECT TO "backenly_app" USING ((current_setting(')
+    expect(sql).toContain('ON workspace_0b1c.users FOR UPDATE TO "backenly_app" USING (')
+    expect(sql).toContain('ON workspace_0b1c.user_oauths TO "backenly_app" USING (true) WITH CHECK (true);')
+    expect(sql).toContain('AS RESTRICTIVE FOR DELETE TO authenticated, "backenly_app", "odd""role" USING ((CURRENT_USER = \'backenly_user\'::name));')
+    // Another role, a policy for PUBLIC, a comment, a policy's name and an expression stay exactly as they were.
+    expect(sql).toContain('CREATE POLICY bkn_direct_read ON workspace_0b1c.users FOR SELECT TO backenly_external USING (true);')
+    expect(sql).toContain('CREATE POLICY everyone ON workspace_0b1c.notes USING ((owner_id = auth.uid()));')
+    expect(sql).toContain("COMMENT ON POLICY bkn_evo_own_48cfce7883 ON workspace_0b1c.user_oauths IS 'TO backenly_user';")
+    expect(sql).toContain('CREATE POLICY "Owner, or backenly_user" ON workspace_0b1c."Notes"')
+    expect(sql.split('\n').length).toBe(restored.split('\n').length)
+  })
+
+  it('changes nothing where the two roles are the same, as on a region whose data instance is its shared database', () => {
+    expect(mapPolicyRoles(restored, 'backenly_app', 'backenly_app')).toEqual({ sql: restored, mapped: 0 })
+    expect(mapPolicyRoles(restored, 'someone_else', 'backenly_app')).toEqual({ sql: restored, mapped: 0 })
+    expect(() => mapPolicyRoles(restored, '', 'backenly_app')).toThrow()
+  })
+
+  it("compares the source's policies read the same way, so the verification still compares every role", () => {
+    const policy = { name: 'bkn_evo_own_48cfce7883', cmd: '*', permissive: true, using: 'true', check: 'true' }
+    const source: CatalogSnapshot = {
+      schema: 'workspace_0b1c',
+      capturedAt: '2026-11-22T00:00:00.000Z',
+      tables: { user_oauths: table('user_oauths', { policies: [{ ...policy, roles: ['backenly_user'] }] }) },
+    }
+    const moved: CatalogSnapshot = { ...source, tables: { user_oauths: table('user_oauths', { policies: [{ ...policy, roles: ['backenly_app'] }] }) } }
+    expect(catalogDifferences(source, moved)).toEqual(['table user_oauths differs'])
+    expect(catalogDifferences(withPolicyRoles(source, 'backenly_user', 'backenly_app'), moved)).toEqual([])
+    // Any other role still has to be there as it was.
+    const other: CatalogSnapshot = { ...source, tables: { user_oauths: table('user_oauths', { policies: [{ ...policy, roles: ['backenly_external'] }] }) } }
+    expect(catalogDifferences(withPolicyRoles(source, 'backenly_user', 'backenly_app'), other)).toEqual(['table user_oauths differs'])
+    expect(withPolicyRoles(source, 'backenly_app', 'backenly_app')).toBe(source)
+  })
+
+  it("refuses only a role the data instance lacks that is neither the application's nor a login made there first", () => {
+    const onData = new Set(['backenly_external', 'authenticated'])
+    expect(policyRolesMissing(['backenly_user', 'backenly_external', 'authenticated', 'bkn_rw_0b1c2d3e4f50'], onData, 'backenly_user', new Set(['bkn_rw_0b1c2d3e4f50']))).toEqual([])
+    expect(policyRolesMissing(['legacy_reader', 'backenly_user', 'legacy_reader'], onData, 'backenly_user', new Set())).toEqual(['legacy_reader'])
   })
 })
