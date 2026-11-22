@@ -17,7 +17,10 @@
  * its data instance (no DATA_* variable). The project is made shared, as every
  * project before the move, and
  * given what a real one has: tables with rows, one under FORCE ROW LEVEL
- * SECURITY with a policy, a sequence moved on, a column of an allowlisted
+ * SECURITY with a policy, one as Backenly makes every table (deleted_at, row
+ * level security on, and so the data plane's soft-delete policy, which the
+ * project database's own event trigger makes again as a replay restores the
+ * table), a sequence moved on, a column of an allowlisted
  * extension the project installed (citext), a preview branch PostgREST serves,
  * a change vault, a captured webhook event waiting in its outbox, a realtime
  * channel and its functions' login.
@@ -430,6 +433,16 @@ suite('a project moved from its region’s shared database into a database of it
   const sequences = async (connection: string) =>
     rows<{ v: string; c: boolean }>(connection, `SELECT last_value::text AS v, is_called AS c FROM "${schema}".notes_id_seq`)
 
+  /** Every policy in these schemas of a database: a move carries them exactly, no more and no fewer. */
+  const policies = async (connection: string, schemas: string[]) =>
+    rows<{ schemaname: string; tablename: string; policyname: string; permissive: string; roles: string[]; cmd: string; qual: string | null; with_check: string | null }>(
+      connection,
+      `SELECT schemaname::text AS schemaname, tablename::text AS tablename, policyname::text AS policyname, permissive,
+              roles::text[] AS roles, cmd, qual, with_check
+         FROM pg_policies WHERE schemaname = ANY($1::text[]) ORDER BY 1, 2, 3`,
+      [schemas],
+    )
+
   const served = async (connection: string) =>
     (await rows<{ list: string }>(connection, `SELECT public.backenly_pgrst_current_schemas() AS list`))[0].list.split(',').filter(Boolean).sort()
 
@@ -445,6 +458,7 @@ suite('a project moved from its region’s shared database into a database of it
     return {
       row,
       digests: await digests(superUrl(), [schema, branch, vault]),
+      policies: await policies(superUrl(), [schema, branch, vault]),
       sequence: await sequences(superUrl()),
       served: await served(superUrl()),
       channel: (await channelIn(superUrl(), schema)) === channel,
@@ -492,6 +506,9 @@ suite('a project moved from its region’s shared database into a database of it
          WITH CHECK (current_setting('app.is_service_role', true) = 'true');
        SELECT set_config('app.is_service_role', 'true', false);
        INSERT INTO "${schema}".secrets VALUES (1, 'kept under row security'), (2, 'and this');
+       CREATE TABLE "${schema}".authors (id integer PRIMARY KEY, name text NOT NULL, deleted_at timestamptz);
+       ALTER TABLE "${schema}".authors ENABLE ROW LEVEL SECURITY;
+       INSERT INTO "${schema}".authors VALUES (1, 'kept', NULL), (2, 'deleted', now());
 
        CREATE SCHEMA "${branch}";
        CREATE TABLE "${branch}".secrets (id integer PRIMARY KEY, value text NOT NULL);
@@ -507,6 +524,11 @@ suite('a project moved from its region’s shared database into a database of it
     )
     const { registerSchemaByName } = await import('@/lib/postgrest/registration')
     expect(await registerSchemaByName(branch)).toMatchObject({ registered: true })
+    // The data plane's event trigger gave it the soft-delete policy as row level security went on. A replay in the
+    // dump's own order made it again in the project's database and then failed on the dump's own CREATE POLICY.
+    expect((await policies(superUrl(), [schema])).filter((r) => r.tablename === 'authors').map((r) => r.policyname)).toEqual([
+      'bkn_pgrst_soft_delete',
+    ])
 
     // A captured row event, not yet a delivery, for an endpoint that listens.
     const { ensureOutbox } = await import('@/lib/webhooks/capture')
@@ -577,6 +599,7 @@ suite('a project moved from its region’s shared database into a database of it
     expect(report.verification?.tables).toEqual(
       expect.arrayContaining([
         { schema, table: 'secrets', sourceRows: 2, targetRows: 2, checksumsEqual: true },
+        { schema, table: 'authors', sourceRows: 2, targetRows: 2, checksumsEqual: true },
         { schema, table: 'notes', sourceRows: 4, targetRows: 4, checksumsEqual: true },
         { schema: branch, table: 'drafts', sourceRows: 1, targetRows: 1, checksumsEqual: true },
         { schema: vault, table: 'kept', sourceRows: 1, targetRows: 1, checksumsEqual: true },
@@ -629,6 +652,8 @@ suite('a project moved from its region’s shared database into a database of it
     // Every row of every schema, as the superuser sees them, and the sequence.
     expect(await digests(superUrl(database), [schema, branch, vault])).toEqual(before.digests)
     expect(await sequences(superUrl(database))).toEqual(before.sequence)
+    // Every policy as it was, the data plane's soft-delete one once, and none the project database's triggers added.
+    expect(await policies(superUrl(database), [schema, branch, vault])).toEqual(before.policies)
     expect(await rows(superUrl(database), `SELECT extname FROM pg_extension WHERE extname = 'citext'`)).toEqual([{ extname: 'citext' }])
     // The same channel name, so every stream label and listener finds it there.
     expect(await channelIn(superUrl(database), schema)).toBe(channel)

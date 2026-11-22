@@ -305,3 +305,69 @@ export function parseMigrationArgs(argv: string[], knownRegions: readonly string
     dryRun: flags.has('--dry-run'),
   }
 }
+
+// ── The replay's order ───────────────────────────────────────────────────────
+
+/**
+ * A project database is cloned from a template whose event triggers act as
+ * tables change: the data plane adds its soft-delete policy to every table in a
+ * served schema that has row level security on and a deleted_at column
+ * (backenly_pgrst_on_ddl, scripts/sql/postgrest-ddl-sync.sql). Replayed in the
+ * dump's own order, `ALTER TABLE … ENABLE ROW LEVEL SECURITY` makes that policy,
+ * and the dump's own `CREATE POLICY` for it then fails, so every table Backenly
+ * made (each has deleted_at and starts closed) stopped a move at replay.
+ *
+ * So the replay restores every entry but the policies, then drops whatever
+ * policy the triggers made in the moved schemas (dropPoliciesSql), then
+ * restores the source's policies exactly as they were, with the comments on
+ * them. The target ends with the source's policies, no more and no fewer, and
+ * the verification compares them as before.
+ *
+ * `pg_restore --list` prints one entry a line, `<id>; <tableoid> <oid> <type>
+ * <schema> <name> <owner>` (PostgreSQL 16, pg_backup_archiver.c
+ * PrintTOCSummary), and lines starting with `;` are comments. A policy's type
+ * is POLICY; a comment on one is type COMMENT with a name starting `POLICY `.
+ * The moved schemas are Backenly's own names, so the schema is one word.
+ */
+export function splitRestoreList(list: string): { rest: string; policies: string } {
+  const rest: string[] = []
+  const policies: string[] = []
+  for (const line of list.split('\n')) {
+    const entry = /^\d+; \d+ \d+ (.*)$/.exec(line)?.[1]
+    if (entry === undefined) {
+      rest.push(line)
+      policies.push(line)
+    } else if (entry.startsWith('POLICY ') || /^COMMENT \S+ POLICY /.test(entry)) {
+      policies.push(line)
+    } else {
+      rest.push(line)
+    }
+  }
+  return { rest: rest.join('\n'), policies: policies.join('\n') }
+}
+
+/**
+ * Between the two halves of the replay (splitRestoreList): every policy in the
+ * moved schemas is dropped. They are only what the template's event triggers
+ * made as the tables were restored; the source's follow.
+ */
+export function dropPoliciesSql(schemas: string[]): string {
+  if (schemas.length === 0) throw new Error('dropPoliciesSql needs the moved schemas')
+  const names = schemas.map((schema) => `'${schema.replace(/'/g, "''")}'`).join(', ')
+  return [
+    '',
+    "-- Backenly: the policies the project database's own event triggers made as the tables above were restored,",
+    "-- dropped, so that the source's policies, which follow, are restored exactly as they were.",
+    'DO $backenly_replay$',
+    'DECLARE p record;',
+    'BEGIN',
+    '  FOR p IN SELECT schemaname, tablename, policyname FROM pg_catalog.pg_policies',
+    `           WHERE schemaname = ANY (ARRAY[${names}]::text[])`,
+    '  LOOP',
+    "    EXECUTE pg_catalog.format('DROP POLICY %I ON %I.%I', p.policyname, p.schemaname, p.tablename);",
+    '  END LOOP;',
+    'END',
+    '$backenly_replay$;',
+    '',
+  ].join('\n')
+}

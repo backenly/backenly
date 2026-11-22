@@ -14,7 +14,9 @@ import {
   catalogDifferences,
   defaultWaits,
   describeOutcome,
+  dropPoliciesSql,
   parseMigrationArgs,
+  splitRestoreList,
 } from '@/lib/data-plane/tenancy-migration-rules'
 import type { CatalogSnapshot, TableState } from '@/lib/changes/catalog'
 import {
@@ -186,5 +188,50 @@ describe('the doors, while a project moves', () => {
     const details = pausedDetails(randomUUID(), { pausedAt: new Date(), reason: MIGRATING_PAUSE_REASON })
     expect(details.hint).toMatch(/serves again by itself/)
     expect(pausedMessage('inactive')).toBe(PAUSED_MESSAGE)
+  })
+})
+
+describe('the replay restores the policies last', () => {
+  // pg_restore --list of a moved project's dump, as PostgreSQL 16 prints it: a table under row level security with
+  // the data plane's soft-delete policy and a comment on a policy, beside the entries that must stay in order.
+  const list = [
+    ';',
+    '; Archive created at 2026-11-22 11:49:21 UTC',
+    ';',
+    '; Selected TOC Entries:',
+    ';',
+    '6; 2615 16390 SCHEMA - workspace_0b1c backenly_backup',
+    '220; 1259 16402 TABLE workspace_0b1c authors backenly_backup',
+    '221; 1259 16408 TABLE workspace_0b1c secrets backenly_backup',
+    '3401; 0 16402 TABLE DATA workspace_0b1c authors backenly_backup',
+    '3250; 2606 16407 CONSTRAINT workspace_0b1c authors authors_pkey backenly_backup',
+    '3402; 0 0 ROW SECURITY workspace_0b1c authors backenly_backup',
+    '3403; 3256 16409 POLICY workspace_0b1c authors bkn_pgrst_soft_delete backenly_backup',
+    '3404; 3256 16410 POLICY workspace_0b1c secrets "Owners only" backenly_backup',
+    '3405; 0 0 COMMENT workspace_0b1c POLICY "Owners only" ON secrets backenly_backup',
+    '3406; 0 0 COMMENT workspace_0b1c TABLE authors backenly_backup',
+    '',
+  ].join('\n')
+
+  it('keeps every entry but the policies, in order, and puts the policies and the comments on them in the second half', () => {
+    const { rest, policies } = splitRestoreList(list)
+    const entries = (text: string) => text.split('\n').filter((l) => /^\d+;/.test(l)).map((l) => l.split(';')[0])
+    expect(entries(rest)).toEqual(['6', '220', '221', '3401', '3250', '3402', '3406'])
+    expect(entries(policies)).toEqual(['3403', '3404', '3405'])
+    // The comment lines go to both, so each half is a list pg_restore reads as given.
+    expect(rest.startsWith(';\n; Archive created')).toBe(true)
+    expect(policies.startsWith(';\n; Archive created')).toBe(true)
+    // Nothing is lost or repeated.
+    expect([...entries(rest), ...entries(policies)].sort()).toEqual(entries(list).sort())
+  })
+
+  it('drops only the policies of the moved schemas, by their names', () => {
+    const sql = dropPoliciesSql(['workspace_0b1c', 'workspace_0b1c_br_preview'])
+    expect(sql).toContain("WHERE schemaname = ANY (ARRAY['workspace_0b1c', 'workspace_0b1c_br_preview']::text[])")
+    expect(sql).toContain("pg_catalog.format('DROP POLICY %I ON %I.%I', p.policyname, p.schemaname, p.tablename)")
+    expect(sql).toMatch(/^\n-- Backenly:/)
+    expect(sql.trimEnd().endsWith('$backenly_replay$;')).toBe(true)
+    expect(dropPoliciesSql(["it's"])).toContain("ARRAY['it''s']")
+    expect(() => dropPoliciesSql([])).toThrow()
   })
 })

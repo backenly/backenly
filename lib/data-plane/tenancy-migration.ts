@@ -42,10 +42,14 @@
  *   4  snapshot       a snapshot (backupWorkspace), the usual safety copy.
  *   5  dump           the backup role is given read on the branch and vault
  *                     schemas (it already reads the canonical one), then
- *                     pg_dump of exactly the schemas resolveProjectSchemas
- *                     lists, by name, never a pattern.
+ *                     pg_dump (archive format) of exactly the schemas
+ *                     resolveProjectSchemas lists, by name, never a pattern.
  *   6  replay         psql into the new database as the application, in one
- *                     transaction, stopping at the first error; then the
+ *                     transaction, stopping at the first error: every entry
+ *                     but the policies, then the policies the template's
+ *                     event triggers made as tables were restored dropped,
+ *                     then the source's policies exactly as they were
+ *                     (tenancy-migration-rules.ts splitRestoreList); then the
  *                     branches PostgREST served are registered there (the
  *                     canonical schema registers itself), the backup role's
  *                     read, the function logins, the realtime functions and
@@ -178,6 +182,8 @@ import {
 import {
   catalogDifferences,
   defaultWaits,
+  dropPoliciesSql,
+  splitRestoreList,
   type MigrationCheck,
   type MigrationReport,
   type MigrationStep,
@@ -537,9 +543,10 @@ async function preconditions(run: Run): Promise<Prepared> {
 
   try {
     await execFileAsync('pg_dump', ['--version'], { timeout: 10_000 })
+    await execFileAsync('pg_restore', ['--version'], { timeout: 10_000 })
     await execFileAsync('psql', ['--version'], { timeout: 10_000 })
   } catch {
-    throw new Refusal('tools_missing', 'pg_dump and psql are not both available to this process')
+    throw new Refusal('tools_missing', 'pg_dump, pg_restore and psql are not all available to this process')
   }
 
   const shared = regionRawClient(region, projectId)
@@ -750,12 +757,13 @@ async function dump(run: Run, ctx: MoveContext): Promise<string> {
 
   const dir = path.join(os.tmpdir(), 'backenly-tenancy-migration', projectId)
   await fs.promises.mkdir(dir, { recursive: true })
-  const file = path.join(dir, `${Date.now()}.sql`)
+  // The archive format, so the replay can restore its policies last (replayScript).
+  const file = path.join(dir, `${Date.now()}.dump`)
   const read = buildConnection('read', ctx.region)
   // Each schema by its exact name: quoted, so it is no pattern, and --strict-names fails on one that matches nothing.
   const schemaArgs = ctx.schemas.flatMap((schema) => ['--schema', `"${schema}"`])
   log(run, 'dump', `dumping ${ctx.schemas.length} schema(s) as the backup role`)
-  await execFileAsync('pg_dump', [...read.args, '--no-owner', '--no-privileges', '--strict-names', ...schemaArgs, '--file', file], {
+  await execFileAsync('pg_dump', [...read.args, '--format=custom', '--no-owner', '--no-privileges', '--strict-names', ...schemaArgs, '--file', file], {
     timeout: DUMP_TIMEOUT_MS,
     env: read.env,
     maxBuffer: TOOL_OUTPUT_MAX,
@@ -764,6 +772,47 @@ async function dump(run: Run, ctx: MoveContext): Promise<string> {
   if (size === 0) throw new StepFailure('dump', 'pg_dump wrote nothing')
   log(run, 'dump', `dumped ${size} bytes, sha256 ${await sha256Of(file)}`)
   return file
+}
+
+/**
+ * The dump as one script for psql, beside it (tenancy-migration-rules.ts
+ * splitRestoreList has why): every entry but the policies, then the policies
+ * the template's event triggers made as those were restored dropped, then the
+ * source's policies and the comments on them. Returns the script and every
+ * file made on the way, which the caller removes: they hold the project's rows.
+ */
+async function replayScript(file: string, schemas: string[]): Promise<{ script: string; made: string[] }> {
+  const base = file.replace(/\.dump$/, '')
+  const restList = `${base}.rest.list`
+  const policyList = `${base}.policies.list`
+  const restSql = `${base}.rest.sql`
+  const policySql = `${base}.policies.sql`
+  const script = `${base}.replay.sql`
+  const made = [restList, policyList, restSql, policySql, script]
+  try {
+    const { stdout } = await execFileAsync('pg_restore', ['--list', file], { timeout: DUMP_TIMEOUT_MS, maxBuffer: TOOL_OUTPUT_MAX })
+    const { rest, policies } = splitRestoreList(stdout)
+    await fs.promises.writeFile(restList, rest, { mode: 0o600 })
+    await fs.promises.writeFile(policyList, policies, { mode: 0o600 })
+    const restore = (list: string, out: string) =>
+      execFileAsync('pg_restore', ['--no-owner', '--no-privileges', '--use-list', list, '--file', out, file], {
+        timeout: DUMP_TIMEOUT_MS,
+        maxBuffer: TOOL_OUTPUT_MAX,
+      })
+    await restore(restList, restSql)
+    await restore(policyList, policySql)
+    await fs.promises.rename(restSql, script)
+    await fs.promises.appendFile(script, dropPoliciesSql(schemas))
+    await fs.promises.appendFile(script, await fs.promises.readFile(policySql))
+    return { script, made }
+  } catch (err) {
+    await removeFiles(made)
+    throw err
+  }
+}
+
+async function removeFiles(files: string[]): Promise<void> {
+  await Promise.all(files.map((f) => fs.promises.unlink(f).catch(() => {})))
 }
 
 async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
@@ -784,11 +833,16 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
     run.createdOnTarget.push(...run.carried.filter((c) => c.created).map((c) => c.roleName))
   }
 
-  await execFileAsync('psql', [...write.args, '-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '--file', file], {
-    timeout: REPLAY_TIMEOUT_MS,
-    env: write.env,
-    maxBuffer: TOOL_OUTPUT_MAX,
-  })
+  const { script, made } = await replayScript(file, ctx.schemas)
+  try {
+    await execFileAsync('psql', [...write.args, '-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '--file', script], {
+      timeout: REPLAY_TIMEOUT_MS,
+      env: write.env,
+      maxBuffer: TOOL_OUTPUT_MAX,
+    })
+  } finally {
+    await removeFiles(made)
+  }
 
   const px = databaseClient(ctx.region, database, projectId)
   const present = (
