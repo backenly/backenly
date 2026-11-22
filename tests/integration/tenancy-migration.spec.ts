@@ -528,9 +528,6 @@ suite('a project moved from its region’s shared database into a database of it
        CREATE TABLE "${schema}".authors (id integer PRIMARY KEY, name text NOT NULL, deleted_at timestamptz);
        ALTER TABLE "${schema}".authors ENABLE ROW LEVEL SECURITY;
        INSERT INTO "${schema}".authors VALUES (1, 'kept', NULL), (2, 'deleted', now());
-       REVOKE INSERT, UPDATE, DELETE ON "${schema}".notes FROM authenticated;
-       CREATE FUNCTION "${schema}".closed_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1';
-       REVOKE ALL ON FUNCTION "${schema}".closed_fn() FROM PUBLIC;
 
        CREATE SCHEMA "${branch}";
        CREATE TABLE "${branch}".secrets (id integer PRIMARY KEY, value text NOT NULL);
@@ -570,6 +567,16 @@ suite('a project moved from its region’s shared database into a database of it
     const { provisionFunctionRole, functionRolePassword } = await import('@/lib/services/ai-functions/function-db-role')
     fnRole = (await provisionFunctionRole(projectId)).role
     fnPassword = functionRolePassword(schema)
+
+    // Narrowed last: the data plane's trigger grants the API roles every table again whenever a table is made in a
+    // served schema (the outbox above is one), so a narrowing made earlier would not be there to carry.
+    await rows(
+      app,
+      `REVOKE INSERT, UPDATE, DELETE ON "${schema}".notes FROM authenticated;
+       CREATE FUNCTION "${schema}".closed_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1';
+       REVOKE ALL ON FUNCTION "${schema}".closed_fn() FROM PUBLIC`,
+    )
+    expect(await carried(superUrl())).not.toContainEqual({ object: 'notes', grantee: 'authenticated', privilege: 'INSERT' })
 
     // A move starts only after a recent snapshot.
     const { backupWorkspace } = await import('@/lib/services/workspace-backup')
