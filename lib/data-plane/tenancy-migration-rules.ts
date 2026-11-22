@@ -52,6 +52,7 @@ export type RefusalCode =
   | 'unknown_schema'
   | 'moved_schemas_present'
   | 'extension'
+  | 'policy_role'
 
 export type MigrationOutcome = 'moved' | 'dry_run_ok' | 'refused' | 'aborted'
 
@@ -370,6 +371,81 @@ export function dropPoliciesSql(schemas: string[]): string {
     '$backenly_replay$;',
     '',
   ].join('\n')
+}
+
+// ── The application's role, named as the database it moved to names it ──────
+
+/**
+ * A policy Backenly makes for the application itself is made `TO CURRENT_USER`
+ * (structural evolution's ladder, lib/structural-evolution/sql.ts), which
+ * PostgreSQL records as the role that ran it: the application's role in the
+ * database it was made in. The dump names that role. Where a region's data
+ * instance is another instance than its shared database (the home region), the
+ * application's role there has another name, so the copy named a role that
+ * instance does not have and the replay stopped.
+ *
+ * So the replay names the application's role as the database it moves to names
+ * it (mapPolicyRoles), and the verification compares the source's policies read
+ * the same way (withPolicyRoles). No other role is renamed: a policy naming a
+ * role the data instance lacks, other than the application's and the project's
+ * own logins (made there before the replay), is refused before anything is made.
+ */
+const DUMPED_IDENT = String.raw`(?:[a-z_][a-z0-9_$]*|"(?:[^"]|"")+")`
+
+/**
+ * The head of a policy as pg_dump writes one, up to and including its roles
+ * (PostgreSQL 16, pg_dump.c dumpPolicy): `CREATE POLICY <name> ON
+ * <schema>.<table>[ AS RESTRICTIVE][ FOR <command>] TO <role>[, <role>…]`, each
+ * name as quote_ident gives it. A policy for PUBLIC has no TO and is left as it is.
+ */
+const POLICY_HEAD = new RegExp(
+  String.raw`^(CREATE POLICY ${DUMPED_IDENT} ON ${DUMPED_IDENT}\.${DUMPED_IDENT}(?: AS RESTRICTIVE)?(?: FOR (?:SELECT|INSERT|UPDATE|DELETE))? TO )(${DUMPED_IDENT}(?:, ${DUMPED_IDENT})*)`,
+  'gm',
+)
+
+function dumpedName(ident: string): string {
+  return ident.startsWith('"') ? ident.slice(1, -1).replace(/""/g, '"') : ident
+}
+
+/**
+ * The restored policies' SQL with the role `from` named `to` in each policy's
+ * TO list, and nowhere else (not in an expression, not in a name). Counts the
+ * policies it changed. Unchanged when the two are the same.
+ */
+export function mapPolicyRoles(sql: string, from: string, to: string): { sql: string; mapped: number } {
+  if (!from || !to) throw new Error('mapPolicyRoles needs both roles')
+  if (from === to) return { sql, mapped: 0 }
+  const named = `"${to.replace(/"/g, '""')}"`
+  let mapped = 0
+  const out = sql.replace(POLICY_HEAD, (_whole, head: string, list: string) => {
+    const roles = list.match(new RegExp(DUMPED_IDENT, 'g')) ?? []
+    if (!roles.some((role) => dumpedName(role) === from)) return head + list
+    mapped++
+    return head + roles.map((role) => (dumpedName(role) === from ? named : role)).join(', ')
+  })
+  return { sql: out, mapped }
+}
+
+/** A catalog snapshot with the role `from` named `to` in every policy, as mapPolicyRoles restores them. */
+export function withPolicyRoles(snapshot: CatalogSnapshot, from: string, to: string): CatalogSnapshot {
+  if (from === to) return snapshot
+  const tables: CatalogSnapshot['tables'] = {}
+  for (const [name, table] of Object.entries(snapshot.tables)) {
+    tables[name] = {
+      ...table,
+      policies: table.policies.map((policy) => ({ ...policy, roles: policy.roles.map((role) => (role === from ? to : role)) })),
+    }
+  }
+  return { ...snapshot, tables }
+}
+
+/**
+ * The roles the moved schemas' policies name that the data instance does not
+ * have and the replay will not make: none but the application's own role (named
+ * as the data instance names it) and the project's logins (made there first).
+ */
+export function policyRolesMissing(named: readonly string[], onDataInstance: ReadonlySet<string>, sourceApp: string, madeFirst: ReadonlySet<string>): string[] {
+  return [...new Set(named)].filter((role) => role !== sourceApp && !onDataInstance.has(role) && !madeFirst.has(role)).sort()
 }
 
 // ── The verification's read through the project's own PostgREST ──────────────
