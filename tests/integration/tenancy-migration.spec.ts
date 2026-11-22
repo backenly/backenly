@@ -947,6 +947,33 @@ suite('a project whose data instance is another instance, moved with its logins'
     }
   })
 
+  it("renames the application's role in PostgreSQL's own dump of a policy made TO CURRENT_USER, and nowhere else", async () => {
+    // Where the home region's two instances name the application's role differently (production's shared database
+    // keeps an older name), the replay renames it in the policies pg_restore writes. Here both instances name it
+    // backenly_app, so the rename is tried on the real dump against a name the target might have.
+    const { mapPolicyRoles, splitRestoreList } = await import('@/lib/data-plane/tenancy-migration-rules')
+    const dir = fs.mkdtempSync(path.join(work, 'policy-dump-'))
+    await rows(loginUrl('backenly_app'), `CREATE POLICY app_only ON "${schema}".secrets FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)`)
+    try {
+      const file = path.join(dir, 'policies.dump')
+      execFileSync(exe('pg_dump'), ['--format=custom', '--schema', schema, '--file', file, '--dbname', superUrl()], { stdio: 'ignore', timeout: 120_000 })
+      const list = path.join(dir, 'policies.list')
+      fs.writeFileSync(list, splitRestoreList(execFileSync(exe('pg_restore'), ['--list', file], { encoding: 'utf8' })).policies)
+      const sql = execFileSync(exe('pg_restore'), ['--no-owner', '--no-privileges', '--use-list', list, '--file', '-', file], { encoding: 'utf8' })
+      expect(sql).toContain('TO backenly_app USING (true) WITH CHECK (true);')
+
+      const renamed = mapPolicyRoles(sql, 'backenly_app', 'renamed_app')
+      expect(renamed.mapped).toBe(1)
+      expect(renamed.sql).toContain('.secrets TO "renamed_app" USING (true) WITH CHECK (true);')
+      // That one name, and nothing else in the dump, changed.
+      expect(renamed.sql.replace('"renamed_app"', 'backenly_app')).toBe(sql)
+      expect(mapPolicyRoles(sql, 'backenly_app', 'backenly_app')).toEqual({ sql, mapped: 0 })
+    } finally {
+      await rows(superUrl(), `DROP POLICY IF EXISTS app_only ON "${schema}".secrets`)
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('signs each login in on the other instance, the read-write one with its old password, and leaves none behind', async () => {
     // Before: on the region's instance, and nowhere on the data instance.
     expect(await roles(superUrl(), [ro, rw, fnRole])).toEqual([ro, rw, fnRole].sort())
