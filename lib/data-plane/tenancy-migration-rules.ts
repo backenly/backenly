@@ -371,3 +371,86 @@ export function dropPoliciesSql(schemas: string[]): string {
     '',
   ].join('\n')
 }
+
+// ── The verification's read through the project's own PostgREST ──────────────
+
+/**
+ * The table the verification reads through the project's own PostgREST, as the
+ * service role: the first of the canonical schema's tables, in the order given,
+ * whose name PostgREST takes as it is and which the service role may read in
+ * the database the project moves out of. Null when there is none: then the
+ * root is read.
+ *
+ * Only a table the service role reads at the source, because Backenly closes
+ * some on purpose: `users` (the project's end users, behind the auth routes)
+ * and every table whose name starts with `_` (backenly_pgrst_revoke_internal,
+ * scripts/sql/postgrest-schema-registry.sql). Reading one of those answers 403
+ * in both databases, which said nothing about the copy and stopped every move
+ * of a project whose first table was `users`. A 403 on a table the service
+ * role reads at the source does mean the copy lost something.
+ */
+export function postgrestProbeTable(tables: readonly string[], readableAtSource: ReadonlySet<string>): string | null {
+  return tables.find((table) => /^[A-Za-z][A-Za-z0-9_]*$/.test(table) && readableAtSource.has(table)) ?? null
+}
+
+// ── The API roles' privileges, carried exactly ──────────────────────────────
+
+/** Whose privileges a move carries: PUBLIC and the roles the REST API serves requests as. */
+export const CARRIED_GRANTEES = ['PUBLIC', 'anon', 'authenticated', 'service_role'] as const
+
+/** One relation's or routine's privileges for CARRIED_GRANTEES, as `grantee PRIVILEGE` lines, sorted. */
+export interface ObjectPrivileges {
+  /** `table` (a table, view, materialized view or foreign table), `sequence` or `routine`. */
+  kind: 'table' | 'sequence' | 'routine'
+  /** Quoted and schema-qualified: format('%I.%I') for a relation, regprocedure for a routine. */
+  identity: string
+  grants: string[]
+}
+
+/**
+ * A move restores the dump without privileges: the project database's own
+ * event triggers grant the API roles what they grant a new table, at the moment
+ * each table is made, so a serial column's sequence (made after its table) and
+ * a change-vault table come out without the grants they had, and a routine gets
+ * PostgreSQL's default, EXECUTE for PUBLIC, though it was closed. So the replay
+ * ends by giving every object exactly the source's privileges for these
+ * grantees (privilegeStatements), and the verification compares them
+ * (privilegeDifferences). Objects only one side has are the catalog check's.
+ *
+ * A table grant narrowed in the canonical schema is carried too, and then lasts
+ * as long as it would have at the source: registering the schema (every resume,
+ * the move's own included) and making a table in it give the API roles its
+ * tables again, in both databases (backenly_pgrst_prepare_schema).
+ */
+export function privilegeDifferences(source: Map<string, ObjectPrivileges>, target: Map<string, ObjectPrivileges>): string[] {
+  const out: string[] = []
+  for (const [key, a] of [...source].sort(([x], [y]) => x.localeCompare(y))) {
+    const b = target.get(key)
+    if (!b) continue
+    const missing = a.grants.filter((g) => !b.grants.includes(g))
+    const extra = b.grants.filter((g) => !a.grants.includes(g))
+    if (missing.length || extra.length) {
+      out.push(`${a.kind} ${a.identity}:${missing.length ? ' lacks ' + missing.join(', ') : ''}${extra.length ? ' has ' + extra.join(', ') + ' it did not' : ''}`)
+    }
+  }
+  return out
+}
+
+/** The statements that give `target` exactly the privileges `source` holds for CARRIED_GRANTEES. */
+export function privilegeStatements(source: ObjectPrivileges): string[] {
+  const on = `${source.kind === 'routine' ? 'ROUTINE' : source.kind === 'sequence' ? 'SEQUENCE' : 'TABLE'} ${source.identity}`
+  const out = [`REVOKE ALL ON ${on} FROM ${CARRIED_GRANTEES.join(', ')}`]
+  const byGrantee = new Map<string, string[]>()
+  for (const line of source.grants) {
+    const [grantee, privilege] = line.split(' ')
+    if (!(CARRIED_GRANTEES as readonly string[]).includes(grantee) || !/^[A-Z]+$/.test(privilege ?? '')) {
+      throw new Error(`not a carried privilege: ${line}`)
+    }
+    byGrantee.set(grantee, [...(byGrantee.get(grantee) ?? []), privilege])
+  }
+  for (const grantee of CARRIED_GRANTEES) {
+    const privileges = byGrantee.get(grantee)
+    if (privileges) out.push(`GRANT ${privileges.join(', ')} ON ${on} TO ${grantee}`)
+  }
+  return out
+}

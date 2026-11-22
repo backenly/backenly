@@ -20,7 +20,8 @@
  * SECURITY with a policy, one as Backenly makes every table (deleted_at, row
  * level security on, and so the data plane's soft-delete policy, which the
  * project database's own event trigger makes again as a replay restores the
- * table), a sequence moved on, a column of an allowlisted
+ * table), API grants narrowed on one table and a routine closed to PUBLIC
+ * (a restore without privileges would widen both), a sequence moved on, a column of an allowlisted
  * extension the project installed (citext), a preview branch PostgREST serves,
  * a change vault, a captured webhook event waiting in its outbox, a realtime
  * channel and its functions' login.
@@ -443,6 +444,23 @@ suite('a project moved from its region’s shared database into a database of it
       [schemas],
     )
 
+  /** PUBLIC's and the API roles' privileges on notes and closed_fn: a move carries them exactly. */
+  const carried = async (connection: string) =>
+    rows<{ object: string; grantee: string; privilege: string }>(
+      connection,
+      `SELECT o.object, CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE r.rolname::text END AS grantee, g.privilege_type::text AS privilege
+         FROM (SELECT 'notes' AS object, coalesce(c.relacl, acldefault('r', c.relowner)) AS acl
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'notes'
+               UNION ALL
+               SELECT 'closed_fn', coalesce(p.proacl, acldefault('f', p.proowner))
+                 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'closed_fn') o
+        CROSS JOIN LATERAL aclexplode(o.acl) g
+         LEFT JOIN pg_roles r ON r.oid = g.grantee
+        WHERE g.grantee = 0 OR r.rolname IN ('anon', 'authenticated', 'service_role')
+        ORDER BY 1, 2, 3`,
+      [schema],
+    )
+
   const served = async (connection: string) =>
     (await rows<{ list: string }>(connection, `SELECT public.backenly_pgrst_current_schemas() AS list`))[0].list.split(',').filter(Boolean).sort()
 
@@ -459,6 +477,7 @@ suite('a project moved from its region’s shared database into a database of it
       row,
       digests: await digests(superUrl(), [schema, branch, vault]),
       policies: await policies(superUrl(), [schema, branch, vault]),
+      carried: await carried(superUrl()),
       sequence: await sequences(superUrl()),
       served: await served(superUrl()),
       channel: (await channelIn(superUrl(), schema)) === channel,
@@ -549,6 +568,16 @@ suite('a project moved from its region’s shared database into a database of it
     fnRole = (await provisionFunctionRole(projectId)).role
     fnPassword = functionRolePassword(schema)
 
+    // Narrowed last: the data plane's trigger grants the API roles every table again whenever a table is made in a
+    // served schema (the outbox above is one), so a narrowing made earlier would not be there to carry.
+    await rows(
+      app,
+      `REVOKE INSERT, UPDATE, DELETE ON "${schema}".notes FROM authenticated;
+       CREATE FUNCTION "${schema}".closed_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1';
+       REVOKE ALL ON FUNCTION "${schema}".closed_fn() FROM PUBLIC`,
+    )
+    expect(await carried(superUrl())).not.toContainEqual({ object: 'notes', grantee: 'authenticated', privilege: 'INSERT' })
+
     // A move starts only after a recent snapshot.
     const { backupWorkspace } = await import('@/lib/services/workspace-backup')
     expect(await backupWorkspace(projectId)).toMatchObject({ success: true })
@@ -594,6 +623,7 @@ suite('a project moved from its region’s shared database into a database of it
       extensions: 'ok',
       channels: 'ok',
       backup_read: 'ok',
+      api_privileges: 'ok',
       // No PostgREST host here: said, never passed off as checked.
       postgrest: 'skipped',
     })
@@ -656,6 +686,19 @@ suite('a project moved from its region’s shared database into a database of it
     expect(await sequences(superUrl(database))).toEqual(before.sequence)
     // Every policy as it was, the data plane's soft-delete one once, and none the project database's triggers added.
     expect(await policies(superUrl(database), [schema, branch, vault])).toEqual(before.policies)
+    // The routine still closed to PUBLIC, not reopened by a restore without privileges. The copy held exactly the
+    // source's privileges at the verification (the dry run's api_privileges); since then the resume registered the
+    // schema, as every resume does at the source too, which gives the API roles its tables again
+    // (backenly_pgrst_prepare_schema): the narrowed table is as a resume would have left it there, and no wider.
+    expect(before.carried).not.toContainEqual({ object: 'notes', grantee: 'authenticated', privilege: 'INSERT' })
+    expect(before.carried).not.toContainEqual({ object: 'closed_fn', grantee: 'PUBLIC', privilege: 'EXECUTE' })
+    const inOrder = (grants: Array<{ object: string; grantee: string; privilege: string }>) =>
+      grants.map((g) => `${g.object} ${g.grantee} ${g.privilege}`).sort()
+    const registered = [
+      ...before.carried,
+      ...['DELETE', 'INSERT', 'UPDATE'].map((privilege) => ({ object: 'notes', grantee: 'authenticated', privilege })),
+    ]
+    expect(inOrder(await carried(superUrl(database)))).toEqual(inOrder(registered))
     expect(await rows(superUrl(database), `SELECT extname FROM pg_extension WHERE extname = 'citext'`)).toEqual([{ extname: 'citext' }])
     // The same channel name, so every stream label and listener finds it there.
     expect(await channelIn(superUrl(database), schema)).toBe(channel)

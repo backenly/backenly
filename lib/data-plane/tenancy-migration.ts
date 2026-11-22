@@ -182,8 +182,13 @@ import {
 import {
   catalogDifferences,
   defaultWaits,
+  CARRIED_GRANTEES,
   dropPoliciesSql,
+  postgrestProbeTable,
+  privilegeDifferences,
+  privilegeStatements,
   splitRestoreList,
+  type ObjectPrivileges,
   type MigrationCheck,
   type MigrationReport,
   type MigrationStep,
@@ -895,6 +900,22 @@ async function replay(run: Run, ctx: MoveContext, file: string): Promise<void> {
     )
   }
 
+  // Last, after everything above that grants by default (the triggers as the
+  // replay made each table, the registration of each branch, the realtime
+  // functions): PUBLIC's and the API roles' privileges exactly as the source's
+  // (tenancy-migration-rules.ts privilegeDifferences has why), in one transaction.
+  const source = await carriedPrivileges(regionRawClient(ctx.region, projectId), ctx.schemas)
+  const target = await carriedPrivileges(px, ctx.schemas)
+  const statements: string[] = []
+  for (const [key, held] of source) {
+    const there = target.get(key)
+    if (there && privilegeDifferences(new Map([[key, held]]), new Map([[key, there]])).length > 0) statements.push(...privilegeStatements(held))
+  }
+  if (statements.length > 0) {
+    await px.$transaction(statements.map((sql) => px.$executeRawUnsafe(sql)))
+  }
+  log(run, 'replay', `privileges: ${statements.length === 0 ? 'already as the source held them' : `${statements.length} statement(s) made them the source's`}`)
+
   log(
     run,
     'replay',
@@ -922,6 +943,61 @@ interface RelationRow {
   rls: boolean
   forced: boolean
   owner: string
+}
+
+/**
+ * PUBLIC's and the API roles' privileges on every relation and routine in
+ * `schemas`, where `db` reaches, keyed `<kind> <identity>` (tenancy-migration-rules.ts
+ * privilegeDifferences has why). A NULL ACL is the object's default, as PostgreSQL applies it.
+ */
+async function carriedPrivileges(db: WorkspaceRawClient, schemas: string[]): Promise<Map<string, ObjectPrivileges>> {
+  type Row = { kind: 'table' | 'sequence' | 'routine'; identity: string; grantee: string | null; privilege: string | null }
+  // With only pg_catalog on the search path, a routine's signature names every schema it uses, so the same routine
+  // reads the same in both databases whatever path each connection was given.
+  const rows = await db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL search_path TO pg_catalog`)
+    return tx.$queryRaw<Row[]>`
+    WITH objects AS (
+      SELECT CASE WHEN c.relkind = 'S' THEN 'sequence' ELSE 'table' END AS kind,
+             format('%I.%I', n.nspname, c.relname) AS identity,
+             coalesce(c.relacl, CASE WHEN c.relkind = 'S' THEN acldefault('s', c.relowner) ELSE acldefault('r', c.relowner) END) AS acl
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = ANY(${schemas}::text[]) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      UNION ALL
+      SELECT 'routine', p.oid::regprocedure::text, coalesce(p.proacl, acldefault('f', p.proowner))
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = ANY(${schemas}::text[])
+    )
+    SELECT o.kind, o.identity,
+           CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE r.rolname::text END AS grantee,
+           g.privilege_type::text AS privilege
+      FROM objects o
+      LEFT JOIN LATERAL aclexplode(o.acl) g ON true
+      LEFT JOIN pg_roles r ON r.oid = g.grantee`
+  })
+  const out = new Map<string, ObjectPrivileges>()
+  const carried = new Set<string>(CARRIED_GRANTEES)
+  for (const row of rows) {
+    const key = `${row.kind} ${row.identity}`
+    const entry = out.get(key) ?? { kind: row.kind, identity: row.identity, grants: [] }
+    if (row.grantee && row.privilege && carried.has(row.grantee)) entry.grants.push(`${row.grantee} ${row.privilege}`)
+    out.set(key, entry)
+  }
+  for (const entry of out.values()) entry.grants = [...new Set(entry.grants)].sort()
+  return out
+}
+
+/** The tables of `schema` the service role may read, where `db` reaches. */
+async function serviceRoleReadable(db: WorkspaceRawClient, schema: string): Promise<Set<string>> {
+  // has_table_privilege raises for a role that does not exist, and an AND is not evaluated in order.
+  const [role] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint AS n FROM pg_roles WHERE rolname = 'service_role'`
+  if (!role || Number(role.n) === 0) return new Set()
+  const rows = await db.$queryRaw<Array<{ name: string }>>`
+    SELECT c.relname::text AS name
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p')
+       AND has_table_privilege('service_role', c.oid, 'SELECT')`
+  return new Set(rows.map((r) => r.name))
 }
 
 async function relations(db: WorkspaceRawClient, schema: string): Promise<RelationRow[]> {
@@ -1151,6 +1227,11 @@ async function verify(run: Run, ctx: MoveContext, sharedLock: PoolClient, pxLock
   }
   check('logins', loginProblems, `${expected.length} login(s) on the data instance, stopped until the resume, schema changes refused`)
 
+  // PUBLIC's and the API roles' privileges, exactly as they were.
+  const privilegesThen = await carriedPrivileges(shared, ctx.schemas)
+  const privilegesNow = await carriedPrivileges(px, ctx.schemas)
+  check('api_privileges', privilegeDifferences(privilegesThen, privilegesNow), `${privilegesThen.size} object(s): PUBLIC's and the API roles' privileges as they were`)
+
   // Its own PostgREST, on the region's host, serving the new database.
   let base: string | null = null
   try {
@@ -1161,8 +1242,13 @@ async function verify(run: Run, ctx: MoveContext, sharedLock: PoolClient, pxLock
   if (base) {
     try {
       const target = await ownDatabasePostgrest(projectId, ctx.region, database)
-      const firstTable = tables.find((t) => t.schema === ctx.canonical && /^[A-Za-z_][A-Za-z0-9_]*$/.test(t.table) && !t.table.startsWith('_'))
-      const answer = await readThroughOwnPostgrest(target, projectId, ctx.canonical, firstTable?.table ?? null, run.waits.probeMs)
+      // A table the service role reads at the source (postgrestProbeTable has why), else the root.
+      const readable = await serviceRoleReadable(shared, ctx.canonical)
+      const probe = postgrestProbeTable(
+        tables.filter((t) => t.schema === ctx.canonical).map((t) => t.table),
+        readable,
+      )
+      const answer = await readThroughOwnPostgrest(target, projectId, ctx.canonical, probe, run.waits.probeMs)
       checks.push({ id: 'postgrest', state: answer.ok ? 'ok' : 'failed', detail: answer.detail })
     } catch (err) {
       checks.push({ id: 'postgrest', state: 'skipped', detail: message(err) })
