@@ -16,6 +16,9 @@ import {
   describeOutcome,
   dropPoliciesSql,
   parseMigrationArgs,
+  postgrestProbeTable,
+  privilegeDifferences,
+  privilegeStatements,
   splitRestoreList,
 } from '@/lib/data-plane/tenancy-migration-rules'
 import type { CatalogSnapshot, TableState } from '@/lib/changes/catalog'
@@ -233,5 +236,56 @@ describe('the replay restores the policies last', () => {
     expect(sql.trimEnd().endsWith('$backenly_replay$;')).toBe(true)
     expect(dropPoliciesSql(["it's"])).toContain("ARRAY['it''s']")
     expect(() => dropPoliciesSql([])).toThrow()
+  })
+})
+
+describe("the verification's read through the project's own PostgREST", () => {
+  it('skips the tables Backenly closes to the service role, and any it cannot read at the source', () => {
+    // A project with end users and no other table: its only table is users, closed on purpose in both databases.
+    expect(postgrestProbeTable(['_backenly_webhook_outbox', 'users'], new Set(['_backenly_webhook_outbox']))).toBeNull()
+    expect(postgrestProbeTable(['users'], new Set())).toBeNull()
+    // The first the service role reads at the source, in the order given.
+    expect(postgrestProbeTable(['_meta', 'accounts', 'notes', 'users'], new Set(['notes', 'accounts']))).toBe('accounts')
+    expect(postgrestProbeTable(['accounts', 'notes', 'users'], new Set(['notes']))).toBe('notes')
+    // A name PostgREST would need quoted is not used.
+    expect(postgrestProbeTable(['My Table', 'notes'], new Set(['My Table', 'notes']))).toBe('notes')
+    expect(postgrestProbeTable([], new Set())).toBeNull()
+  })
+})
+
+describe("PUBLIC's and the API roles' privileges, carried exactly", () => {
+  const notes = { kind: 'table' as const, identity: 'workspace_0b1c.notes', grants: ['anon SELECT', 'authenticated SELECT', 'service_role DELETE', 'service_role INSERT', 'service_role SELECT', 'service_role UPDATE'] }
+  const widened = { ...notes, grants: [...notes.grants, 'authenticated DELETE', 'authenticated INSERT', 'authenticated UPDATE'].sort() }
+  const fn = { kind: 'routine' as const, identity: 'workspace_0b1c.closed_fn()', grants: [] as string[] }
+
+  it('names what the copy lacks and what it holds that the source did not, and leaves one-sided objects to the catalog check', () => {
+    const source = new Map([['table workspace_0b1c.notes', notes], ['routine workspace_0b1c.closed_fn()', fn]])
+    const target = new Map([
+      ['table workspace_0b1c.notes', widened],
+      ['routine workspace_0b1c.closed_fn()', { ...fn, grants: ['PUBLIC EXECUTE'] }],
+      ['table workspace_0b1c.only_here', { kind: 'table' as const, identity: 'workspace_0b1c.only_here', grants: [] }],
+    ])
+    expect(privilegeDifferences(source, target)).toEqual([
+      'routine workspace_0b1c.closed_fn(): has PUBLIC EXECUTE it did not',
+      'table workspace_0b1c.notes: has authenticated DELETE, authenticated INSERT, authenticated UPDATE it did not',
+    ])
+    expect(privilegeDifferences(source, source)).toEqual([])
+  })
+
+  it('makes the copy hold exactly the source privileges: everything taken from the carried grantees, then given back', () => {
+    expect(privilegeStatements(notes)).toEqual([
+      'REVOKE ALL ON TABLE workspace_0b1c.notes FROM PUBLIC, anon, authenticated, service_role',
+      'GRANT SELECT ON TABLE workspace_0b1c.notes TO anon',
+      'GRANT SELECT ON TABLE workspace_0b1c.notes TO authenticated',
+      'GRANT DELETE, INSERT, SELECT, UPDATE ON TABLE workspace_0b1c.notes TO service_role',
+    ])
+    expect(privilegeStatements(fn)).toEqual(['REVOKE ALL ON ROUTINE workspace_0b1c.closed_fn() FROM PUBLIC, anon, authenticated, service_role'])
+    expect(privilegeStatements({ kind: 'sequence', identity: 'workspace_0b1c.notes_id_seq', grants: ['service_role USAGE'] })).toEqual([
+      'REVOKE ALL ON SEQUENCE workspace_0b1c.notes_id_seq FROM PUBLIC, anon, authenticated, service_role',
+      'GRANT USAGE ON SEQUENCE workspace_0b1c.notes_id_seq TO service_role',
+    ])
+    // Only the carried grantees and plain privilege names are ever written into a statement.
+    expect(() => privilegeStatements({ ...notes, grants: ['postgres SELECT'] })).toThrow()
+    expect(() => privilegeStatements({ ...notes, grants: ['anon SELECT; DROP TABLE x'] })).toThrow()
   })
 })
