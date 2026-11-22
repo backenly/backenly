@@ -515,6 +515,8 @@ suite('a project moved from its region’s shared database into a database of it
        ALTER TABLE "${branch}".secrets ENABLE ROW LEVEL SECURITY;
        ALTER TABLE "${branch}".secrets FORCE ROW LEVEL SECURITY;
        CREATE POLICY service_only ON "${branch}".secrets USING (current_setting('app.is_service_role', true) = 'true');
+       CREATE TABLE "${branch}".authors (id integer PRIMARY KEY, name text NOT NULL, deleted_at timestamptz);
+       ALTER TABLE "${branch}".authors ENABLE ROW LEVEL SECURITY;
        CREATE TABLE "${branch}".drafts (id integer PRIMARY KEY, body text);
        INSERT INTO "${branch}".drafts VALUES (1, 'on the branch');
 
