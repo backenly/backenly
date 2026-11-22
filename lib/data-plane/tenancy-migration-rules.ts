@@ -409,13 +409,18 @@ export interface ObjectPrivileges {
 
 /**
  * A move restores the dump without privileges: the project database's own
- * event triggers grant the API roles what they grant every new table, and a
- * routine gets PostgreSQL's default, EXECUTE for PUBLIC. A table whose API
- * grants were narrowed (direct access may) or a routine closed to PUBLIC would
- * come out WIDER than it was. So the replay ends by giving every object exactly
- * the source's privileges for these grantees (privilegeStatements), and the
- * verification compares them (privilegeDifferences). Objects only one side has
- * are the catalog check's.
+ * event triggers grant the API roles what they grant a new table, at the moment
+ * each table is made, so a serial column's sequence (made after its table) and
+ * a change-vault table come out without the grants they had, and a routine gets
+ * PostgreSQL's default, EXECUTE for PUBLIC, though it was closed. So the replay
+ * ends by giving every object exactly the source's privileges for these
+ * grantees (privilegeStatements), and the verification compares them
+ * (privilegeDifferences). Objects only one side has are the catalog check's.
+ *
+ * A table grant narrowed in the canonical schema is carried too, and then lasts
+ * as long as it would have at the source: registering the schema (every resume,
+ * the move's own included) and making a table in it give the API roles its
+ * tables again, in both databases (backenly_pgrst_prepare_schema).
  */
 export function privilegeDifferences(source: Map<string, ObjectPrivileges>, target: Map<string, ObjectPrivileges>): string[] {
   const out: string[] = []

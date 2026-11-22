@@ -686,10 +686,19 @@ suite('a project moved from its region’s shared database into a database of it
     expect(await sequences(superUrl(database))).toEqual(before.sequence)
     // Every policy as it was, the data plane's soft-delete one once, and none the project database's triggers added.
     expect(await policies(superUrl(database), [schema, branch, vault])).toEqual(before.policies)
-    // The narrowed grants and the closed routine as they were, not widened by a restore without privileges.
+    // The routine still closed to PUBLIC, not reopened by a restore without privileges. The copy held exactly the
+    // source's privileges at the verification (the dry run's api_privileges); since then the resume registered the
+    // schema, as every resume does at the source too, which gives the API roles its tables again
+    // (backenly_pgrst_prepare_schema): the narrowed table is as a resume would have left it there, and no wider.
     expect(before.carried).not.toContainEqual({ object: 'notes', grantee: 'authenticated', privilege: 'INSERT' })
     expect(before.carried).not.toContainEqual({ object: 'closed_fn', grantee: 'PUBLIC', privilege: 'EXECUTE' })
-    expect(await carried(superUrl(database))).toEqual(before.carried)
+    const inOrder = (grants: Array<{ object: string; grantee: string; privilege: string }>) =>
+      grants.map((g) => `${g.object} ${g.grantee} ${g.privilege}`).sort()
+    const registered = [
+      ...before.carried,
+      ...['DELETE', 'INSERT', 'UPDATE'].map((privilege) => ({ object: 'notes', grantee: 'authenticated', privilege })),
+    ]
+    expect(inOrder(await carried(superUrl(database)))).toEqual(inOrder(registered))
     expect(await rows(superUrl(database), `SELECT extname FROM pg_extension WHERE extname = 'citext'`)).toEqual([{ extname: 'citext' }])
     // The same channel name, so every stream label and listener finds it there.
     expect(await channelIn(superUrl(database), schema)).toBe(channel)
