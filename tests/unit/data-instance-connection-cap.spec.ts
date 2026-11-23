@@ -12,6 +12,9 @@
  * kind of process. The database-backed half is
  * tests/integration/project-database-sessions.spec.ts.
  */
+import fs from 'node:fs'
+import path from 'node:path'
+
 import {
   ConnectionBudget,
   DatabaseBusyError,
@@ -247,6 +250,21 @@ describe('DATA_POOL_PROCESS_CAP', () => {
     expect(processKind({ NEXT_RUNTIME: 'nodejs' })).toBe('web')
     noteProcessKind('runtime')
     expect(processKind({ NEXT_RUNTIME: 'nodejs' })).toBe('runtime')
+  })
+
+  it('is told the web by the web itself as it starts, before anything there can open a connection', () => {
+    // A deployed Next server's environment need not hold NEXT_RUNTIME (Next resolves it when it builds the server):
+    // a web that went by it alone ran at the 30 meant for 'other'. instrumentation.ts says so first thing in its
+    // Node.js block, right after the edition check, and before the scheduler, the usage ledger or Sentry start.
+    const source = fs.readFileSync(path.join(process.cwd(), 'instrumentation.ts'), 'utf8')
+    const block = source.indexOf("if (process.env.NEXT_RUNTIME === 'nodejs') {")
+    const noted = source.indexOf("noteProcessKind('web')")
+    expect(block).toBeGreaterThan(-1)
+    expect(noted).toBeGreaterThan(source.indexOf("assertEditionCompositionOrExit('Next server')"))
+    for (const later of ["import('./sentry.server.config')", "import('./lib/usage/ledger')", "import('./lib/services/cron-runner')"]) {
+      expect(source.indexOf(later)).toBeGreaterThan(noted)
+    }
+    expect(source.indexOf("import('./lib/data-plane/process-kind')")).toBeGreaterThan(block)
   })
 
   it('keeps one budget per data instance', () => {

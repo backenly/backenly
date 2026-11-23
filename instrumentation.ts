@@ -25,6 +25,13 @@ export async function register() {
     const { assertEditionCompositionOrExit } = await import('./lib/edition/cloud-extension')
     assertEditionCompositionOrExit('Next server')
 
+    // This process is the web: its caps on connections differ from the
+    // runtime's (lib/data-plane/process-kind.ts). Said here, before anything
+    // opens one, because the deployed server's environment need not hold
+    // NEXT_RUNTIME, which Next resolves when it builds this file.
+    const { noteProcessKind } = await import('./lib/data-plane/process-kind')
+    noteProcessKind('web')
+
     // Also before anything serves a request: a deployment that runs several
     // instances while the auth limiter keeps per-process counters has a
     // brute-force budget of (limit x instances) on every auth surface, and
