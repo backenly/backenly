@@ -66,6 +66,7 @@
 import { PrismaClient } from '@prisma/client'
 import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
+import { transactionDefaults } from '@/lib/db/transaction-defaults'
 import { installSqlRecorder } from '@/lib/execution/sql-recorder'
 import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
 import { ConnectionBudget, DatabaseBusyError, DatabaseRegistry, ROOM_WAIT_MS, whenRoom, type Admission, type UseTracker } from './database-registry'
@@ -765,7 +766,11 @@ function regionClient(region: CloudRegionId, projectId?: string): PrismaClient {
   const existing = workspaceClients.get(region)
   if (existing) return existing
 
-  const client = new PrismaClient({ datasourceUrl: workspaceClientUrl(region, url), log: ['error'] })
+  const client = new PrismaClient({
+    datasourceUrl: workspaceClientUrl(region, url),
+    log: ['error'],
+    transactionOptions: transactionDefaults(),
+  })
   installSqlRecorder(client as any)
   workspaceClients.set(region, client)
   return client
@@ -794,7 +799,7 @@ export function dataInstanceRawClient(region: CloudRegionId): WorkspaceRawClient
   if (existing) return existing
   const parsed = new URL(withoutStatementCache(url))
   if (!parsed.searchParams.has('connection_limit')) parsed.searchParams.set('connection_limit', String(DATA_INSTANCE_CONNECTION_LIMIT))
-  const client = new PrismaClient({ datasourceUrl: parsed.toString(), log: ['error'] })
+  const client = new PrismaClient({ datasourceUrl: parsed.toString(), log: ['error'], transactionOptions: transactionDefaults() })
   dataInstanceClients.set(region, client)
   return client
 }
@@ -882,7 +887,13 @@ const clientKey = (region: CloudRegionId, database: string) => `${region}/${data
 
 /** A new client for a project's own database, its recorder and use count installed before anything is sent. */
 function newDatabaseClient(dataInstanceUrl: string, database: string, tracker: UseTracker): PrismaClient {
-  const client = new PrismaClient({ datasourceUrl: databaseClientUrl(dataInstanceUrl, database), log: ['error'] })
+  // A sign-up or sign-in arriving while a fleet pass holds this pool's two
+  // connections waits for one as a query would (transaction-defaults.ts).
+  const client = new PrismaClient({
+    datasourceUrl: databaseClientUrl(dataInstanceUrl, database),
+    log: ['error'],
+    transactionOptions: transactionDefaults(),
+  })
   installSqlRecorder(client as any)
   // Counts each statement while it runs, so the registry never closes the
   // client under it.

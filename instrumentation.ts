@@ -184,7 +184,13 @@ export async function register() {
       // path that calls a model. It is self-capping (MAX_PER_TICK = 2 per
       // project) and skips findings that already carry a diagnosis, so a tick
       // with nothing escalated costs one indexed query per project.
-      cron.schedule('*/10 * * * *', async () => {
+      //
+      // Every 10 minutes from :02, and Tiers C and D below from :04 and :06:
+      // the three fleet passes used to start in the same second, with the
+      // per-minute passes, the hourly storage snapshot and the usage ingest at
+      // :00, :10 and :20, and together they held every connection of the
+      // small pools a transaction then waited for (lib/db/transaction-defaults.ts).
+      cron.schedule('2-59/10 * * * *', async () => {
         const { diagnoseEscalatedFindings } = await import('./lib/autonomy/escalation-diagnosis')
         const { getFleetScheduler } = await import('./lib/edition')
 
@@ -594,7 +600,8 @@ export async function register() {
       // Every 10 minutes, not every minute. A ladder is a schema migration, not
       // a probe: the finding it answers is `subsystem_repeat_failure`, which is
       // measured over a 30-day window and does not change between minutes.
-      cron.schedule('*/10 * * * *', async () => {
+      // From :04, so it never starts with Tier B or Tier D (see Tier B).
+      cron.schedule('4-59/10 * * * *', async () => {
         const { FLAGS } = await import('./lib/config/flags')
         if (!FLAGS.ENABLE_MAINTENANCE_SCHEDULER) return
 
@@ -666,8 +673,9 @@ export async function register() {
       // Nothing is relaxed by being reached from here: the scheduler flag is read
       // inside the sweep too, a project with autonomy OFF is skipped, resuming
       // also needs the mutation flag, and the sweep never approves anything or
-      // starts what a person did not approve. Every 10 minutes, like Tier C.
-      cron.schedule('*/10 * * * *', async () => {
+      // starts what a person did not approve. Every 10 minutes, like Tier C,
+      // from :06 (see Tier B).
+      cron.schedule('6-59/10 * * * *', async () => {
         const { FLAGS } = await import('./lib/config/flags')
         if (!FLAGS.ENABLE_EVOLUTION_SCHEDULER) return
 
@@ -702,10 +710,12 @@ export async function register() {
       // design assumes: the samples ARE hour buckets, and running it more often
       // would refine the current bucket repeatedly for no gain.
       //
-      // Runs at :05 rather than :00 so it is not competing with every other
-      // hourly job for the same connections, and reads only pg_stat_* views and
-      // pg_class sizes — no user data, no model call.
-      cron.schedule('5 * * * *', async () => {
+      // Runs at :07, a minute no other pass starts on, so it is not competing
+      // with every other hourly job for the same connections (:05 was also the
+      // daily backup's and the usage close's minute, and every five-minute
+      // platform pass's), and reads only pg_stat_* views and pg_class sizes:
+      // no user data, no model call.
+      cron.schedule('7 * * * *', async () => {
         const g = globalThis as any
         if (g.__baselineCollectorRunning) return
         g.__baselineCollectorRunning = true
@@ -764,7 +774,9 @@ export async function register() {
       // Measures actual on-disk size of each project's workspace and branch
       // schemas: ProjectUsage.dbStorageUsedMb for the quota check, and the
       // `db_bytes` daily-maximum gauge in the usage ledger for billing.
-      cron.schedule('0 * * * *', async () => {
+      // At :29, a minute no other hourly or ten-minute pass starts on (see Tier
+      // B); the gauge is a daily maximum, so the minute does not matter to it.
+      cron.schedule('29 * * * *', async () => {
         const { snapshotScheduledDbStorage } = await import('./lib/usage/db-storage')
         await snapshotScheduledDbStorage().catch((err: any) =>
           console.error('[DbStorageSnapshot] Error:', err?.message)
@@ -775,7 +787,8 @@ export async function register() {
       // Load balancer, S3 and CloudFront access logs into the usage ledger,
       // each log object exactly once. A no-op until USAGE_LOG_SOURCES names the
       // log buckets (Cloud infrastructure). lib/usage/log-ingest.ts.
-      cron.schedule('*/15 * * * *', async () => {
+      // From :08, off the minutes the fleet passes start on (see Tier B).
+      cron.schedule('8-59/15 * * * *', async () => {
         const { ingestConfiguredLogs } = await import('./lib/usage/log-ingest')
         try {
           const s = await ingestConfiguredLogs()
