@@ -808,18 +808,29 @@ suite('a project moved from its region’s shared database into a database of it
     const outsiderPassword = generatePassword()
     await rows(superUrl('postgres'), `CREATE ROLE ${outsider} LOGIN PASSWORD '${outsiderPassword}'`)
     expect(await refusal(url(outsider, outsiderPassword), 'SELECT 1')).toBeNull()
+    // A project's function login made while its data was here holds CONNECT on this database by name, as
+    // backenly_fn_role_sync and backenly_direct_create_role give it: taking PUBLIC's alone would leave it open.
+    const projectLogin = `bkn_fn_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const projectLoginPassword = generatePassword()
+    await rows(superUrl('postgres'), `CREATE ROLE ${projectLogin} LOGIN PASSWORD '${projectLoginPassword}'`)
+    await rows(superUrl('postgres'), `GRANT CONNECT ON DATABASE ${DB} TO ${projectLogin}`)
     try {
       const done = await revokePublicConnect(REGION)
       expect(done.database).toBe(DB)
       expect(done.granted).toEqual(expect.arrayContaining(['backenly_app', 'backenly_authenticator', 'backenly_backup', 'backenly_dbcreator']))
+      expect(done.granted).not.toContain(projectLogin)
+      expect(done.closedToProjectRoles).toContain(projectLogin)
       expect(await rows(superUrl(), `SELECT has_database_privilege('public', $1, 'CONNECT') AS open`, [DB])).toEqual([{ open: false }])
       expect(await refusal(url(outsider, outsiderPassword), 'SELECT 1')).toMatch(/permission denied for database/)
+      expect(await refusal(url(projectLogin, projectLoginPassword), 'SELECT 1')).toMatch(/permission denied for database/)
       for (const role of ['backenly_app', 'backenly_backup', 'backenly_authenticator'] as const) {
         expect(await refusal(loginUrl(role), 'SELECT 1')).toBeNull()
       }
     } finally {
       await rows(superUrl('postgres'), `GRANT CONNECT, TEMPORARY ON DATABASE ${DB} TO PUBLIC`)
+      await rows(superUrl('postgres'), `REVOKE ALL ON DATABASE ${DB} FROM ${projectLogin}`)
       await rows(superUrl('postgres'), `DROP ROLE IF EXISTS ${outsider}`)
+      await rows(superUrl('postgres'), `DROP ROLE IF EXISTS ${projectLogin}`)
     }
   })
 })

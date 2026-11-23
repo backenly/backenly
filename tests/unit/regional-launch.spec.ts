@@ -35,6 +35,7 @@ import {
   projectDatabasesInput,
   readDatabaseList,
   secretValue,
+  sharedDatabaseState,
   type Aws,
   type LaunchConfig,
   type ManagedRole,
@@ -91,6 +92,14 @@ interface Database {
   failTemplate?: boolean
   /** The project databases on the instance, and what a project-dbs run makes of each. */
   projectDatabases?: Record<string, 'current' | 'applied' | 'failed'>
+  /** A workspace schema no move left behind is still in the region's database: close-shared refuses. */
+  sharedProject?: boolean
+  /** Whether the region's database is closed to PUBLIC (close-shared / open-shared). */
+  closed?: boolean
+  /** Project sessions close-shared could not end. */
+  stuckSessions?: number
+  /** The database the procedure reaches, when not the config's (a misnamed DATABASE_URL). */
+  reachedDatabase?: string
 }
 
 type Call = { args: string[]; stdin?: string }
@@ -203,6 +212,25 @@ class FakeAws {
 
   /** bootstrap.sh, as the launcher sees it: its report lines, its refusals, its exit code. */
   private procedure(env: Record<string, string>): { exitCode: number; lines: string[] } {
+    if (env.BOOTSTRAP_MODE === 'close-shared' || env.BOOTSTRAP_MODE === 'open-shared') {
+      const name = this.db.reachedDatabase ?? CONFIG.database.name
+      const lines = ['', `The region's database (${env.BOOTSTRAP_MODE})`]
+      if (!this.db.applied) {
+        return { exitCode: 2, lines: [...lines, `refusing: the region's database has never applied sql/roles.sql, which makes the roles BOOTSTRAP_MODE=${env.BOOTSTRAP_MODE} gives CONNECT to. Run BOOTSTRAP_MODE=apply first.`] }
+      }
+      if (env.BOOTSTRAP_MODE === 'open-shared') {
+        this.db.closed = false
+        return { exitCode: 0, lines: [...lines, `shared database ${name}: open to PUBLIC`] }
+      }
+      if (this.db.sharedProject) {
+        return { exitCode: 3, lines: [...lines, `ERROR:  refusing: ${name} still holds 1 workspace schema(s) no move left behind, such as workspace_x: a project keeps its data here. Move every project of the region first.`] }
+      }
+      this.db.closed = true
+      return {
+        exitCode: 0,
+        lines: [...lines, `shared database ${name}: closed (CONNECT by name: backenly_app, backenly_authenticator, backenly_backup)`, `project sessions still connected: ${this.db.stuckSessions ?? 0}`],
+      }
+    }
     if (env.BOOTSTRAP_MODE === 'template') {
       const lines = ['', 'Project database template (template)', '  template backenly_project_template: exists']
       if (this.db.failTemplate) {
@@ -743,6 +771,64 @@ describe('reading the procedure', () => {
   })
 })
 
+describe('closing the region’s database once no project keeps its data there', () => {
+  it('closes it in one run, touching no secret, and reports what holds CONNECT by name', async () => {
+    const { fake } = finished()
+    const log: string[] = []
+    expect(await launch('close-shared', CONFIG, [], deps(fake, log))).toBe(0)
+    expect(runTasks(fake).map(envOf)).toEqual([{ BOOTSTRAP_MODE: 'close-shared' }])
+    expect(fake.calls.filter((c) => c.args[0] === 'secretsmanager')).toHaveLength(0)
+    expect(fake.db.closed).toBe(true)
+    expect(log.join('\n')).toContain(`The region's database ${CONFIG.database.name} is closed: CONNECT by name only (backenly_app, backenly_authenticator, backenly_backup).`)
+    expect(log.join('\n')).not.toContain('could not be ended')
+  })
+
+  it('fails, having changed nothing, while a project still keeps its data there', async () => {
+    const { fake } = finished({ sharedProject: true })
+    const log: string[] = []
+    expect(await launch('close-shared', CONFIG, [], deps(fake, log))).toBe(1)
+    expect(fake.db.closed).toBeUndefined()
+    expect(log.join('\n')).toContain('no move left behind')
+    expect(log.join('\n')).toContain("The region's database was not closed")
+  })
+
+  it('fails before any apply of the region, and when the procedure reached another database', async () => {
+    const never = new FakeAws({ roles: {}, applied: false })
+    const log: string[] = []
+    expect(await launch('close-shared', CONFIG, [], deps(never, log))).toBe(1)
+    expect(log.join('\n')).toContain('Run BOOTSTRAP_MODE=apply first')
+
+    const { fake } = finished({ reachedDatabase: 'postgres' })
+    const other: string[] = []
+    expect(await launch('close-shared', CONFIG, [], deps(fake, other))).toBe(1)
+    expect(other.join('\n')).toContain(`NOT DONE: the procedure reported database postgres, and this region's is ${CONFIG.database.name}.`)
+  })
+
+  it('says how many project sessions it could not end', async () => {
+    const { fake } = finished({ stuckSessions: 2 })
+    const log: string[] = []
+    expect(await launch('close-shared', CONFIG, [], deps(fake, log))).toBe(0)
+    expect(log.join('\n')).toContain('2 project session(s) could not be ended and are still connected')
+  })
+
+  it('opens it to PUBLIC again with open-shared', async () => {
+    const { fake } = finished({ closed: true })
+    const log: string[] = []
+    expect(await launch('open-shared', CONFIG, [], deps(fake, log))).toBe(0)
+    expect(runTasks(fake).map(envOf)).toEqual([{ BOOTSTRAP_MODE: 'open-shared' }])
+    expect(fake.db.closed).toBe(false)
+    expect(log.join('\n')).toContain(`The region's database ${CONFIG.database.name} is open to PUBLIC again.`)
+  })
+
+  it('reads the state from the procedure’s lines, and nothing from others', () => {
+    expect(sharedDatabaseState(['  step roles: current', 'shared database backenly: closed (CONNECT by name: backenly_app)', 'project sessions still connected: 0'])).toEqual({
+      database: 'backenly', state: 'closed', detail: 'backenly_app', projectSessions: 0,
+    })
+    expect(sharedDatabaseState(['shared database backenly: open to PUBLIC'])).toEqual({ database: 'backenly', state: 'open', detail: '', projectSessions: 0 })
+    expect(sharedDatabaseState(['Regional database initialised and verified.'])).toBeNull()
+  })
+})
+
 describe('arguments and configuration', () => {
   it('reads check and apply, and refuses what it does not understand', () => {
     expect(parseArgs(['check', '--config', 'l.json'])).toEqual({ mode: 'check', configPath: 'l.json', rotate: [] })
@@ -764,6 +850,13 @@ describe('arguments and configuration', () => {
     expect(() => parseArgs(['project-dbs', '--config', 'l.json'])).toThrow(/needs --databases/)
     expect(() => parseArgs(['apply', '--config', 'l.json', '--databases', 'none'])).toThrow(/--databases is for project-dbs/)
     expect(() => parseArgs(['template', '--config', 'l.json', '--rotate', 'backenly_app'])).toThrow(/--rotate is for apply/)
+  })
+
+  it('reads close-shared and open-shared, which take nothing but the config', () => {
+    expect(parseArgs(['close-shared', '--config', 'l.json'])).toEqual({ mode: 'close-shared', configPath: 'l.json', rotate: [] })
+    expect(parseArgs(['open-shared', '--config', 'l.json'])).toEqual({ mode: 'open-shared', configPath: 'l.json', rotate: [] })
+    expect(() => parseArgs(['close-shared', '--config', 'l.json', '--rotate', 'backenly_app'])).toThrow(/--rotate is for apply/)
+    expect(() => parseArgs(['close-shared', '--config', 'l.json', '--databases', 'none'])).toThrow(/--databases is for project-dbs/)
   })
 
   it('takes the stack output as it is, and refuses one that cannot run', () => {
