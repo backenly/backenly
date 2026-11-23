@@ -4,9 +4,12 @@
  * /api/v1 traffic and realtime). Each keeps its own connections, so a cap on
  * them can differ by kind (lib/data-plane/regional.ts dataPoolProcessCap).
  *
- * The runtime says so as it starts (noteProcessKind). Next.js sets
- * NEXT_RUNTIME in its own server. Anything else (a script, a test, a worker)
- * is 'other'.
+ * Each says so as it starts (noteProcessKind): the runtime in server/index.ts,
+ * the web in instrumentation.ts before it serves. NEXT_RUNTIME in the
+ * environment still counts as the web, for a Next server that has it there; a
+ * deployed one need not (Next resolves it when it builds the server), and a web
+ * that went by it alone ran at the cap meant for 'other'. Anything else (a
+ * script, a test, a worker) is 'other'.
  */
 
 export type ProcessKind = 'web' | 'runtime' | 'other'
