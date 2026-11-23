@@ -27,11 +27,14 @@
  *
  * --revoke-public-connect is the last step, once every project of the region
  * has a database of its own: CONNECT on the region's own database is taken
- * from PUBLIC and given by name to the platform's roles and to whatever other
- * login is connected to it, so a project's own login cannot open it at all.
- * Refused while any project of the region is still shared. Run it with the
- * region's admin connection (BACKENLY_ADMIN_DATABASE_URL, with the region
- * appended outside the home region) as the database's owner.
+ * from PUBLIC, and from any project role that holds it by name, and given by
+ * name to the platform's roles and to whatever other login is connected to it,
+ * so a project's own login cannot open it at all. Refused while any project of
+ * the region is still shared. Run it with the region's admin connection
+ * (BACKENLY_ADMIN_DATABASE_URL, with the region appended outside the home
+ * region) as the database's owner. On Backenly Cloud, where no service holds
+ * that connection, the region's procedure does the same:
+ * tools/managed-db/regional/launch.ts close-shared.
  *
  * Needs the platform database (DATABASE_URL). Prints project ids, steps and
  * reasons; never a credential, a row or a channel name.
@@ -182,7 +185,9 @@ async function main(): Promise<number> {
   if (command.mode === 'report') return report(region)
   if (command.mode === 'revoke_public_connect') {
     const done = await revokePublicConnect(region, { extraRoles: command.extraRoles })
-    console.log(`CONNECT on ${done.database} in ${region} taken from PUBLIC; given to ${done.granted.join(', ')}.`)
+    console.log(
+      `CONNECT on ${done.database} in ${region} taken from PUBLIC and from ${done.closedToProjectRoles.length} project role(s); given to ${done.granted.join(', ')}.`,
+    )
     console.log(`To put it back: ${done.reverse}`)
     return 0
   }

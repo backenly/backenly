@@ -2130,6 +2130,121 @@ suite('a project with a database of its own, from creation to purge, through the
   })
 })
 
+/**
+ * Once every project of the region has a database of its own, close-shared
+ * closes the region's database to every login that is not the platform's
+ * (sql/close-shared.sql): PUBLIC loses CONNECT, and so does a project login
+ * holding it by name, as a function or direct-access login made while its
+ * project's data was here does; the platform's roles keep it by name.
+ */
+suite('the region’s database, closed to every login that is not the platform’s once no project keeps its data there', () => {
+  const projectLogin = `bkn_fn_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+  const projectLoginPassword = generatePassword()
+  const outsider = `outsider_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+  const outsiderPassword = generatePassword()
+  const renamed: Array<{ from: string; to: string }> = []
+  const connectByName = async () =>
+    (
+      await rows<{ name: string }>(
+        superUrl(),
+        `SELECT DISTINCT g.rolname::text AS name
+           FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) x JOIN pg_roles g ON g.oid = x.grantee
+          WHERE d.datname = $1 AND x.privilege_type = 'CONNECT' AND g.oid <> d.datdba ORDER BY 1`,
+        [DB],
+      )
+    ).map((r) => r.name)
+  const publicConnect = async () =>
+    (await rows<{ open: boolean }>(superUrl(), `SELECT has_database_privilege('public', $1, 'CONNECT') AS open`, [DB]))[0].open
+
+  beforeAll(async () => {
+    if (!runnable) return
+    await rows(superUrl('postgres'), `CREATE ROLE ${projectLogin} LOGIN PASSWORD '${projectLoginPassword}'`)
+    await rows(superUrl('postgres'), `GRANT CONNECT ON DATABASE ${DB} TO ${projectLogin}`)
+    await rows(superUrl('postgres'), `CREATE ROLE ${outsider} LOGIN PASSWORD '${outsiderPassword}'`)
+  })
+
+  const nameBack = async () => {
+    for (const { from, to } of renamed.splice(0).reverse()) await rows(superUrl(), `ALTER SCHEMA "${to}" RENAME TO "${from}"`)
+  }
+
+  afterAll(async () => {
+    if (!runnable) return
+    await nameBack()
+    await rows(superUrl('postgres'), `GRANT CONNECT, TEMPORARY ON DATABASE ${DB} TO PUBLIC`)
+    await rows(superUrl('postgres'), `REVOKE ALL ON DATABASE ${DB} FROM ${projectLogin}`).catch(() => {})
+    await rows(superUrl('postgres'), `DROP ROLE IF EXISTS ${projectLogin}`)
+    await rows(superUrl('postgres'), `DROP ROLE IF EXISTS ${outsider}`)
+  })
+
+  it('is refused while a project keeps its data there, and nothing changes', async () => {
+    const before = await connectByName()
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+    expect(result.status).not.toBe(0)
+    expect(result.output).toContain('no move left behind')
+    expect(await publicConnect()).toBe(true)
+    expect(await connectByName()).toEqual(before)
+    expect(await refusal(url(projectLogin, projectLoginPassword), 'SELECT 1')).toBeNull()
+  })
+
+  it('is closed once every workspace schema is one a move left behind: PUBLIC and a project’s login lose CONNECT, the platform keeps it', async () => {
+    // Every workspace schema renamed as a move leaves it (movedSchemaName) for the close, and named back at once,
+    // so the suites after this one find the region as they left it.
+    const schemas = await rows<{ name: string }>(superUrl(), `SELECT nspname::text AS name FROM pg_namespace WHERE starts_with(nspname, 'workspace_') ORDER BY 1`)
+    for (const [i, { name }] of schemas.entries()) {
+      const to = `workspace_${randomUUID()}_moved1_${i}`
+      await rows(superUrl(), `ALTER SCHEMA "${name}" RENAME TO "${to}"`)
+      renamed.push({ from: name, to })
+    }
+    // A session the project's login holds open here is ended.
+    const held = new Client({ connectionString: url(projectLogin, projectLoginPassword) })
+    held.on('error', () => {})
+    await held.connect()
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+      expect(result.output).toMatch(new RegExp(`^shared database ${DB}: closed \\(CONNECT by name: .*backenly_app.*\\)$`, 'm'))
+      expect(result.output).toMatch(/^project sessions still connected: 0$/m)
+      expect(result.status).toBe(0)
+      await expect(held.query('SELECT 1')).rejects.toThrow()
+      // Idempotent: a second run changes nothing and reports the same.
+      const named = await connectByName()
+      const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+      expect(again.status).toBe(0)
+      expect(again.output.match(/^shared database .*$/m)?.[0]).toBe(result.output.match(/^shared database .*$/m)?.[0])
+      expect(await connectByName()).toEqual(named)
+    } finally {
+      await held.end().catch(() => {})
+      await nameBack()
+    }
+    expect(await publicConnect()).toBe(false)
+    const named = await connectByName()
+    expect(named).toEqual(expect.arrayContaining(['backenly_app', 'backenly_authenticator', 'backenly_backup', 'backenly_dbcreator', POOLER_AUTH]))
+    expect(named).not.toContain(projectLogin)
+    expect(await refusal(url(projectLogin, projectLoginPassword), 'SELECT 1')).toMatch(/permission denied for database/)
+    expect(await refusal(url(outsider, outsiderPassword), 'SELECT 1')).toMatch(/permission denied for database/)
+    for (const role of LOGINS) expect(await refusal(loginUrl(role), 'SELECT 1')).toBeNull()
+    expect(await refusal(adminUrl(), 'SELECT 1')).toBeNull()
+  })
+
+  it('stays closed through a check and an apply, each of which verifies, and refuses a second run while workspace schemas are back', async () => {
+    const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+    expect(again.status).not.toBe(0)
+    expect(again.output).toContain('no move left behind')
+    expect(bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB }).status).toBe(0)
+    const apply = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: DB })
+    expect(apply.output).toContain('Regional database initialised and verified.')
+    expect(apply.status).toBe(0)
+    expect(await publicConnect()).toBe(false)
+  })
+
+  it('is opened to PUBLIC again by open-shared', async () => {
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'open-shared', EXPECT_DATABASE: DB })
+    expect(result.output).toContain(`shared database ${DB}: open to PUBLIC`)
+    expect(result.status).toBe(0)
+    expect(await publicConnect()).toBe(true)
+    expect(await refusal(url(outsider, outsiderPassword), 'SELECT 1')).toBeNull()
+  })
+})
+
 suite('the procedure refuses', () => {
   it('to replace a live credential it was not asked to, and changes nothing', async () => {
     const before = await catalog()

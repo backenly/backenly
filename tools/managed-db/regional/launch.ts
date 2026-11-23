@@ -9,6 +9,8 @@
  *   npx tsx tools/managed-db/regional/launch.ts apply --config launch.json [--rotate backenly_app,...]
  *   npx tsx tools/managed-db/regional/launch.ts template --config launch.json
  *   npx tsx tools/managed-db/regional/launch.ts project-dbs --config launch.json --databases <file>|none
+ *   npx tsx tools/managed-db/regional/launch.ts close-shared --config launch.json
+ *   npx tsx tools/managed-db/regional/launch.ts open-shared --config launch.json
  *
  * launch.json is the region stack's db_procedure_launch_config output
  * (backenly-infra, aws/REGIONS_RUNBOOK.md): identifiers, never a secret value.
@@ -26,6 +28,13 @@
  * knows in the region, one per line in a file (or `none`); the procedure
  * refuses, touching nothing, unless they are exactly the ones it finds, and
  * reports one line per database, which this launcher counts.
+ *
+ * Once every project of the region has a database of its own, `close-shared`
+ * closes the region's database to every login that is not the platform's
+ * (bootstrap.sh, sql/close-shared.sql), and `open-shared` gives PUBLIC its
+ * CONNECT back. Each runs alone, writes no credential, and reports the state
+ * it left in one line, which this launcher requires.
+ *
  * AWS calls go through the AWS CLI on PATH with the credentials in the
  * environment (AWS_PROFILE), so this adds no dependency. Linux or macOS: secret
  * values reach the CLI on /dev/stdin, through a real pipe (awsCli).
@@ -83,8 +92,8 @@ export interface LaunchConfig {
   }
 }
 
-export type Mode = 'check' | 'apply' | 'template' | 'project-dbs'
-const MODES: Mode[] = ['check', 'apply', 'template', 'project-dbs']
+export type Mode = 'check' | 'apply' | 'template' | 'project-dbs' | 'close-shared' | 'open-shared'
+const MODES: Mode[] = ['check', 'apply', 'template', 'project-dbs', 'close-shared', 'open-shared']
 
 /**
  * What a role's secret holds: a connection string to the region's database
@@ -153,7 +162,7 @@ export function parseArgs(argv: string[]): Args {
   const [mode, ...rest] = argv
   if (!MODES.includes(mode as Mode)) {
     throw new Refusal(
-      'usage: launch.ts check|apply|template|project-dbs --config <launch.json> [--rotate role,...] [--databases <file>|none]',
+      'usage: launch.ts check|apply|template|project-dbs|close-shared|open-shared --config <launch.json> [--rotate role,...] [--databases <file>|none]',
     )
   }
   let configPath: string | undefined
@@ -483,6 +492,37 @@ async function ensureJwtSecret(aws: Aws, arn: string): Promise<'created' | 'kept
 
 // ── The run ──────────────────────────────────────────────────────────────────
 
+export interface SharedDatabaseState {
+  database: string
+  state: 'closed' | 'open'
+  /** close-shared: the roles that hold CONNECT by name. */
+  detail: string
+  /** close-shared: project sessions still connected after it tried to end them. */
+  projectSessions: number
+}
+
+/** What close-shared or open-shared reported (bootstrap.sh's output lines), or null for neither. */
+export function sharedDatabaseState(lines: string[]): SharedDatabaseState | null {
+  let found: Omit<SharedDatabaseState, 'projectSessions'> | null = null
+  let projectSessions = 0
+  for (const raw of lines) {
+    const line = raw.trim()
+    let m = /^shared database (\S+): closed \(CONNECT by name: (.*)\)$/.exec(line)
+    if (m) {
+      found = { database: m[1], state: 'closed', detail: m[2] }
+      continue
+    }
+    m = /^shared database (\S+): open to PUBLIC$/.exec(line)
+    if (m) {
+      found = { database: m[1], state: 'open', detail: '' }
+      continue
+    }
+    m = /^project sessions still connected: (\d+)$/.exec(line)
+    if (m) projectSessions = Number(m[1])
+  }
+  return found ? { ...found, projectSessions } : null
+}
+
 function printRun(label: string, run: ProcedureRun, log: Deps['log']): void {
   log(`── ${label}: ${run.taskArn}`)
   for (const line of run.lines) log(`   | ${line}`)
@@ -493,7 +533,9 @@ function printRun(label: string, run: ProcedureRun, log: Deps['log']): void {
  * check: report only. apply: converge, keep the credentials, check again.
  * template: build or converge the template project databases are cloned from.
  * project-dbs: converge every project database, given the ones the platform
- * knows. Resolves to the exit code.
+ * knows. close-shared / open-shared: close the region's database to every
+ * login that is not the platform's, or give PUBLIC its CONNECT back. Resolves
+ * to the exit code.
  */
 export async function launch(
   mode: Mode,
@@ -513,6 +555,34 @@ export async function launch(
       return 1
     }
     log('The project database template is converged and verified.')
+    return 0
+  }
+
+  if (mode === 'close-shared' || mode === 'open-shared') {
+    const run = await runProcedure(config, { BOOTSTRAP_MODE: mode }, deps)
+    printRun(mode, run, log)
+    const found = sharedDatabaseState(run.lines)
+    const wanted = mode === 'close-shared' ? 'closed' : 'open'
+    if (run.exitCode !== 0 || !found || found.state !== wanted) {
+      log(
+        mode === 'close-shared'
+          ? "The region's database was not closed: the log above says why. A refusal changes nothing."
+          : "The region's database was not opened to PUBLIC: the log above says why.",
+      )
+      return 1
+    }
+    if (found.database !== config.database.name) {
+      log(`NOT DONE: the procedure reported database ${found.database}, and this region's is ${config.database.name}.`)
+      return 1
+    }
+    if (mode === 'open-shared') {
+      log(`The region's database ${found.database} is open to PUBLIC again.`)
+      return 0
+    }
+    log(`The region's database ${found.database} is closed: CONNECT by name only (${found.detail}).`)
+    if (found.projectSessions > 0) {
+      log(`${found.projectSessions} project session(s) could not be ended and are still connected; each loses the database when it ends.`)
+    }
     return 0
   }
 

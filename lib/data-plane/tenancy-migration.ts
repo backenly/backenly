@@ -1969,10 +1969,15 @@ export async function migrationsInFlight(region: CloudRegionId): Promise<number>
 
 // ── Closing the shared database once it holds no project ────────────────────
 
+/** A project's roles: its logins (read-only, read-write, function) and its owner role (lib/projects/logins.ts). */
+const PROJECT_ROLE_PATTERN = '^bkn_(fn|ro|rw|own)_[0-9a-f]{12}$'
+
 export interface RevokeConnectReport {
   region: CloudRegionId
   database: string
   granted: string[]
+  /** Project roles that held a privilege on the database by name, and no longer do. */
+  closedToProjectRoles: string[]
   /** What puts it back, should a person need to. */
   reverse: string
 }
@@ -1982,14 +1987,19 @@ export interface RevokeConnectReport {
  * database (the region's own, which held the shared schemas) need not be open
  * to every login on the instance: CONNECT is taken from PUBLIC and given by
  * name to the platform's roles that use it, and to any other login connected
- * to it now that is not a project's. A project's own logins then cannot open
- * it at all. Refused while any project of the region is still shared (deleted
- * ones not yet purged included), or while it holds a workspace schema other
- * than what a move left behind.
+ * to it now that is not a project's. A project role that holds a privilege on
+ * it by name (direct access and functions make a project's logins with CONNECT
+ * on the database they are made in, which was this one while the project's
+ * data was here) loses that too, so a project's own logins cannot open it at
+ * all. Refused while any project of the region is still shared (deleted ones
+ * not yet purged included), or while it holds a workspace schema other than
+ * what a move left behind.
  *
  * Run as the database's owner (the region's administrator), over the region's
  * admin connection (BACKENLY_ADMIN_DATABASE_URL, with the region appended
- * outside the home region): only the owner may take what PUBLIC holds.
+ * outside the home region): only the owner may take what PUBLIC holds. On
+ * Backenly Cloud no service holds that connection, and the region's procedure
+ * does the same (tools/managed-db/regional/launch.ts close-shared).
  */
 export async function revokePublicConnect(region: CloudRegionId, options: { extraRoles?: string[] } = {}): Promise<RevokeConnectReport> {
   const shared = await prisma.project.count({ where: { databaseTenancy: 'shared', ...projectsInRegionWhere(region) } })
@@ -2018,7 +2028,7 @@ export async function revokePublicConnect(region: CloudRegionId, options: { extr
     const { rows: connected } = await client.query<{ name: string }>(
       `SELECT DISTINCT a.usename::text AS name FROM pg_stat_activity a JOIN pg_roles r ON r.rolname = a.usename
         WHERE a.datname = current_database() AND r.rolcanlogin AND a.usename <> current_user
-          AND a.usename !~ '^bkn_(ro|rw|fn)_[0-9a-f]{12}$'`,
+          AND a.usename !~ '${PROJECT_ROLE_PATTERN}'`,
     )
     const wanted = [
       'backenly_app',
@@ -2038,10 +2048,19 @@ export async function revokePublicConnect(region: CloudRegionId, options: { extr
     const granted = existing.map((r) => r.name)
 
     const db = q(me.db)
+    let closedToProjectRoles: string[] = []
     await client.query('BEGIN')
     try {
       for (const role of granted) await client.query(`GRANT CONNECT ON DATABASE ${db} TO ${q(role)}`)
       await client.query(`REVOKE CONNECT, TEMPORARY ON DATABASE ${db} FROM PUBLIC`)
+      const { rows: named } = await client.query<{ name: string }>(
+        `SELECT DISTINCT g.rolname::text AS name
+           FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) x JOIN pg_roles g ON g.oid = x.grantee
+          WHERE d.datname = current_database() AND g.rolname ~ '${PROJECT_ROLE_PATTERN}'
+          ORDER BY 1`,
+      )
+      for (const { name } of named) await client.query(`REVOKE ALL ON DATABASE ${db} FROM ${q(name)}`)
+      closedToProjectRoles = named.map((r) => r.name)
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
@@ -2049,13 +2068,20 @@ export async function revokePublicConnect(region: CloudRegionId, options: { extr
     }
     const { rows: [after] } = await client.query<{ open: boolean }>(`SELECT has_database_privilege('public', current_database(), 'CONNECT') AS open`)
     if (after.open) throw new Error(`PUBLIC still holds CONNECT on ${me.db}: a grant another role made was not taken back.`)
+    const { rows: stillOpen } = await client.query<{ name: string }>(
+      `SELECT rolname::text AS name FROM pg_roles
+        WHERE rolname ~ '${PROJECT_ROLE_PATTERN}' AND has_database_privilege(oid, current_database(), 'CONNECT') ORDER BY 1`,
+    )
+    if (stillOpen.length > 0) throw new Error(`${stillOpen.map((r) => r.name).join(', ')} can still connect to ${me.db}.`)
     const { rows: lacking } = await client.query<{ name: string }>(
       `SELECT rolname::text AS name FROM pg_roles WHERE rolname = ANY($1::text[]) AND NOT has_database_privilege(oid, current_database(), 'CONNECT')`,
       [granted],
     )
     if (lacking.length > 0) throw new Error(`${lacking.map((r) => r.name).join(', ')} cannot connect to ${me.db} after the grant.`)
-    console.log(`[TenancyMigration] region=${region} CONNECT on ${me.db} taken from PUBLIC; given to ${granted.join(', ')}`)
-    return { region, database: me.db, granted, reverse: `GRANT CONNECT, TEMPORARY ON DATABASE ${db} TO PUBLIC;` }
+    console.log(
+      `[TenancyMigration] region=${region} CONNECT on ${me.db} taken from PUBLIC and ${closedToProjectRoles.length} project role(s); given to ${granted.join(', ')}`,
+    )
+    return { region, database: me.db, granted, closedToProjectRoles, reverse: `GRANT CONNECT, TEMPORARY ON DATABASE ${db} TO PUBLIC;` }
   } finally {
     await client.end().catch(() => {})
   }

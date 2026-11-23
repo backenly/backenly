@@ -27,6 +27,16 @@
 #   BOOTSTRAP_MODE=template bash tools/managed-db/regional/bootstrap.sh      # build or converge the template
 #   BOOTSTRAP_MODE=project-dbs bash tools/managed-db/regional/bootstrap.sh   # converge every project database
 #
+# Once every project of the region has a database of its own, the region's
+# database itself need not be open to every login on the instance (PostgreSQL
+# gives CONNECT on every database to PUBLIC). Two more modes, each on its own:
+#
+#   BOOTSTRAP_MODE=close-shared bash tools/managed-db/regional/bootstrap.sh  # CONNECT only for the platform's roles
+#   BOOTSTRAP_MODE=open-shared bash tools/managed-db/regional/bootstrap.sh   # PUBLIC's CONNECT given back
+#
+# close-shared refuses while the database holds a workspace schema no move
+# left behind (sql/close-shared.sql says what it does and verifies).
+#
 # Run as the database's administrator (the RDS master on AWS), from inside the
 # region's VPC: on AWS that is a one-off admin task, never a long-running
 # service. Never part of `terraform apply`. One run at a time per instance.
@@ -41,7 +51,8 @@
 # ── Inputs (environment) ──────────────────────────────────────────────────────
 #   DATABASE_URL                     the regional database, as its administrator
 #   EXPECT_DATABASE                  optional; refuse unless DATABASE_URL names it
-#   BOOTSTRAP_MODE                   check (default), apply, template or project-dbs
+#   BOOTSTRAP_MODE                   check (default), apply, template, project-dbs,
+#                                      close-shared or open-shared
 #   BACKENLY_APP_VERIFIER            SCRAM-SHA-256 verifiers, never passwords
 #   BACKENLY_BACKUP_VERIFIER           (tools/managed-db/regional/scram.ts), for the
 #   BACKENLY_AUTHENTICATOR_VERIFIER    roles a check reports as missing, or named in
@@ -89,6 +100,9 @@
 #   credential <role>: missing | unrecorded | recorded <time>
 #   template backenly_project_template: created | exists           (template)
 #   db <name>: current | applied <step,...> | failed <step>        (project-dbs)
+#   shared database <name>: closed (CONNECT by name: <roles>)      (close-shared)
+#   project sessions still connected: <n>                          (close-shared)
+#   shared database <name>: open to PUBLIC                         (open-shared)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,8 +114,8 @@ PRE_APPLY="${BOOTSTRAP_PRE_APPLY:-false}"
 
 case "$MODE" in
   check) APPLY=false ;;
-  apply | template | project-dbs) APPLY=true ;;
-  *) echo "refusing: BOOTSTRAP_MODE must be check, apply, template or project-dbs, not \"$MODE\""; exit 2 ;;
+  apply | template | project-dbs | close-shared | open-shared) APPLY=true ;;
+  *) echo "refusing: BOOTSTRAP_MODE must be check, apply, template, project-dbs, close-shared or open-shared, not \"$MODE\""; exit 2 ;;
 esac
 case "$REHEARSAL" in
   true | false) ;;
@@ -526,6 +540,25 @@ if [ "$MODE" = template ] || [ "$MODE" = project-dbs ]; then
   # Preflight on the region's database: the server, and that this is the region's.
   "${PSQL[@]}" -f "$HERE/sql/preflight.sql"
   if [ "$MODE" = template ]; then template_mode; else project_dbs_mode; fi
+  exit 0
+fi
+
+# The region's database closed to every login that is not the platform's, or
+# opened to PUBLIC again (sql/close-shared.sql, sql/open-shared.sql), once the
+# region's apply has made the platform's roles. Nothing else is touched.
+if [ "$MODE" = close-shared ] || [ "$MODE" = open-shared ]; then
+  echo
+  echo "The region's database ($MODE)"
+  "${PSQL[@]}" -f "$HERE/sql/preflight.sql"
+  if [ -z "$(recorded roles)" ]; then
+    echo "refusing: the region's database has never applied sql/roles.sql, which makes the roles BOOTSTRAP_MODE=$MODE gives CONNECT to. Run BOOTSTRAP_MODE=apply first."
+    exit 2
+  fi
+  if [ "$MODE" = close-shared ]; then
+    "${PSQL[@]}" -tA -f "$HERE/sql/close-shared.sql"
+  else
+    "${PSQL[@]}" -tA -f "$HERE/sql/open-shared.sql"
+  fi
   exit 0
 fi
 
