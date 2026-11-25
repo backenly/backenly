@@ -281,15 +281,15 @@ describe('STO-13: a file follows its bucket unless the upload says otherwise', (
   }, 60_000)
 
   it('a multipart upload takes the bucket’s policy, and a private bucket clamps it', async () => {
-    const open = await jsonPost('upload-multipart', { filename: 'clip.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
+    const open = await jsonPost('upload-multipart', { filename: 'clip.txt', contentType: 'text/plain', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
     expect(open.status).toBe(200)
-    const closed = await jsonPost('upload-multipart', { filename: 'clip2.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
+    const closed = await jsonPost('upload-multipart', { filename: 'clip2.txt', contentType: 'text/plain', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
     expect(closed.status).toBe(200)
     const rows = await prisma.storageFile.findMany({
-      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.mp4', 'clip2.mp4'] } },
+      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.txt', 'clip2.txt'] } },
       select: { name: true, isPublic: true },
     })
-    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.mp4': true, 'clip2.mp4': false })
+    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.txt': true, 'clip2.txt': false })
   }, 60_000)
 
   it('a signed upload takes the bucket’s policy, and a private bucket clamps it', async () => {
@@ -390,6 +390,153 @@ describe('STO-14: file count limits answer HTTP 413, never 500 (#592)', () => {
     } finally {
       await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => {})
       await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => {})
+    }
+  }, 60_000)
+})
+
+describe('STO-15: local multipart uploads over 100 MB and error handling (#594)', () => {
+  const multipartRoute = async (method: 'POST' | 'PUT' | 'DELETE', query: string, body?: any, isBuffer = false) => {
+    const { POST, PUT, DELETE } = await import('@/app/api/v1/[projectId]/storage/upload-multipart/route')
+    const req = new NextRequest(`http://test.local/api/v1/${projectId}/storage/upload-multipart${query}`, {
+      method,
+      headers: {
+        'x-api-key': serviceKey,
+        ...(isBuffer ? { 'content-type': 'application/octet-stream' } : body ? { 'content-type': 'application/json' } : {}),
+      },
+      body: isBuffer ? body : body ? JSON.stringify(body) : undefined,
+    })
+    const handler = method === 'POST' ? POST : method === 'PUT' ? PUT : DELETE
+    const res = await handler(req, { params: Promise.resolve({ projectId }) })
+    const json = await res.json().catch(() => null)
+    return { status: res.status, body: json }
+  }
+
+  it('a local multipart upload over 100 MB of .mp4 into the default videos bucket completes with size and hash matching', async () => {
+    // 11 chunks of 10 MB = 110 MB (> 100 MB)
+    const chunkSize = 10 * 1024 * 1024
+    const totalParts = 11
+    const totalBytes = chunkSize * totalParts
+
+    // Create a predictable 10 MB buffer
+    const chunkData = Buffer.alloc(chunkSize, 'a')
+    const hasher = crypto.createHash('sha256')
+    for (let i = 0; i < totalParts; i++) {
+      hasher.update(chunkData)
+    }
+    const expectedHash = hasher.digest('hex')
+
+    // 1. Initiate into default 'videos' bucket
+    const initRes = await multipartRoute('POST', '?action=initiate', {
+      filename: 'test-large.mp4',
+      contentType: 'video/mp4',
+      contentLength: totalBytes,
+    })
+    expect(initRes.status).toBe(200)
+    const { uploadId } = initRes.body.data
+    expect(uploadId).toBeDefined()
+
+    // 2. Upload chunks 1 to 11
+    for (let part = 1; part <= totalParts; part++) {
+      const putRes = await multipartRoute('PUT', `?action=upload&uploadId=${uploadId}&partNumber=${part}&totalParts=${totalParts}`, chunkData, true)
+      expect(putRes.status).toBe(200)
+    }
+
+    // 3. Complete
+    const compRes = await multipartRoute('POST', `?action=complete&uploadId=${uploadId}&totalParts=${totalParts}`)
+    expect(compRes.status).toBe(200)
+    expect(compRes.body.data.size).toBe(totalBytes)
+
+    // Verify stored file on disk
+    const storedPath = compRes.body.data.path
+    expect(storedPath).toBeDefined()
+    const stat = await fs.stat(storedPath)
+    expect(stat.size).toBe(totalBytes)
+
+    // Verify file hash on disk
+    const fileHasher = crypto.createHash('sha256')
+    const { createReadStream } = await import('fs')
+    const { pipeline } = await import('stream/promises')
+    const { Writable } = await import('stream')
+    await pipeline(
+      createReadStream(storedPath),
+      new Writable({
+        write(chunk, _enc, cb) {
+          fileHasher.update(chunk)
+          cb()
+        },
+      })
+    )
+    expect(fileHasher.digest('hex')).toBe(expectedHash)
+  }, 120_000)
+
+  it('a refused type at initiate returns 4xx and leaves no chunk directory', async () => {
+    const res = await multipartRoute('POST', '?action=initiate', {
+      filename: 'malicious.exe',
+      contentType: 'application/x-msdownload',
+      contentLength: 1024,
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.error?.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error?.details?.reason).toBe('EXECUTABLE_BLOCKED')
+
+    // Check no row in prisma.storageFile was created
+    const pendingFile = await prisma.storageFile.findFirst({
+      where: { projectId, name: 'malicious.exe' },
+    })
+    expect(pendingFile).toBeNull()
+  }, 60_000)
+
+  it('a refusal at complete returns 4xx and leaves no chunks or pending row', async () => {
+    // Create bucket with maxFileSizeBytes = 5 MB
+    const tinyBucket = await prisma.storageBucket.create({
+      data: {
+        name: 'tiny-videos',
+        projectId,
+        isPublic: false,
+        maxFileSizeBytes: BigInt(5 * 1024 * 1024),
+        allowedExtensions: ['.mp4'],
+        allowedMimeTypes: ['video/mp4'],
+      },
+    })
+
+    try {
+      // Initiate claiming 2 MB (which passes initiate check of 5 MB)
+      const initRes = await multipartRoute('POST', '?action=initiate', {
+        filename: 'oversized.mp4',
+        contentType: 'video/mp4',
+        contentLength: 2 * 1024 * 1024,
+        bucket: 'tiny-videos',
+      })
+      expect(initRes.status).toBe(200)
+      const { uploadId } = initRes.body.data
+
+      const chunkDir = path.join(process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks'), uploadId)
+
+      // Upload two 4 MB chunks (total = 8 MB > 5 MB bucket limit)
+      const chunk4MB = Buffer.alloc(4 * 1024 * 1024, 'x')
+      await multipartRoute('PUT', `?action=upload&uploadId=${uploadId}&partNumber=1&totalParts=2`, chunk4MB, true)
+      await multipartRoute('PUT', `?action=upload&uploadId=${uploadId}&partNumber=2&totalParts=2`, chunk4MB, true)
+
+      // Verify chunk files exist on disk before complete
+      expect(await fs.stat(chunkDir).then(() => true).catch(() => false)).toBe(true)
+
+      // Complete - should fail because 8 MB exceeds 5 MB bucket limit
+      const compRes = await multipartRoute('POST', `?action=complete&uploadId=${uploadId}&totalParts=2`)
+      expect(compRes.status).toBe(413)
+      expect(compRes.body.error?.code).toBe('PLAN_LIMIT_EXCEEDED')
+
+      // Verify chunk directory is removed
+      const dirExists = await fs.stat(chunkDir).then(() => true).catch(() => false)
+      expect(dirExists).toBe(false)
+
+      // Verify pending row is removed
+      const pendingRow = await prisma.storageFile.findFirst({
+        where: { projectId, metadata: { path: ['uploadId'], equals: uploadId } },
+      })
+      expect(pendingRow).toBeNull()
+    } finally {
+      await prisma.storageFile.deleteMany({ where: { bucketId: tinyBucket.id } }).catch(() => {})
+      await prisma.storageBucket.delete({ where: { id: tinyBucket.id } }).catch(() => {})
     }
   }, 60_000)
 })
