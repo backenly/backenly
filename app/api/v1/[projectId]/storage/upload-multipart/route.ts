@@ -468,7 +468,8 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
    * from the database whenever an upload is rejected or fails during complete.
    */
   const cleanupRefusal = async () => {
-    fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
+    // Awaited: the answer says the chunks are gone, so they are gone before it is sent.
+    await fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
     await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(() => null)
     await forgetFileNames(projectId, [fileRecord.id]).catch(() => {})
   }
@@ -512,12 +513,17 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
 
   let storedFile: { id: string; name: string; path: string; url: string; size: bigint }
   try {
-    storedFile = await (storageService as any).uploadFromChunks(
-      bucket.id,
-      chunkPaths,
-      { name: targetName, mimeType },
-      { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined, uploader: uploaderOf(fileRecord) ?? undefined }
-    )
+    const uploadOptions = { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined, uploader: uploaderOf(fileRecord) ?? undefined }
+    if (storageService.uploadFromChunks) {
+      storedFile = await storageService.uploadFromChunks(bucket.id, chunkPaths, { name: targetName, mimeType }, uploadOptions)
+    } else {
+      // A driver that cannot take chunks from disk (S3, when its own multipart
+      // could not start and the parts landed here) keeps the buffered path and
+      // its 100 MB limit, as before.
+      const parts: Buffer[] = []
+      for (const chunkPath of chunkPaths) parts.push(await fs.readFile(chunkPath))
+      storedFile = await storageService.uploadFile(bucket.id, { name: targetName, buffer: Buffer.concat(parts), mimeType }, uploadOptions)
+    }
   } catch (error: any) {
     // After a refusal, remove the chunk directory and the pending row, as the abort handler does.
     await cleanupRefusal()

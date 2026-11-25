@@ -46,6 +46,16 @@ export interface StorageService {
     file: { name: string; buffer: Buffer; mimeType?: string },
     options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
   ): Promise<{ id: string; name: string; path: string; url: string; size: bigint }>
+  /**
+   * Store a file from parts already on this disk, without holding it in
+   * memory. Only the local driver has it; a caller checks before using it.
+   */
+  uploadFromChunks?(
+    bucketId: string,
+    chunkPaths: string[],
+    file: { name: string; mimeType?: string },
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
+  ): Promise<{ id: string; name: string; path: string; url: string; size: bigint }>
   listFiles(bucketId: string | undefined, projectId: string, options?: { limit?: number; offset?: number; search?: string }): Promise<Array<{
     id: string
     name: string

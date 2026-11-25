@@ -187,7 +187,8 @@ describe('every upload path records who sent the file', () => {
       new NextRequest(`http://localhost:3000/api/v1/${projectId}/storage/upload-multipart?action=initiate`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-api-key': publicKey, 'x-user-token': shopperToken() },
-        body: JSON.stringify({ filename: 'clip.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'photos' }),
+        // A type `photos` allows: the local branch now checks it at initiate (#594).
+        body: JSON.stringify({ filename: 'clip.png', contentType: 'image/png', contentLength: 1024, bucket: 'photos' }),
       }),
       { params: Promise.resolve({ projectId }) },
     )
