@@ -348,14 +348,17 @@ describe('every provider callback that issues a platform session asks first', ()
 
   const ISSUES_SESSION_COOKIE = /cookies\.set\(\s*['"]auth-token['"]/
   const callbacks = routeFiles(path.join(ROOT, 'app/api'))
-    .filter((file) => /[\\/]callback[\\/]route\.ts$/.test(file))
+    // One Tap is not a callback by name; it issues the same session from a
+    // Google identity, so it is swept with them.
+    .filter((file) => /[\\/](callback|one-tap)[\\/]route\.ts$/.test(file))
     .filter((file) => ISSUES_SESSION_COOKIE.test(fs.readFileSync(file, 'utf8')))
     .map((file) => ({ file: rel(file) }))
 
-  it('finds the four that exist today, so the sweep below is not vacuous', () => {
+  it('finds the five that exist today, so the sweep below is not vacuous', () => {
     expect(callbacks.map((c) => c.file)).toEqual(
       expect.arrayContaining([
         'app/api/auth/platform-google/callback/route.ts',
+        'app/api/auth/platform-google/one-tap/route.ts',
         'app/api/auth/platform-github/callback/route.ts',
         'app/api/auth/google/callback/route.ts',
         'app/api/auth/github/callback/route.ts',
@@ -363,9 +366,29 @@ describe('every provider callback that issues a platform session asks first', ()
     )
   })
 
+  // The platform's two Google doors do not look the account up themselves:
+  // they hand the identity to signInGoogleIdentity, which asks. For them the
+  // hand-off is where the question is put, and the next test holds the shared
+  // path to the rule.
+  const ASKS = ['providerSignInRefusal(', 'signInGoogleIdentity(']
+  const firstAsk = (src: string) => {
+    const found = ASKS.map((call) => src.indexOf(call)).filter((at) => at > -1)
+    return found.length ? Math.min(...found) : -1
+  }
+
+  it('the shared Google sign-in asks before it writes to the account, and issues no session itself', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'lib/auth/oauth/google-sign-in.ts'), 'utf8')
+    const asks = src.indexOf('providerSignInRefusal(')
+    expect(asks).toBeGreaterThan(-1)
+    expect(src.indexOf('prisma.user.update(')).toBeGreaterThan(asks)
+    expect(src.indexOf('prisma.user.create(')).toBeGreaterThan(asks)
+    expect(src).not.toContain('createSession(')
+    expect(src).not.toContain('cookies.set(')
+  })
+
   it.each(callbacks)('$file asks before it writes to the account or issues a session', ({ file }) => {
     const src = fs.readFileSync(path.join(ROOT, file), 'utf8')
-    const asks = src.indexOf('providerSignInRefusal(')
+    const asks = firstAsk(src)
     expect(asks).toBeGreaterThan(-1)
     for (const write of ['prisma.user.update(', 'createSession(', 'prisma.session.create(', 'recordAvatar(']) {
       const at = src.indexOf(write)

@@ -14,6 +14,7 @@ import { BrandMark } from '@/components/site/BrandMark'
 import { openCookiePreferences } from '@/lib/consent'
 import { ProductHuntBadge } from '@/components/site/ProductHuntBadge'
 import { useUserSession } from '@/lib/hooks/useUserSession'
+import { GoogleOneTap } from '@/components/auth/GoogleOneTap'
 
 // Synchronously load all marketing-site icons into the Iconify cache so
 // every <Icon> renders on first paint, even with no network to api.iconify.design.
@@ -162,6 +163,8 @@ export function SiteShell({ children, navOverlay = false, footerLit = false }: {
   useInstantPageChanges()
   return (
     <div>
+      {/* Signed-out visitors get Google's own sign-up prompt; it draws nothing in this tree. */}
+      <GoogleOneTap />
       <div
         // overflow-x-CLIP, not hidden. `hidden` makes this wrapper a scroll
         // container (overflow-y computes to auto), and a sticky descendant

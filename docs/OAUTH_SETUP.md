@@ -21,7 +21,12 @@ Backenly now supports **Google** and **GitHub** OAuth authentication!
 7. Add authorized redirect URIs:
    - `http://localhost:3000/api/auth/google/callback` (development)
    - `https://yourdomain.com/api/auth/google/callback` (production)
-8. Copy the **Client ID** and **Client Secret**
+8. Add authorized JavaScript origins, for the Google One Tap prompt on the
+   site and its sign-in pages (without them Google shows no prompt, and the
+   Google button still works):
+   - `http://localhost:3000` (development)
+   - `https://yourdomain.com` (production)
+9. Copy the **Client ID** and **Client Secret**
 
 #### Add to .env
 

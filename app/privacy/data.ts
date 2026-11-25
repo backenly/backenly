@@ -72,7 +72,7 @@
  * reordering; verify-content-integrity.ts enforces their uniqueness and shape.
  */
 
-export const EFFECTIVE_DATE = 'November 14, 2026'
+export const EFFECTIVE_DATE = 'November 25, 2026'
 export const PRIVACY_EMAIL = 'support@backenly.com'
 
 export type Provider = {
@@ -147,8 +147,8 @@ export const PROVIDERS: Provider[] = [
   },
   {
     name: 'Google',
-    purpose: 'Sign-in, if you choose it',
-    data: 'Your email address, name and account identifier',
+    purpose: 'Sign-in, if you choose it, and the Google sign-in prompt offered to signed-out visitors',
+    data: 'IP address and browser signals when the prompt loads; your email address, name and account identifier if you sign in',
     href: 'https://policies.google.com/privacy',
   },
   {
@@ -385,7 +385,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     content: 'These third parties can receive information when you use Backenly.',
     providers: true,
     extra:
-      'Google and GitHub appear only if you choose to sign in with them. Providers you connect to your own projects are your relationships, not ours. The legal role of each provider depends on the service and the privacy law that applies.',
+      'GitHub appears only if you choose to sign in with it. Google provides the sign-in prompt that signed-out visitors may see on this site and on the sign-in pages, so your browser contacts Google when that prompt loads; we receive your details from Google only if you choose an account in it. Providers you connect to your own projects are your relationships, not ours. The legal role of each provider depends on the service and the privacy law that applies.',
   },
   {
     id: 'international',

@@ -91,7 +91,8 @@ describe('the signup flows report rather than implement', () => {
     // self-hosted first operator) and POST /api/auth/register/verify.
     'lib/auth/signup/complete-email-signup.ts',
     'app/api/auth/platform-github/callback/route.ts',
-    'app/api/auth/platform-google/callback/route.ts',
+    // The platform's Google sign-in, shared by the redirect callback and One Tap.
+    'lib/auth/oauth/google-sign-in.ts',
   ]
 
   it.each(FLOWS)('%s calls the seam and not the referral implementation', (file) => {

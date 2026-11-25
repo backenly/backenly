@@ -7,10 +7,15 @@ const isDevelopment = process.env.NODE_ENV !== 'production'
 // Omitting either silently kills email signup rather than failing loudly —
 // the script is blocked, no widget renders, so the client never gets a token
 // and refuses to submit, while the server still demands one.
+//
+// accounts.google.com/gsi/ is Google One Tap (components/auth/GoogleOneTap.tsx):
+// its script (script-src), its stylesheet (style-src), the prompt's frame in
+// browsers without FedCM (frame-src) and its calls home (connect-src). These
+// are the four entries Google documents for a site with a CSP.
 const enforcedScriptSrc = [
   "script-src 'self' 'unsafe-inline'",
   isDevelopment ? "'unsafe-eval'" : '',
-  'https://cdn.jsdelivr.net https://js.sentry-cdn.com https://cdn.paddle.com https://sandbox-cdn.paddle.com https://public.profitwell.com https://app.supademo.com https://challenges.cloudflare.com',
+  'https://cdn.jsdelivr.net https://js.sentry-cdn.com https://cdn.paddle.com https://sandbox-cdn.paddle.com https://public.profitwell.com https://app.supademo.com https://challenges.cloudflare.com https://accounts.google.com/gsi/client',
 ]
   .filter(Boolean)
   .join(' ')
@@ -406,13 +411,13 @@ const nextConfig = {
               // generating a per-request nonce in middleware and switching
               // to `'strict-dynamic'`.
               enforcedScriptSrc,
-              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.paddle.com https://sandbox-cdn.paddle.com",
+              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.paddle.com https://sandbox-cdn.paddle.com https://accounts.google.com/gsi/style",
               "font-src 'self' https://fonts.gstatic.com",
               "img-src 'self' data: https: blob:",
               // Tighten connect-src — we explicitly allow Sentry, Paddle, and
               // the project's own backend. Wildcard `https:` / `wss:` removed.
-              `connect-src 'self' ${isDevelopment ? 'ws: wss:' : ''} https://api.backenly.com https://*.backenly.com https://*.ingest.sentry.io https://*.sentry.io https://api.paddle.com https://sandbox-api.paddle.com https://buy.paddle.com https://sandbox-buy.paddle.com https://api.openai.com https://*.amplitude.com wss://*.backenly.com https://challenges.cloudflare.com`,
-              "frame-src 'self' https://buy.paddle.com https://sandbox-buy.paddle.com https://app.supademo.com https://challenges.cloudflare.com",
+              `connect-src 'self' ${isDevelopment ? 'ws: wss:' : ''} https://api.backenly.com https://*.backenly.com https://*.ingest.sentry.io https://*.sentry.io https://api.paddle.com https://sandbox-api.paddle.com https://buy.paddle.com https://sandbox-buy.paddle.com https://api.openai.com https://*.amplitude.com wss://*.backenly.com https://challenges.cloudflare.com https://accounts.google.com/gsi/`,
+              "frame-src 'self' https://buy.paddle.com https://sandbox-buy.paddle.com https://app.supademo.com https://challenges.cloudflare.com https://accounts.google.com/gsi/",
               "frame-ancestors 'self'",
               "base-uri 'self'",
               "form-action 'self'",

@@ -30,6 +30,7 @@ import {
   PrimaryButton,
   GoogleSvg,
 } from '@/components/site/AuthShell'
+import { GoogleOneTap } from '@/components/auth/GoogleOneTap'
 import { TurnstileWidget, isTurnstileEnabled, resetTurnstile } from '@/components/site/TurnstileWidget'
 
 registerSiteIcons()
@@ -314,6 +315,7 @@ function SignupForm() {
 
   return (
     <AuthChrome>
+      <GoogleOneTap context="signup" />
       <AuthCard title="Create your account" subtitle="One free project, kept permanently. No credit card.">
         {refCode && (
           <div className="mb-5 flex items-center gap-2 rounded-lg border border-white/[0.14] bg-white/[0.05] px-3 py-2.5 text-[12px] text-violet-100">
