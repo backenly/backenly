@@ -40,9 +40,23 @@
  */
 
 import { prisma } from '@/lib/db'
-import { regionRawClient, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { databaseClient, regionRawClient, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
-import { isChangeVaultSchema, projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
+
+/**
+ * The database a registry is read in: a region's own (a region id alone), or a
+ * project's own database in it, which holds a registry of its own read by that
+ * project's PostgREST only. A pass over a region's registries walks the
+ * region's database and then each project database of the region
+ * (lib/data-plane/project-databases.ts forEachProjectDatabase).
+ */
+export type RegistryTarget = CloudRegionId | { region: CloudRegionId; database: string | null }
+
+function registryClient(target: RegistryTarget): WorkspaceRawClient {
+  if (typeof target === 'string') return regionRawClient(target)
+  return target.database === null ? regionRawClient(target.region) : databaseClient(target.region, target.database)
+}
+import { isChangeVaultSchema, isMovedSchema, projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 /**
  * The database a schema is registered in: its project's, in that project's
@@ -143,8 +157,8 @@ export interface RegistrationResult {
  * installed by the same script and in the same transaction as the register
  * side, so its presence answers for both.
  */
-export async function postgrestRegistryInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
-  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
+export async function postgrestRegistryInstalled(target: RegistryTarget = HOME_REGION): Promise<boolean> {
+  const rows = await registryClient(target).$queryRaw<Array<{ present: boolean }>>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_proc p
@@ -258,6 +272,30 @@ export async function registerSchemaByName(schema: string): Promise<Registration
 }
 
 /**
+ * registerSchemaByName in the database `db` reaches, rather than the one the
+ * schema's project resolves to: for a project whose data is being moved to a
+ * database of its own (lib/data-plane/tenancy-migration.ts), whose schemas are
+ * registered in the new database before its row names it. The same branch
+ * parity check, and the same refusal of a name the registry does not serve.
+ * Never throws; nothing is cached, since the cache is keyed by name and the
+ * same name may be served by another database.
+ */
+export async function registerSchemaOn(db: WorkspaceRawClient, schema: string): Promise<RegistrationResult> {
+  if (BRANCH_SCHEMA_RE.test(schema)) {
+    const parity = await verifyBranchProtection(db, schema.replace(/_br_[a-z0-9_]+$/, ''), schema)
+    if (!parity.ok) {
+      return { registered: false, schema, error: `Refusing to serve branch ${schema}: ${parity.reason}.` }
+    }
+  }
+  try {
+    await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_register_schema($1)`, schema)
+    return { registered: true, schema }
+  } catch (err) {
+    return { registered: false, schema, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
  * Every workspace schema that exists in Postgres but is missing from the
  * PostgREST registry.
  *
@@ -271,10 +309,11 @@ export async function registerSchemaByName(schema: string): Promise<Registration
  * down every tenant at once — loud, and already covered. This one catches a
  * per-project silent death, which is what actually shipped.
  */
-export async function unregisteredSchemas(region: CloudRegionId = HOME_REGION): Promise<string[]> {
-  // One region's database and its own registry. Each region's PostgREST
-  // serves only the schemas in that region.
-  const db = regionRawClient(region)
+export async function unregisteredSchemas(target: RegistryTarget = HOME_REGION): Promise<string[]> {
+  // One database and its own registry: a region's, whose PostgREST serves only
+  // the schemas in that region, or a project's own, whose PostgREST serves
+  // that database alone.
+  const db = registryClient(target)
   const listRows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )
@@ -286,8 +325,9 @@ export async function unregisteredSchemas(region: CloudRegionId = HOME_REGION): 
   )
 
   // A change vault is unregistered by design (lib/changes/preserve.ts): it
-  // keeps what a schema change removed and is never served.
-  return existing.map(e => e.schema_name).filter(s => !registered.has(s) && !isChangeVaultSchema(s))
+  // keeps what a schema change removed and is never served. So is what a move
+  // to a database of its own left behind (lib/data-plane/tenancy-migration.ts).
+  return existing.map(e => e.schema_name).filter(s => !registered.has(s) && !isChangeVaultSchema(s) && !isMovedSchema(s))
 }
 
 /** Raw SQL on the database the schemas are in: a client, or a transaction on it. */

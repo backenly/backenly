@@ -55,7 +55,7 @@ import {
   sha256,
   unwrapDataKey,
 } from './crypto'
-import { isChangeVaultSchema } from '@/lib/security/workspace-schema'
+import { isChangeVaultSchema, isMovedSchema } from '@/lib/security/workspace-schema'
 import { ALL_FUNCTION_STATE_SQL, currentFunctionSql, type RealtimeFunctionName } from '@/lib/realtime/channel-sql'
 import { BUNDLE_FILES, MANIFEST_FILE } from './export'
 import { extractTar } from './tar'
@@ -818,12 +818,13 @@ async function reconcileDerivedState(
   //
   // Change vaults came back with the data and stay unserved: they hold what a
   // schema change removed, kept for rolling that change back, and the registry
-  // refuses them by name.
+  // refuses them by name. So does what a project's move to a database of its
+  // own left behind (lib/data-plane/tenancy-migration.ts) until it is dropped.
   const metadata = await readComponent(bundle, 'deployment-metadata')
   const schemas: string[] = metadata
     ? (JSON.parse(metadata.toString('utf8')).schemas ?? [])
     : []
-  const workspaces = schemas.filter(s => s.startsWith('workspace_') && !isChangeVaultSchema(s))
+  const workspaces = schemas.filter(s => s.startsWith('workspace_') && !isChangeVaultSchema(s) && !isMovedSchema(s))
   for (const schema of workspaces) {
     await psql(admin, `SELECT public.backenly_pgrst_register_schema('${schema.replace(/'/g, "''")}')`)
   }
@@ -1026,7 +1027,7 @@ async function verifyHealth(bundle: ValidatedBundle, options: RestoreOptions): P
   const metadata = await readComponent(bundle, 'deployment-metadata')
   const expectedSchemas: string[] = metadata
     ? (JSON.parse(metadata.toString('utf8')).schemas ?? []).filter((s: string) =>
-        s.startsWith('workspace_') && !isChangeVaultSchema(s),
+        s.startsWith('workspace_') && !isChangeVaultSchema(s) && !isMovedSchema(s),
       )
     : []
   for (const schema of expectedSchemas) {

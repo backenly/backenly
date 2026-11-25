@@ -39,19 +39,39 @@
 import { randomUUID } from 'crypto'
 import type { BackgroundJob, Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
-import type { ImportConnection, ImportedFrom, ImportProgress, ImportSourceId, ImportStartRequest } from './contract'
+import type { ImportConnection, ImportedFrom, ImportPreview, ImportProgress, ImportSourceId, ImportStartRequest } from './contract'
 import { ImportInputError, type ImportDriver, type ImportLimits, type RunContext } from './driver'
 import { initialProgress, mergeProgress, type ProgressPatch } from './progress'
 import { redactedMessage, secretsOf } from './redact'
 import { driverFor, sourceName } from './registry'
 import { ImportAborted } from './pg-engine'
 import { IMPORT_GATE, LOOK_GATE, withSlot } from './gate'
+import { localDestinations } from './local-destination'
+import { sandboxLauncher } from './sandbox'
 
 export const IMPORT_JOB_TYPE = 'import'
 /** While it runs: a status no queue sweep selects. */
 const RUNNING = 'import_running'
 const DONE = 'completed'
 const BROKEN = 'failed'
+
+/** The statuses an import's row moves through (lib/import/sandbox-jobs.ts writes them too). */
+export const JOB_STATUS = { running: RUNNING, done: DONE, broken: BROKEN } as const
+
+/**
+ * Where a source is read. On Backenly Cloud: in a sandbox task of its own
+ * (lib/import/sandbox.ts), never in this process. Without the sandbox's
+ * settings a production server reads no source at all; only the tests and
+ * local development read one here.
+ */
+export function importReading(env: Readonly<Record<string, string | undefined>> = process.env): 'sandbox' | 'in-process' | 'unavailable' {
+  if (sandboxLauncher(env)) return 'sandbox'
+  return env.NODE_ENV === 'production' ? 'unavailable' : 'in-process'
+}
+
+function unavailable(): ImportRefusedError {
+  return new ImportRefusedError(503, 'Importing is not available right now. Nothing was read or created.', 'IMPORT_UNAVAILABLE', {}, { 'Retry-After': '300' })
+}
 
 export const IMPORT_ERRORS = {
   failed: 'IMPORT_FAILED',
@@ -167,16 +187,34 @@ export async function startImport(
      */
     spendBudget?: () => Promise<void>
   } = {},
-): Promise<{ jobId: string; projectId: string }> {
+): Promise<{ jobId: string; projectId: string | null }> {
   const source = input.connection.source
   const driver = await driverFor(source)
   if (!driver) throw new ImportRefusedError(400, `Moving from ${source} is not available.`, 'IMPORT_SOURCE_UNAVAILABLE')
+  const reading = importReading()
+  if (reading === 'unavailable') throw unavailable()
 
   const { checkRequestedRegion } = await import('@/lib/regions')
   const region = checkRequestedRegion(input.region, process.env, input.userId)
   if (region.ok === false) throw new ImportInputError(region.message, 'region')
 
   const account = await creationAccountFor(input.userId, input.orgId, { initialize: true })
+  if (reading === 'sandbox') {
+    // The source is checked by the sandbox task; the project is created once it passes (lib/import/sandbox-jobs.ts).
+    const { startSandboxImport } = await import('./sandbox-jobs')
+    const { jobId } = await startSandboxImport({
+      userId: input.userId,
+      orgId: input.orgId,
+      connection: input.connection,
+      include: input.include,
+      name: input.name,
+      region: region.region,
+      owner: account,
+      limits: await limitsForAccount(account),
+      spendBudget: opts.spendBudget,
+    })
+    return { jobId, projectId: null }
+  }
   // One import runs at a time in this process and a few more wait their turn
   // (lib/import/gate.ts). With the line full, refuse now, before the budget is
   // spent or anything is created.
@@ -241,7 +279,7 @@ export async function startImport(
       timeoutAt: new Date(now.getTime() + IMPORT_LIMITS.staleMs),
     },
   })
-  await audit(project.id, input.userId, 'IMPORT_STARTED', { jobId, source, sentence: `Started moving in from ${sourceName(source)}` })
+  await auditImport(project.id, input.userId, 'IMPORT_STARTED', { jobId, source, sentence: `Started moving in from ${sourceName(source)}` })
 
   const recordProduct = await import('@/lib/platform-signals').then((m) => m.recordProductEvent).catch(() => null)
   recordProduct?.({ type: 'project_created', userId: input.userId, projectId: project.id, metadata: { name: project.name, importedFrom: source } })
@@ -286,17 +324,28 @@ async function limitsForAccount(account: { ownerId: string; organizationId: stri
  * The Review step: who may move a backend into this organization (its owners
  * and admins, as for creating any project), then the driver's own read-only look.
  */
-export async function inspectImport(input: { userId: string; orgId: string; connection: ImportConnection }) {
+export async function inspectImport(input: {
+  userId: string
+  orgId: string
+  connection: ImportConnection
+}): Promise<{ preview: ImportPreview } | { lookId: string }> {
   const source = input.connection.source
   const driver = await driverFor(source)
   if (!driver) throw new ImportRefusedError(400, `Moving from ${source} is not available.`, 'IMPORT_SOURCE_UNAVAILABLE')
+  const reading = importReading()
+  if (reading === 'unavailable') throw unavailable()
   const account = await creationAccountFor(input.userId, input.orgId, { initialize: false })
   const limits = await limitsForAccount(account)
+  if (reading === 'sandbox') {
+    const { startLook } = await import('./sandbox-jobs')
+    return startLook({ userId: input.userId, orgId: input.orgId, connection: input.connection, limits })
+  }
   try {
-    return await lookAtSource(
+    const preview = await lookAtSource(
       (signal) => driver.inspect(input.connection as any, { userId: input.userId, orgId: input.orgId, signal, limits }),
       IMPORT_LIMITS.inspectMs,
     )
+    return { preview }
   } catch (err) {
     throw sayable(err, input.connection)
   }
@@ -394,6 +443,7 @@ async function execute(
     projectId,
     jobId,
     include: payload.include,
+    destinations: localDestinations({ projectId, userId: payload.userId, jobId, signal: controller.signal }),
     progress: (patch: ProgressPatch) => {
       state.set(mergeProgress(state.get(), patch))
       dirty = true
@@ -435,7 +485,7 @@ async function execute(
         result: importedFrom as unknown as Prisma.InputJsonValue,
       },
     })
-    await audit(projectId, payload.userId, 'IMPORT_FINISHED', {
+    await auditImport(projectId, payload.userId, 'IMPORT_FINISHED', {
       jobId,
       source: payload.source,
       tables: importedFrom.tables,
@@ -466,7 +516,7 @@ async function execute(
         payload: { ...payload, progress: state.get() } as unknown as Prisma.InputJsonValue,
       },
     })
-    await audit(projectId, payload.userId, canceled ? 'IMPORT_CANCELED' : 'IMPORT_FAILED', {
+    await auditImport(projectId, payload.userId, canceled ? 'IMPORT_CANCELED' : 'IMPORT_FAILED', {
       jobId,
       source: payload.source,
       sentence: canceled ? `Canceled moving in from ${sourceName(payload.source)}` : `Moving in from ${sourceName(payload.source)} stopped: ${message}`,
@@ -481,7 +531,7 @@ async function execute(
   }
 }
 
-async function recordProjectSize(projectId: string): Promise<void> {
+export async function recordProjectSize(projectId: string): Promise<void> {
   try {
     const { snapshotProjectDbStorage } = await import('@/lib/usage/db-storage')
     await snapshotProjectDbStorage(projectId)
@@ -490,14 +540,14 @@ async function recordProjectSize(projectId: string): Promise<void> {
   }
 }
 
-function failureMessage(err: unknown, secrets: readonly string[]): string {
+export function failureMessage(err: unknown, secrets: readonly string[]): string {
   const text = redactedMessage(err, secrets, 400)
   if (err instanceof ImportInputError) return text
   if (!text) return 'The import stopped.'
   return /^(Couldn't|Backenly|Copying|The |Supabase|Firebase|Reading|There )/.test(text) ? text : `The import stopped: ${text}`
 }
 
-function normalizeImportedFrom(raw: ImportedFrom, source: ImportSourceId): ImportedFrom {
+export function normalizeImportedFrom(raw: ImportedFrom, source: ImportSourceId): ImportedFrom {
   return {
     source: raw.source ?? source,
     at: raw.at ?? new Date().toISOString(),
@@ -519,6 +569,17 @@ function payloadOf(row: Pick<BackgroundJob, 'payload'>): JobPayload {
 async function progressOf(row: BackgroundJob): Promise<ImportProgress> {
   const local = LOCAL.get(row.id)
   if (local && row.status === RUNNING) return local.progress()
+  if ((row.payload as any)?.sandbox) {
+    const { closeLapsed: closeSandbox, lapsed } = await import('./sandbox-jobs')
+    if (lapsed(row)) {
+      const closed = await closeSandbox(row)
+      if (closed) return closed
+      const fresh = await prisma.backgroundJob.findUnique({ where: { id: row.id } })
+      if (fresh) return payloadOf(fresh).progress
+    }
+    const p = payloadOf(row).progress
+    return { ...p, status: row.status === RUNNING && row.projectId ? 'running' : p.status }
+  }
   if (row.status === RUNNING && (!row.timeoutAt || row.timeoutAt <= new Date())) return closeLapsed(row)
   const p = payloadOf(row).progress
   return { ...p, status: row.status === RUNNING ? 'running' : p.status }
@@ -545,7 +606,7 @@ async function closeLapsed(row: BackgroundJob): Promise<ImportProgress> {
     },
   })
   if (count === 1 && row.projectId) {
-    await audit(row.projectId, payload.userId, 'IMPORT_FAILED', { jobId: row.id, source: payload.source, sentence: progress.error })
+    await auditImport(row.projectId, payload.userId, 'IMPORT_FAILED', { jobId: row.id, source: payload.source, sentence: progress.error })
   } else if (count === 0) {
     const fresh = await prisma.backgroundJob.findUnique({ where: { id: row.id } })
     if (fresh) return payloadOf(fresh).progress
@@ -584,7 +645,11 @@ export async function listImportJobs(orgId: string): Promise<Array<{ progress: I
  */
 export async function cancelImportJob(jobId: string): Promise<ImportProgress | null> {
   const local = LOCAL.get(jobId)
-  if (local) {
+  const row = local ? null : await prisma.backgroundJob.findFirst({ where: { id: jobId, type: IMPORT_JOB_TYPE, status: RUNNING } })
+  if (row && (row.payload as any)?.sandbox) {
+    const { cancelSandboxJob } = await import('./sandbox-jobs')
+    await cancelSandboxJob(row)
+  } else if (local) {
     if (!local.controller.signal.aborted) local.controller.abort(new ImportAborted('canceled'))
     // The job ends at its next check between batches; give it a moment to say so.
     await Promise.race([local.done, new Promise((r) => setTimeout(r, 3_000))])
@@ -604,7 +669,8 @@ export async function waitForImportJob(jobId: string): Promise<void> {
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
 
-async function audit(projectId: string, userId: string, action: string, details: Record<string, unknown>): Promise<void> {
+/** An import's start, finish, failure or cancel in the activity feed. */
+export async function auditImport(projectId: string, userId: string, action: string, details: Record<string, unknown>): Promise<void> {
   await prisma.auditLog
     .create({
       data: {

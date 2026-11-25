@@ -8,11 +8,17 @@
  * 'backenly.com' when the home region had no DIRECT_DB_HOST, and no Backenly
  * Cloud region has one: every database is private to its VPC.
  *
- * Now a region with no developer-facing host issues no login and shows no
- * string, in the console's routes and over MCP alike, and says so; the logins
- * that exist stay listed by name so they can be revoked. A configured host is
- * still handed out. The platform's own use of the read-only role (run_query)
- * dials the database directly and is untouched.
+ * Now a project nothing outside can reach gets no login and no string, in the
+ * console's routes and over MCP alike, and is told why; the logins that exist
+ * stay listed by name so they can be revoked. On a shared database with no
+ * host its operator gave (a self-hosted deployment), that nothing outside can
+ * reach it; on Backenly Cloud, where a shared database is never reached from
+ * outside, that direct connections are for a project's own database, through
+ * the connection pooler (a project database whose region does not offer the
+ * pooler is tests/unit/direct-postgres-pooler-logins.spec.ts and
+ * tests/integration/pooler-logins.spec.ts). A configured host is still handed
+ * out. The platform's own use of the read-only role (run_query) dials the
+ * database directly and is untouched.
  */
 
 let mockProjectId = ''
@@ -24,7 +30,13 @@ import '../helpers/real-web-standard'
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { encryptValue } from '@/lib/security/projectEnvCrypto'
-import { DIRECT_ACCESS_UNAVAILABLE_MESSAGE, directAccessRoleNames, getDirectAccessStatus, provisionDirectAccess } from '@/lib/services/direct-access'
+import {
+  DIRECT_ACCESS_UNAVAILABLE_MESSAGE,
+  DIRECT_ACCESS_UNAVAILABLE_MESSAGES,
+  directAccessRoleNames,
+  getDirectAccessStatus,
+  provisionDirectAccess,
+} from '@/lib/services/direct-access'
 import { dispatchTool } from '@/lib/ai/brain/tools'
 import { GET as statusRoute, POST as provisionRoute } from '@/app/api/projects/[id]/database-access/route'
 import { POST as rotateRoute } from '@/app/api/projects/[id]/database-access/rotate/route'
@@ -34,8 +46,8 @@ let ownerId = ''
 let roleName = ''
 
 /** Production, with the region's developer-facing host as given (none by default). */
-function production(host = '') {
-  jest.replaceProperty(process, 'env', { ...process.env, NODE_ENV: 'production', DIRECT_DB_HOST: host })
+function production(host = '', edition = 'single-tenant') {
+  jest.replaceProperty(process, 'env', { ...process.env, NODE_ENV: 'production', DIRECT_DB_HOST: host, BACKENLY_EDITION: edition })
 }
 
 const request = (body: unknown = {}) => ({ json: async () => body }) as any
@@ -84,7 +96,7 @@ it('issues and rotates no login there, before anything is created, and says why'
 
   for (const res of [await provisionRoute(request({ mode: 'READ_WRITE' })), await rotateRoute(request({ mode: 'READ_ONLY' }))]) {
     expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ error: DIRECT_ACCESS_UNAVAILABLE_MESSAGE, code: 'DIRECT_ACCESS_UNAVAILABLE' })
+    expect(await res.json()).toEqual({ error: DIRECT_ACCESS_UNAVAILABLE_MESSAGE, code: 'DIRECT_ACCESS_UNAVAILABLE', reason: 'no_host' })
   }
 })
 
@@ -95,6 +107,25 @@ it('tells an agent there is no connection string, and what works instead', async
   expect(res.code).toBe('DIRECT_ACCESS_UNAVAILABLE')
   expect(res.summary).toContain(DIRECT_ACCESS_UNAVAILABLE_MESSAGE)
   expect(res.summary).toContain('run_query')
+  expect(JSON.stringify(res)).not.toContain('postgresql://')
+})
+
+it('on Backenly Cloud, says a shared database is not reached from outside, to the console and to an agent', async () => {
+  production('', 'cloud')
+  const status = await getDirectAccessStatus(mockProjectId)
+  expect(status).toMatchObject({
+    available: false,
+    unavailable: DIRECT_ACCESS_UNAVAILABLE_MESSAGES.shared_database,
+    unavailableReason: 'shared_database',
+    tenancy: 'shared',
+    credentials: [],
+    logins: [{ mode: 'READ_ONLY', roleName }],
+  })
+  await expect(provisionDirectAccess(mockProjectId, 'READ_WRITE')).rejects.toMatchObject({ reason: 'shared_database' })
+  const res = await dispatchTool('get_database_credentials', { mode: 'READ_ONLY' }, { projectId: mockProjectId })
+  expect(res.ok).toBe(false)
+  expect(res.summary).toContain(DIRECT_ACCESS_UNAVAILABLE_MESSAGES.shared_database)
+  expect(res.data).toMatchObject({ available: false, reason: 'shared_database' })
   expect(JSON.stringify(res)).not.toContain('postgresql://')
 })
 

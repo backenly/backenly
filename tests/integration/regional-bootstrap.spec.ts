@@ -36,6 +36,26 @@
  * A third is in the definers themselves: dropping a login needs its privileges,
  * which its creator does not hold (see the block on logins below).
  *
+ * The region is first built without the connection pooler's login, and then
+ * given it by an apply that supplies its verifier, as a region whose launch
+ * config gains the pooler's secret is: the administrator makes the login and
+ * the pooler's own database, backenly_pooler, and the lookup the pooler reads
+ * customers' logins through answers as that login.
+ *
+ * The last suites give a project a database of its own: the procedure builds
+ * the template such databases are cloned from, a role that may create
+ * databases and nothing else clones it, the clone's owner gives it its grants
+ * as the platform will, and the procedure then verifies and converges each
+ * clone. The application's paths run against a clone as they do against the
+ * region's database.
+ *
+ * Then the platform takes a project with a database of its own through its
+ * whole life against that template, as the application does it: created by
+ * the region's switch, used, read over v1 and v2 from its own PostgREST on the
+ * PostgREST host (the real postgrest binary CI provides), snapshotted and
+ * restored, asked to be deleted and restored, purged; a creation whose
+ * platform row fails; the switch for staff only; the daily orphan sweep.
+ *
  * What only a throwaway RDS instance can add is RDS's own role patches; that
  * rehearsal needs AWS and is not this suite.
  *
@@ -44,14 +64,21 @@
  */
 
 import { execFileSync, spawnSync } from 'child_process'
-import { randomUUID } from 'crypto'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import fs from 'fs'
-import net from 'net'
+import http from 'http'
+import net, { type AddressInfo } from 'net'
 import os from 'os'
 import path from 'path'
 import { Client } from 'pg'
 
-import { disconnectRegionalClients } from '@/lib/data-plane/regional'
+import {
+  disconnectRegionalClients,
+  projectDatabaseUrl,
+  projectPostgrest,
+  regionRawClient,
+  workspaceRawClient,
+} from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { driftCaptureHealth, driftEventBacklog } from '@/lib/autonomy/drift-event-upkeep'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
@@ -86,13 +113,28 @@ const ROOT = process.cwd()
 const DB = 'backenly_regional'
 const ADMIN = 'regional_admin'
 const STEPS = ['roles', 'postgrest', 'drift-events', 'regional-bodies', 'auth-projection', 'direct-access', 'extensions']
-const LOGINS = ['backenly_app', 'backenly_backup', 'backenly_authenticator'] as const
+const LOGINS = ['backenly_app', 'backenly_backup', 'backenly_authenticator', 'backenly_dbcreator'] as const
 type Login = (typeof LOGINS)[number]
 const VERIFIER_VARIABLE: Record<Login, string> = {
   backenly_app: 'BACKENLY_APP_VERIFIER',
   backenly_backup: 'BACKENLY_BACKUP_VERIFIER',
   backenly_authenticator: 'BACKENLY_AUTHENTICATOR_VERIFIER',
+  backenly_dbcreator: 'BACKENLY_DBCREATOR_VERIFIER',
 }
+/** What a check says of a login role the database does not have yet. */
+const MISSING: Record<Login, string> = {
+  backenly_app: 'missing (the first apply must supply BACKENLY_APP_VERIFIER)',
+  backenly_backup: 'missing (the first apply must supply BACKENLY_BACKUP_VERIFIER)',
+  backenly_authenticator: 'missing (the first apply must supply BACKENLY_AUTHENTICATOR_VERIFIER)',
+  // Made only by an apply that is given its verifier, as this suite's first is.
+  backenly_dbcreator: 'missing (an apply makes it only when given BACKENLY_DBCREATOR_VERIFIER)',
+}
+
+/** The connection pooler's login and its database, made only by an apply given its verifier. */
+const POOLER_AUTH = 'backenly_pooler_auth'
+const POOLER_DB = 'backenly_pooler'
+const POOLER_MISSING = 'missing (an apply makes it only when given BACKENLY_POOLER_AUTH_VERIFIER)'
+let poolerPassword = generatePassword()
 
 const SUPER_PW = generatePassword()
 const ADMIN_PW = generatePassword()
@@ -100,6 +142,7 @@ const passwords: Record<Login, string> = {
   backenly_app: generatePassword(),
   backenly_backup: generatePassword(),
   backenly_authenticator: generatePassword(),
+  backenly_dbcreator: generatePassword(),
 }
 
 let bin = ''
@@ -117,6 +160,7 @@ function url(user: string, password: string, database = DB): string {
 const superUrl = (database = DB) => url('postgres', SUPER_PW, database)
 const adminUrl = (database = DB) => url(ADMIN, ADMIN_PW, database)
 const loginUrl = (role: Login) => url(role, passwords[role])
+const poolerAuthUrl = () => url(POOLER_AUTH, poolerPassword, POOLER_DB)
 
 async function rows<T = Record<string, unknown>>(connection: string, sql: string, params: unknown[] = []): Promise<T[]> {
   const client = new Client({ connectionString: connection })
@@ -258,11 +302,19 @@ async function catalog(database = DB): Promise<unknown> {
   return row.catalog
 }
 
-/** As RDS leaves it: the administrator owns what was installed. Event triggers excepted. */
+/**
+ * As RDS leaves it: the administrator owns what was installed. Event triggers
+ * excepted. The hand-over is this suite's stand-in for "the administrator made
+ * it", not a change the procedure should react to, so the database's event
+ * triggers are kept out of it: an ALTER ... OWNER fires the PostgREST sync,
+ * whose definer, once handed over, reads a registry that whoever created it
+ * owns, so the hand-over must not depend on the order it takes them in.
+ */
 async function handToAdministrator(): Promise<void> {
   await rows(
     superUrl(),
-    `DO $$
+    `SET session_replication_role = replica;
+     DO $$
      DECLARE r record;
      BEGIN
        FOR r IN SELECT nspname FROM pg_namespace
@@ -314,6 +366,9 @@ beforeAll(async () => {
   // another only with the ADMIN option on it, which is what roles.sql needs to
   // give the application pg_read_all_stats.
   await rows(superUrl('postgres'), `GRANT pg_read_all_stats TO ${ADMIN} WITH ADMIN OPTION`)
+  // And pg_signal_backend, which roles.sql gives the database creator so that
+  // DROP DATABASE ... WITH (FORCE) can end the sessions in a project database.
+  await rows(superUrl('postgres'), `GRANT pg_signal_backend TO ${ADMIN} WITH ADMIN OPTION`)
   await rows(superUrl('postgres'), `CREATE DATABASE ${DB} OWNER ${ADMIN}`)
 
   vectorAvailable = (await rows(superUrl(), `SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`)).length > 0
@@ -338,7 +393,10 @@ suite('a region’s first database', () => {
     const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
     expect(result.status).toBe(0)
     for (const step of STEPS) expect(result.output).toContain(`step ${step}: pending`)
-    for (const role of LOGINS) expect(result.output).toContain(`credential ${role}: missing (the first apply must supply ${VERIFIER_VARIABLE[role]})`)
+    for (const role of LOGINS) expect(result.output).toContain(`credential ${role}: ${MISSING[role]}`)
+    // A region without the pooler's login has no step for it at all.
+    expect(result.output).toContain(`credential ${POOLER_AUTH}: ${POOLER_MISSING}`)
+    expect(result.output).not.toContain('step pooler')
     expect(result.output).toContain(`Check only: nothing was written. ${STEPS.length} step(s) not applied yet.`)
     expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = 'backenly_meta'`)).toEqual([])
     expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [[...LOGINS]])).toEqual([])
@@ -372,6 +430,8 @@ suite('a region’s first database', () => {
       { rolname: 'backenly_app', ...no, rolinherit: true, rolcanlogin: true, rolbypassrls: false },
       { rolname: 'backenly_authenticator', ...no, rolinherit: false, rolcanlogin: true, rolbypassrls: false },
       { rolname: 'backenly_backup', ...no, rolinherit: false, rolcanlogin: true, rolbypassrls: true },
+      // It creates databases, and can do nothing else.
+      { rolname: 'backenly_dbcreator', ...no, rolcreatedb: true, rolinherit: false, rolcanlogin: true, rolbypassrls: false },
       { rolname: 'backenly_external', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
       { rolname: 'backenly_no_schema_changes', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
       { rolname: 'service_role', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
@@ -394,6 +454,12 @@ suite('a region’s first database', () => {
     if (!vectorAvailable) {
       expect(result.output).toContain('rehearsal: extension vector is not available on this server')
     }
+    // Given no verifier for it, the procedure makes neither the pooler's login
+    // nor its database, runs no step for it, and verifies all the same.
+    expect(result.output).not.toContain('step pooler')
+    expect(result.output).toContain(`credential ${POOLER_AUTH}: ${POOLER_MISSING}`)
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_roles WHERE rolname = $1`, [POOLER_AUTH])).toEqual([])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_database WHERE datname = $1`, [POOLER_DB])).toEqual([])
     const extensions = await rows<{ extname: string; schema: string }>(
       superUrl(),
       `SELECT extname, extnamespace::regnamespace::text AS schema FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY extname`,
@@ -412,6 +478,104 @@ suite('a region’s first database', () => {
     expect(await catalog()).toEqual(before)
   })
 
+  it('gets the connection pooler’s login and database from the administrator when an apply gives its verifier', async () => {
+    const result = bootstrap({
+      DATABASE_URL: adminUrl(),
+      BOOTSTRAP_MODE: 'apply',
+      EXPECT_DATABASE: DB,
+      BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(poolerPassword),
+    })
+    expect(result.output).toContain('step roles: re-applied (files unchanged)')
+    expect(result.output).toContain(`database ${POOLER_DB}: created`)
+    expect(result.output).toContain('step pooler: applied')
+    expect(result.output).toContain('backenly_pooler: logins table, lookup, databases and privileges as declared')
+    // The steps after it need a superuser on stock PostgreSQL, as the first
+    // apply's did; the next test finishes the run as one.
+    expect(result.status).not.toBe(0)
+    expect(result.output).not.toContain('step postgrest: re-applied')
+
+    // It can log in, and do nothing else: no attribute, no role, sixty connections.
+    expect(
+      await rows(
+        superUrl(),
+        `SELECT rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolconnlimit
+           FROM pg_roles WHERE rolname = $1`,
+        [POOLER_AUTH],
+      ),
+    ).toEqual([
+      {
+        rolcanlogin: true, rolinherit: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false,
+        rolreplication: false, rolbypassrls: false, rolconnlimit: 60,
+      },
+    ])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_auth_members WHERE member = $1::regrole`, [POOLER_AUTH])).toEqual([])
+    expect(
+      await rows(superUrl(), `SELECT set_by, rotations FROM backenly_meta.bootstrap_credentials WHERE role_name = $1`, [POOLER_AUTH]),
+    ).toEqual([{ set_by: ADMIN, rotations: 0 }])
+
+    // The database and everything in it are the administrator's, as the RDS
+    // master's would be, and the step is recorded in the region's own ledger
+    // with the checksum of both its files.
+    expect(await rows(superUrl(), `SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1`, [POOLER_DB])).toEqual([
+      { owner: ADMIN },
+    ])
+    expect(
+      await rows(
+        superUrl(POOLER_DB),
+        `SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass`,
+      ),
+    ).toEqual([{ owner: ADMIN }])
+    const checksum = createHash('sha256')
+      .update(Buffer.concat(['sql/pooler.sql', 'sql/verify-pooler.sql'].map((f) => fs.readFileSync(path.join(ROOT, 'tools/managed-db/regional', f)))))
+      .digest('hex')
+    expect(await rows(superUrl(), `SELECT checksum FROM backenly_meta.bootstrap_steps WHERE step = 'pooler'`)).toEqual([{ checksum }])
+
+    // The verifier is its password: it logs in to its database with it, and
+    // not with another.
+    expect(await rows(poolerAuthUrl(), 'SELECT current_user AS me')).toEqual([{ me: POOLER_AUTH }])
+    expect(await refusal(url(POOLER_AUTH, generatePassword(), POOLER_DB), 'SELECT 1')).toMatch(/password authentication failed/)
+  })
+
+  it('serves a login’s verifier to the pooler’s login, as the pooler asks for it, and nothing else', async () => {
+    const probe = 'bkn_ci_pooler_probe'
+    const database = `p_${randomUUID().replace(/-/g, '')}`
+    const verifier = scramSha256Verifier(generatePassword())
+    await rows(superUrl(), `CREATE ROLE ${probe} LOGIN PASSWORD '${verifier}'`)
+    const app = url('backenly_app', passwords.backenly_app, POOLER_DB)
+    try {
+      await rows(app, `INSERT INTO backenly_pooler.logins (rolname, verifier, database) VALUES ($1, $2, $3)`, [probe, verifier, database])
+      const lookup = `SELECT usename::text AS usename, passwd FROM backenly_pooler.lookup($1, $2)`
+      expect(await rows(poolerAuthUrl(), lookup, [probe, database])).toEqual([{ usename: probe, passwd: verifier }])
+      // Only for that login's own database, and only while it is active.
+      expect(await rows(poolerAuthUrl(), lookup, [probe, `p_${'0'.repeat(32)}`])).toEqual([])
+      await rows(app, `UPDATE backenly_pooler.logins SET active = false, updated_at = now() WHERE rolname = $1`, [probe])
+      expect(await rows(poolerAuthUrl(), lookup, [probe, database])).toEqual([])
+      // The pooler's login reads nothing itself, and the application looks nothing up.
+      expect(await refusal(poolerAuthUrl(), `SELECT * FROM backenly_pooler.logins`)).toMatch(/permission denied/)
+      expect(await refusal(app, `SELECT * FROM backenly_pooler.lookup('${probe}', '${database}')`)).toMatch(/permission denied/)
+    } finally {
+      await rows(app, `DELETE FROM backenly_pooler.logins WHERE rolname = $1`, [probe]).catch(() => {})
+      await rows(superUrl(), `DROP ROLE IF EXISTS ${probe}`)
+    }
+  })
+
+  it('is finished by a superuser, re-applying the pooler’s step without changing whose its database is, and verifies', async () => {
+    const result = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: DB })
+    expect(result.output).toContain('Regional database initialised and verified.')
+    expect(result.status).toBe(0)
+    expect(result.output).toContain(`database ${POOLER_DB}: exists`)
+    for (const step of ['roles', 'pooler']) expect(result.output).toContain(`step ${step}: re-applied (files unchanged)`)
+    for (const step of STEPS.slice(1)) expect(result.output).toContain(`step ${step}:`)
+    expect(result.output).toMatch(new RegExp(`credential ${POOLER_AUTH}: recorded \\d{4}-`))
+    const owners = await rows<{ owner: string }>(
+      superUrl(POOLER_DB),
+      `SELECT DISTINCT pg_get_userbyid(p.proowner) AS owner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'backenly_pooler'
+       UNION SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'backenly_pooler.logins'::regclass`,
+    )
+    expect(owners).toEqual([{ owner: ADMIN }])
+  })
+
   it('is handed to the administrator, as RDS leaves it, and a check audits it, writing nothing', async () => {
     // After this nothing re-applies until the application has run against it:
     // setup-direct-access.sql drops and recreates its role functions on every
@@ -428,9 +592,36 @@ suite('a region’s first database', () => {
     const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
     expect(result.output).toContain('Check only: nothing was written. Every step is recorded, and the database verifies.')
     expect(result.status).toBe(0)
-    for (const step of STEPS) expect(result.output).toContain(`step ${step}: current`)
-    for (const role of LOGINS) expect(result.output).toContain(`credential ${role}: recorded`)
+    for (const step of [...STEPS, 'pooler']) expect(result.output).toContain(`step ${step}: current`)
+    for (const role of [...LOGINS, POOLER_AUTH]) expect(result.output).toContain(`credential ${role}: recorded`)
+    // The pooler's database is verified by the check too.
+    expect(result.output).toContain('backenly_pooler: logins table, lookup, databases and privileges as declared')
     expect(await rows(superUrl(), `SELECT step, checksum, applied_at, applied_by FROM backenly_meta.bootstrap_steps ORDER BY step`)).toEqual(before)
+  })
+
+  it('fails a check when the pooler’s login or its database is not as declared', async () => {
+    await rows(superUrl(), `GRANT backenly_external TO ${POOLER_AUTH}`)
+    await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 70`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+      expect(result.status).not.toBe(0)
+      expect(result.output).toContain(`role ${POOLER_AUTH} is a member of backenly_external; it may hold no role`)
+      expect(result.output).toContain(`role ${POOLER_AUTH} must have CONNECTION LIMIT 60, not 70`)
+    } finally {
+      await rows(superUrl(), `REVOKE backenly_external FROM ${POOLER_AUTH}`)
+      await rows(superUrl(), `ALTER ROLE ${POOLER_AUTH} CONNECTION LIMIT 60`)
+    }
+
+    // In its own database, as its owner could make it.
+    await rows(adminUrl(POOLER_DB), `GRANT SELECT ON backenly_pooler.logins TO PUBLIC`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+      expect(result.status).not.toBe(0)
+      expect(result.output).toContain('backenly_pooler did not reach its declared state: public has any privilege on logins')
+    } finally {
+      await rows(adminUrl(POOLER_DB), `REVOKE SELECT ON backenly_pooler.logins FROM PUBLIC`)
+    }
+    expect(bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB }).status).toBe(0)
   })
 })
 
@@ -1163,6 +1354,897 @@ suite('a workspace made before the backup role was given every one', () => {
   })
 })
 
+const TEMPLATE = 'backenly_project_template'
+/** A project database's name, as the platform names one: p_ and 32 lowercase hex. */
+const projectDatabaseName = () => `p_${randomUUID().replace(/-/g, '')}`
+const creatorUrl = (database = DB) => url('backenly_dbcreator', passwords.backenly_dbcreator, database)
+const appIn = (database: string) => url('backenly_app', passwords.backenly_app, database)
+
+/** A SQL file of the procedure's, run with this cluster's psql as the procedure runs it. */
+function psqlFile(connection: string, file: string): { status: number; output: string } {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PG/i.test(key))) as NodeJS.ProcessEnv
+  const result = spawnSync(
+    exe('psql'),
+    ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-v', `allow_missing_extensions=${!vectorAvailable}`, '-d', connection, '-f', path.join(ROOT, file)],
+    { encoding: 'utf8', env, timeout: 120_000 },
+  )
+  return { status: result.status ?? 1, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+}
+
+/**
+ * As the platform will make one: the database creator clones the template,
+ * then, on the same connection and as the clone's owner, gives the clone the
+ * grants CREATE DATABASE does not copy (scripts/sql/project-database-acl.sql).
+ */
+async function cloneProjectDatabase(name: string): Promise<void> {
+  const client = new Client({ connectionString: creatorUrl() })
+  client.on('error', () => {})
+  await client.connect()
+  try {
+    await client.query(`CREATE DATABASE "${name}" TEMPLATE ${TEMPLATE}`)
+    await client.query(`SELECT set_config('backenly.project_database', $1, false)`, [name])
+    await client.query(fs.readFileSync(path.join(ROOT, 'scripts/sql/project-database-acl.sql'), 'utf8'))
+  } finally {
+    await client.end().catch(() => {})
+  }
+}
+
+/** Everything delivered on `channel` to a session of `connection`, while it listens. */
+async function listening(connection: string, channel: string) {
+  const client = new Client({ connectionString: connection })
+  client.on('error', () => {})
+  const heard: string[] = []
+  client.on('notification', (n) => heard.push(n.payload ?? ''))
+  await client.connect()
+  await client.query(`LISTEN ${channel}`)
+  return { heard, stop: () => client.end().catch(() => {}) }
+}
+
+suite('a project’s own database, cloned from the region’s template', () => {
+  // Two projects with a database each. Nothing here is dropped afterwards: the
+  // suites after this one check the region's database with these databases,
+  // and their logins, still on the instance, as a region will have them.
+  const a = projectDatabaseName()
+  const b = projectDatabaseName()
+  const idA = randomUUID()
+  const idB = randomUUID()
+  const schemaA = `workspace_${idA}`
+  const schemaB = `workspace_${idB}`
+  const loginsA = directAccessRoleNames(idA)
+  const rwPassword = generatePassword()
+  const roPassword = generatePassword()
+  const fnPassword = generatePassword()
+  let fnRole = ''
+  const both = () => `${a},${b}`
+
+  it('has its template built by the region’s administrator, closed to connections and open to cloning', async () => {
+    const state = async () =>
+      rows(
+        superUrl(),
+        `SELECT pg_get_userbyid(datdba) AS owner, datistemplate AS template, datallowconn AS connections FROM pg_database WHERE datname = $1`,
+        [TEMPLATE],
+      )
+    // As on RDS, the administrator builds it and owns what it creates. Stock
+    // PostgreSQL 16 lets only a superuser create an event trigger, so here the
+    // administrator's run stops at the first one, as it does for the region's
+    // database, and leaves the template closed to cloning and to connections.
+    const first = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+    expect(first.output).toContain(`template ${TEMPLATE}: created`)
+    expect(first.output).toContain('step project-db: applied')
+    expect(first.output).toContain('Must be superuser to create an event trigger')
+    expect(first.output).toContain(`Project database template NOT converged: nothing can be cloned from ${TEMPLATE}`)
+    expect(first.status).not.toBe(0)
+    expect(await state()).toEqual([{ owner: ADMIN, template: false, connections: false }])
+
+    // The rest it builds itself, holding SUPERUSER for as long as that takes,
+    // because event triggers are what stock PostgreSQL keeps from any other
+    // role and the RDS master may create. Everything in the template, event
+    // triggers included, is then the administrator's, as on RDS, and nothing
+    // is handed over afterwards. Every later step as the administrator runs
+    // without SUPERUSER.
+    await rows(superUrl('postgres'), `ALTER ROLE ${ADMIN} SUPERUSER`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+      expect(result.output).toContain(`Project database template converged and verified: ${TEMPLATE} may be cloned.`)
+      expect(result.status).toBe(0)
+      expect(result.output).toContain(`template ${TEMPLATE}: exists`)
+      expect(result.output).toContain('step project-db: re-applied (files unchanged)')
+      for (const step of ['postgrest', 'drift-events', 'direct-access', 'extensions']) {
+        expect(result.output).toContain(`step ${step}: applied`)
+      }
+      expect(await state()).toEqual([{ owner: ADMIN, template: true, connections: false }])
+
+      // Run again, it converges what is there and changes nothing it need not.
+      const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+      expect(again.output).toContain(`template ${TEMPLATE}: exists`)
+      expect(again.output).toContain('step direct-access: re-applied (files unchanged)')
+      expect(again.status).toBe(0)
+    } finally {
+      await rows(superUrl('postgres'), `ALTER ROLE ${ADMIN} NOSUPERUSER`)
+    }
+
+    // Another role, the superuser excepted, is refused by name rather than
+    // failing on each object the administrator owns.
+    const outsider = bootstrap({ DATABASE_URL: url('backenly_app', passwords.backenly_app), BOOTSTRAP_MODE: 'template', EXPECT_DATABASE: DB })
+    expect(outsider.output).toContain(`refusing: ${TEMPLATE} and the project databases cloned from it belong to ${ADMIN}`)
+    expect(outsider.status).toBe(2)
+
+    await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} WITH ALLOW_CONNECTIONS true`)
+    try {
+      const notTheAdministrators = await rows(
+        superUrl(TEMPLATE),
+        `SELECT 'schema ' || nspname AS item FROM pg_namespace
+          WHERE nspname IN ('public', 'postgrest', 'backenly_meta', 'backenly_pgrst_idle') AND nspowner <> $1::regrole
+         UNION ALL
+         SELECT 'relation ' || c.oid::regclass::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname IN ('public', 'postgrest', 'backenly_meta') AND c.relkind IN ('r', 'p', 'v', 'm') AND c.relowner <> $1::regrole
+         UNION ALL
+         SELECT 'function ' || p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname IN ('public', 'postgrest') AND p.proowner <> $1::regrole
+         UNION ALL
+         SELECT 'event trigger ' || evtname FROM pg_event_trigger WHERE evtowner <> $1::regrole`,
+        [ADMIN],
+      )
+      expect(notTheAdministrators).toEqual([])
+      expect(await rows(superUrl(TEMPLATE), `SELECT dedicated FROM backenly_meta.tenancy`)).toEqual([{ dedicated: true }])
+    } finally {
+      await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} WITH ALLOW_CONNECTIONS false`)
+    }
+  })
+
+  it('is cloned by a role that may create databases and nothing else, and closed to every login it does not name', async () => {
+    expect(
+      await rows(
+        superUrl(),
+        `SELECT rolcreatedb, rolcreaterole, rolsuper, rolinherit, rolbypassrls,
+                (SELECT array_agg(m.roleid::regrole::text) FROM pg_auth_members m WHERE m.member = r.oid) AS member_of,
+                pg_has_role(r.oid, 'pg_signal_backend', 'USAGE') AS signals,
+                pg_has_role(r.oid, 'pg_signal_backend', 'SET') AS becomes
+           FROM pg_roles r WHERE rolname = 'backenly_dbcreator'`,
+      ),
+    ).toEqual([
+      {
+        rolcreatedb: true,
+        rolcreaterole: false,
+        rolsuper: false,
+        rolinherit: false,
+        rolbypassrls: false,
+        member_of: ['pg_signal_backend'],
+        signals: true,
+        becomes: false,
+      },
+    ])
+    // It reads nothing in the region's database, and creates nothing there.
+    expect(await refusal(creatorUrl(), `SELECT count(*) FROM public.schema_drift_events`)).toMatch(/permission denied/)
+    expect(await refusal(creatorUrl(), `CREATE SCHEMA creator_probe`)).toMatch(/permission denied/)
+
+    await cloneProjectDatabase(a)
+    await cloneProjectDatabase(b)
+
+    expect(await rows(superUrl(), `SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1`, [a])).toEqual([
+      { owner: 'backenly_dbcreator' },
+    ])
+    const [grants] = await rows(
+      superUrl(),
+      `SELECT has_database_privilege('public', $1, 'CONNECT') AS public_connect,
+              has_database_privilege('public', $1, 'TEMPORARY') AS public_temporary,
+              has_database_privilege('backenly_app', $1, 'CONNECT') AND has_database_privilege('backenly_app', $1, 'TEMPORARY')
+                AND has_database_privilege('backenly_app', $1, 'CREATE') AS app,
+              has_database_privilege('backenly_backup', $1, 'CONNECT') AS backup,
+              has_database_privilege('backenly_authenticator', $1, 'CONNECT') AS authenticator,
+              has_database_privilege($2, $1, 'CONNECT WITH GRANT OPTION') AS administrator`,
+      [a, ADMIN],
+    )
+    expect(grants).toEqual({ public_connect: false, public_temporary: false, app: true, backup: true, authenticator: true, administrator: true })
+
+    // A login it does not name cannot reach it, though it reaches the region's.
+    const outsider = `outsider_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    const outsiderPassword = generatePassword()
+    await rows(superUrl('postgres'), `CREATE ROLE ${outsider} LOGIN PASSWORD '${outsiderPassword}'`)
+    expect(await refusal(url(outsider, outsiderPassword, a), 'SELECT 1')).toMatch(/permission denied for database/)
+    expect(await refusal(url(outsider, outsiderPassword, DB), 'SELECT 1')).toBeNull()
+
+    // Only a template can be cloned by it, and only while it is one.
+    expect(await refusal(creatorUrl(), `CREATE DATABASE creator_copy TEMPLATE ${DB}`)).toMatch(/permission denied to copy database/)
+    await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} WITH IS_TEMPLATE false`)
+    try {
+      expect(await refusal(creatorUrl(), `CREATE DATABASE creator_copy TEMPLATE ${TEMPLATE}`)).toMatch(/permission denied to copy database/)
+    } finally {
+      await rows(superUrl('postgres'), `ALTER DATABASE ${TEMPLATE} WITH IS_TEMPLATE true`)
+    }
+    // The grants are its owner's to give, and only for a project database.
+    expect(
+      await refusal(appIn(DB), `SELECT set_config('backenly.project_database', '${a}', false); ${fs.readFileSync(path.join(ROOT, 'scripts/sql/project-database-acl.sql'), 'utf8')}`),
+    ).toMatch(/run this as backenly_dbcreator/)
+    expect(
+      await refusal(creatorUrl(), `SELECT set_config('backenly.project_database', '${DB}', false); ${fs.readFileSync(path.join(ROOT, 'scripts/sql/project-database-acl.sql'), 'utf8')}`),
+    ).toMatch(/set backenly\.project_database to the new database/)
+  })
+
+  it('verifies as the template did, read by the administrator, and the procedure finds it current', async () => {
+    for (const database of [a, b]) {
+      const verified = psqlFile(adminUrl(database), 'tools/managed-db/regional/sql/verify-project-db.sql')
+      expect(verified.output).toContain(`project database ${database} verified`)
+      expect(verified.status).toBe(0)
+    }
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: both(), EXPECT_DATABASE: DB })
+    expect(result.output).toContain(`db ${a}: current`)
+    expect(result.output).toContain(`db ${b}: current`)
+    expect(result.output).toContain('Project databases converged and verified: 2 current, 0 applied, 0 failed.')
+    expect(result.status).toBe(0)
+  })
+
+  it('lets its own read-write login be allowed schema changes, which the region’s shared database refuses', async () => {
+    const { rw, ro, owner } = loginsA
+    await rows(appIn(a), `CREATE SCHEMA "${schemaA}"`)
+    await rows(appIn(a), `CREATE TABLE "${schemaA}".notes (id serial PRIMARY KEY, body text)`)
+    expect(await rows(appIn(a), `SELECT public.backenly_direct_shared_database() AS shared`)).toEqual([{ shared: false }])
+    expect(await rows(appIn(DB), `SELECT public.backenly_direct_shared_database() AS shared`)).toEqual([{ shared: true }])
+
+    await rows(appIn(a), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [rw, rwPassword, schemaA])
+    await rows(appIn(a), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, roPassword, schemaA])
+    await rows(appIn(a), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schemaA, ro, rw, owner])
+    // A new login changes rows only, until its admin allows more.
+    expect(await refusal(url(rw, rwPassword, a), `CREATE TABLE "${schemaA}".before_allowed (id int)`)).toMatch(/permission denied for schema/)
+
+    expect(await rows(appIn(a), `SELECT public.backenly_direct_set_schema_changes($1, true) AS ok`, [rw])).toEqual([{ ok: true }])
+    await rows(appIn(a), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schemaA, ro, rw, owner])
+    expect(await refusal(url(rw, rwPassword, a), `CREATE TABLE "${schemaA}".made_directly (id int)`)).toBeNull()
+    // Captured as drift in its own database.
+    expect(
+      await rows(appIn(a), `SELECT "roleName", "projectId" FROM public.schema_drift_events WHERE "commandTag" = 'CREATE TABLE'`),
+    ).toEqual([{ roleName: rw, projectId: idA }])
+
+    // The region's database is shared, so there the same login is refused.
+    expect(await refusal(appIn(DB), `SELECT public.backenly_direct_set_schema_changes('${rw}', true)`)).toMatch(/shared by several projects/)
+  })
+
+  it('gives each login CONNECT on its own database by name, and on no other project’s', async () => {
+    const { rw, ro } = loginsA
+    const [{ fn }] = await rows<{ fn: string }>(appIn(a), `SELECT public.backenly_fn_role_sync($1, $2) AS fn`, [schemaA, fnPassword])
+    fnRole = fn
+    for (const [login, password] of [[rw, rwPassword], [ro, roPassword], [fnRole, fnPassword]]) {
+      expect(await refusal(url(login, password, a), 'SELECT 1')).toBeNull()
+      expect(await refusal(url(login, password, b), 'SELECT 1')).toMatch(/permission denied for database/)
+    }
+    expect(await rows(url(fnRole, fnPassword, a), `SELECT count(*)::int AS n FROM "${schemaA}".notes`)).toEqual([{ n: 0 }])
+    // On the region's database, where PUBLIC may connect, no login is given CONNECT by name.
+    expect(
+      await rows(
+        superUrl(),
+        `SELECT count(*)::int AS n FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) x JOIN pg_roles r ON r.oid = x.grantee
+          WHERE d.datname = $1 AND r.rolname LIKE 'bkn\\_%'`,
+        [DB],
+      ),
+    ).toEqual([{ n: 0 }])
+  })
+
+  it('keeps its PostgREST registry and its notifications to itself', async () => {
+    const authenticator = (database: string) => url('backenly_authenticator', passwords.backenly_authenticator, database)
+    const inA = await listening(authenticator(a), 'pgrst')
+    const inB = await listening(authenticator(b), 'pgrst')
+    try {
+      await rows(appIn(b), `CREATE SCHEMA "${schemaB}"`)
+      await rows(appIn(b), `SELECT public.backenly_direct_sync_schema($1)`, [schemaB])
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      expect(inB.heard).toEqual(expect.arrayContaining(['reload config', 'reload schema']))
+      expect(inA.heard).toEqual([])
+    } finally {
+      await inA.stop()
+      await inB.stop()
+    }
+    const served = async (connection: string) =>
+      (await rows<{ list: string }>(connection, `SELECT public.backenly_pgrst_current_schemas() AS list`))[0].list.split(',').filter(Boolean)
+    expect(await served(appIn(a))).toEqual([schemaA])
+    expect(await served(appIn(b))).toEqual([schemaB])
+    const region = await served(appIn(DB))
+    expect(region).not.toContain(schemaA)
+    expect(region).not.toContain(schemaB)
+  })
+
+  it('is converged by the procedure when its files change, one line per database, and one failure fails the run alone', async () => {
+    await rows(superUrl(b), `UPDATE backenly_meta.bootstrap_steps SET checksum = 'an earlier file' WHERE step = 'drift-events'`)
+    await rows(superUrl('postgres'), `GRANT CONNECT ON DATABASE "${a}" TO PUBLIC`)
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: both(), BOOTSTRAP_PARALLELISM: '2' })
+      expect(result.output).toContain(`db ${a}: failed verify`)
+      expect(result.output).toContain('PUBLIC holds CONNECT on this database')
+      expect(result.output).toContain(`db ${b}: applied drift-events`)
+      expect(result.output).toContain('Project databases: 0 current, 1 applied, 1 failed. The run fails: every database must verify.')
+      expect(result.status).not.toBe(0)
+    } finally {
+      await rows(superUrl('postgres'), `REVOKE CONNECT ON DATABASE "${a}" FROM PUBLIC`)
+    }
+    const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: both() })
+    expect(again.output).toContain(`db ${a}: current`)
+    expect(again.output).toContain(`db ${b}: current`)
+    expect(again.status).toBe(0)
+  })
+
+  it('refuses a list that is not the databases it finds, before touching any', async () => {
+    const before = await rows(superUrl(b), `SELECT step, checksum, applied_at FROM backenly_meta.bootstrap_steps ORDER BY step`)
+    const short = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: a })
+    expect(short.status).toBe(2)
+    expect(short.output).toContain(`found, not listed: ${b}`)
+    expect(short.output).not.toMatch(/^db /m)
+    const unlisted = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'project-dbs' })
+    expect(unlisted.status).toBe(2)
+    expect(unlisted.output).toContain('refusing: BOOTSTRAP_PROJECT_DATABASES must list')
+    expect(await rows(superUrl(b), `SELECT step, checksum, applied_at FROM backenly_meta.bootstrap_steps ORDER BY step`)).toEqual(before)
+
+    // A list too long for a task's environment is passed as its hash.
+    const digest = `sha256:${createHash('sha256').update([a, b].sort().map((n) => `${n}\n`).join('')).digest('hex')}`
+    const hashed = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'project-dbs', BOOTSTRAP_PROJECT_DATABASES: digest })
+    expect(hashed.output).toContain('2 current, 0 applied, 0 failed')
+    expect(hashed.status).toBe(0)
+  })
+
+  it('leaves the region’s shared database as it was: it verifies, and its procedure leaves these logins to their database', async () => {
+    const { rw, owner } = loginsA
+    const check = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+    expect(check.output).toContain('Check only: nothing was written. Every step is recorded, and the database verifies.')
+    expect(check.status).toBe(0)
+    // The region's own apply strips every read-write login of its own, and
+    // leaves this one, which its project's admin allowed schema changes.
+    const apply = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: DB })
+    expect(apply.output).toContain('Regional database initialised and verified.')
+    expect(apply.status).toBe(0)
+    expect(await rows(superUrl(), `SELECT pg_has_role($1, $2, 'MEMBER') AS member`, [rw, owner])).toEqual([{ member: true }])
+    expect(await refusal(url(rw, rwPassword, a), `CREATE TABLE "${schemaA}".after_region_apply (id int)`)).toBeNull()
+    // The region's database refuses the procedure for a project database, and the other way round.
+    const wrongWay = bootstrap({ DATABASE_URL: adminUrl(a), BOOTSTRAP_MODE: 'check' })
+    expect(wrongWay.status).not.toBe(0)
+    expect(wrongWay.output).toContain('is a project database or their template')
+    expect(psqlFile(adminUrl(), 'tools/managed-db/regional/sql/project-db.sql').output).toContain('is neither backenly_project_template nor a project database')
+  })
+})
+
+/** The postgrest binary the PostgREST host runs: CI provides it (PGRST_HOST_BINARY). */
+const POSTGREST_BINARY = process.env.PGRST_HOST_BINARY || 'postgrest'
+function postgrestRunnable(): boolean {
+  try {
+    execFileSync(POSTGREST_BINARY, ['--version'], { encoding: 'utf8', timeout: 10_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+suite('a project with a database of its own, from creation to purge, through the platform', () => {
+  // The platform's own paths, against the template the suite above built, in
+  // us-east-1, whose own instance is its data instance (no DATA_* variable),
+  // as a region's is. The switch gives every new project there a database of
+  // its own (lib/projects/database-tenancy.ts), which the region's database
+  // creator makes (lib/data-plane/project-databases.ts). The tests run in
+  // order: one project's life, then the edges around it.
+  const REGION = 'us-east-1'
+  const SECRET = randomBytes(32).toString('hex')
+  const saved = new Map<string, string | undefined>()
+  const set = (name: string, value: string | undefined) => {
+    if (!saved.has(name)) saved.set(name, process.env[name])
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+  let ownerId = ''
+  let ownerEmail = ''
+  let staffUserId = ''
+  let staffRoleId = ''
+  let staffProjectId = ''
+  /** Every project made here, for what a failed test leaves behind. */
+  const made: string[] = []
+  let projectId = ''
+  let database = ''
+  let schema = ''
+
+  /** The p_ databases the creator owns on the cluster. */
+  const creatorDatabases = async () =>
+    (
+      await rows<{ datname: string }>(
+        superUrl(),
+        `SELECT datname::text AS datname FROM pg_database
+          WHERE datname ~ '^p_[0-9a-f]{32}$' AND pg_get_userbyid(datdba) = 'backenly_dbcreator' ORDER BY 1`,
+      )
+    ).map((r) => r.datname)
+  const databaseExists = async (name: string) => (await rows(superUrl(), `SELECT 1 FROM pg_database WHERE datname = $1`, [name])).length > 0
+  const canConnect = async (login: string, name: string) =>
+    (await rows<{ connect: boolean }>(superUrl(), `SELECT has_database_privilege($1, $2, 'CONNECT') AS connect`, [login, name]))[0].connect
+
+  /** Until no session of `login` is on `name`: a process that just ended leaves its sessions for a moment. */
+  async function untilNoSessions(name: string, login: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      const [{ n }] = await rows<{ n: number }>(
+        superUrl(),
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND usename = $2`,
+        [name, login],
+      )
+      if (n === 0) return
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw new Error(`sessions of ${login} are still connected to ${name}`)
+  }
+
+  beforeAll(async () => {
+    set('DATABASE_URL_US_EAST_1', loginUrl('backenly_app'))
+    set('BACKUP_DATABASE_URL_US_EAST_1', loginUrl('backenly_backup'))
+    set('DBCREATOR_DATABASE_URL_US_EAST_1', creatorUrl())
+    set('BACKENLY_DEDICATED_DATABASES_US_EAST_1', 'new')
+    set('BACKENLY_EDITION', 'cloud')
+    // Snapshots are taken where the project's data is: as us-east-1's own process.
+    set('BACKENLY_SERVICE_REGION', REGION)
+    set('BACKUP_DIR', path.join(work, 'backups'))
+    set('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`)
+    ownerEmail = `own-database-${randomUUID()}@example.test`
+    ownerId = (await prisma.user.create({ data: { email: ownerEmail, name: 'own database fixture' }, select: { id: true } })).id
+  })
+
+  afterAll(async () => {
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { dropRetiredSchemas, DROP_AFTER_MS } = await import('@/lib/postgrest/retire-schema')
+    for (const id of made) {
+      if (await prisma.project.findUnique({ where: { id }, select: { id: true } })) await deleteProjectCompletely(id).catch(() => {})
+    }
+    await dropRetiredSchemas(REGION, new Date(Date.now() + DROP_AFTER_MS + 1_000)).catch(() => {})
+    await prisma.workspaceBackup.deleteMany({ where: { projectId: { in: made } } }).catch(() => {})
+    await prisma.apiKey.deleteMany({ where: { projectId: { in: made } } }).catch(() => {})
+    if (made.length) {
+      await prisma.backgroundJob
+        .deleteMany({
+          where: {
+            type: { in: ['purge_project', 'drop_retired_schemas'] },
+            OR: made.map((id) => ({ payload: { path: ['projectId'], equals: id } })),
+          },
+        })
+        .catch(() => {})
+    }
+    await prisma.auditLog
+      .deleteMany({
+        where: {
+          action: { in: ['PROJECT_DATABASE_CREATED', 'PROJECT_DATABASE_ORPHAN_DROPPED'] },
+          metadata: { path: ['region'], equals: REGION },
+        },
+      })
+      .catch(() => {})
+    for (const id of [ownerId, staffUserId].filter(Boolean)) {
+      await prisma.project.deleteMany({ where: { userId: id } }).catch(() => {})
+      await prisma.user.deleteMany({ where: { id } }).catch(() => {})
+    }
+    if (staffRoleId) await prisma.role.deleteMany({ where: { id: staffRoleId } }).catch(() => {})
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+
+  it('is given a database of its own by its region’s switch: cloned by the creator, closed to every login it does not name, its workspace inside', async () => {
+    const before = await creatorDatabases()
+    const project = await createProvisionedProject({ name: `own database ${randomUUID()}`, userId: ownerId, region: REGION })
+    projectId = project.id
+    made.push(projectId)
+    schema = project.postgresSchema
+    expect(project.databaseTenancy).toBe('dedicated')
+    expect(project.dataPlaneRegistered).toBe(true)
+
+    const row = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { region: true, databaseTenancy: true, databaseName: true, databaseInstance: true },
+    })
+    expect(row).toMatchObject({ region: REGION, databaseTenancy: 'dedicated', databaseInstance: 'primary' })
+    database = row!.databaseName as string
+    expect(database).toMatch(/^p_[0-9a-f]{32}$/)
+    // Nothing in its name says whose it is.
+    expect(database).not.toContain(projectId.replace(/-/g, ''))
+    expect((await creatorDatabases()).filter((name) => !before.includes(name))).toEqual([database])
+
+    const [grants] = await rows(
+      superUrl(),
+      `SELECT pg_get_userbyid(datdba) AS owner,
+              has_database_privilege('public', $1, 'CONNECT') AS public_connect,
+              has_database_privilege('backenly_app', $1, 'CREATE') AS app,
+              has_database_privilege('backenly_backup', $1, 'CONNECT') AS backup,
+              has_database_privilege('backenly_authenticator', $1, 'CONNECT') AS authenticator,
+              has_database_privilege($2, $1, 'CONNECT WITH GRANT OPTION') AS administrator,
+              shobj_description(oid, 'pg_database') AS comment
+         FROM pg_database WHERE datname = $1`,
+      [database, ADMIN],
+    )
+    expect(grants).toEqual({ owner: 'backenly_dbcreator', public_connect: false, app: true, backup: true, authenticator: true, administrator: true, comment: null })
+
+    // The workspace is in it, the application's, served by its own registry and
+    // readable by the backup role; the region's database has none of it.
+    expect(await rows(superUrl(database), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([
+      { owner: 'backenly_app' },
+    ])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+    const [{ served }] = await rows<{ served: string }>(superUrl(database), `SELECT public.backenly_pgrst_current_schemas() AS served`)
+    expect(served.split(',')).toEqual([schema])
+    expect(await rows(superUrl(database), `SELECT has_schema_privilege('backenly_backup', $1, 'USAGE') AS usable`, [schema])).toEqual([
+      { usable: true },
+    ])
+    // Recorded before it was made: the orphan sweep's age.
+    const record = await prisma.auditLog.findFirst({
+      where: { action: 'PROJECT_DATABASE_CREATED', metadata: { path: ['database'], equals: database } },
+      select: { metadata: true, projectId: true },
+    })
+    expect(record).toMatchObject({ projectId: null, metadata: { region: REGION, database, projectId } })
+  })
+
+  it('is reached by the platform’s clients in its own database, while region work stays on the region’s', async () => {
+    const db = await workspaceRawClient(projectId)
+    expect(await db.$queryRawUnsafe(`SELECT current_database()::text AS db`)).toEqual([{ db: database }])
+    await db.$executeRawUnsafe(`CREATE TABLE "${schema}".notes (id integer PRIMARY KEY, body text NOT NULL)`)
+    await db.$executeRawUnsafe(`INSERT INTO "${schema}".notes VALUES (1, 'kept in its own database')`)
+    expect(new URL(await projectDatabaseUrl(projectId)).pathname).toBe(`/${database}`)
+    expect(await regionRawClient(REGION).$queryRawUnsafe(`SELECT current_database()::text AS db`)).toEqual([{ db: DB }])
+
+    // The region's passes reach it as a database of its own: its registry, its
+    // helpers, its extensions and its drift capture, each read there.
+    const target = { region: REGION, database } as const
+    const [{ unregisteredSchemas, postgrestRegistryInstalled }, { functionRoleHelperInstalled }, { runDriftEventUpkeep }] = await Promise.all([
+      import('@/lib/postgrest/registration'),
+      import('@/lib/services/ai-functions/function-db-role'),
+      import('@/lib/autonomy/drift-event-upkeep'),
+    ])
+    expect(await postgrestRegistryInstalled(target)).toBe(true)
+    expect(await unregisteredSchemas(target)).toEqual([])
+    expect(await functionRoleHelperInstalled(target)).toBe(true)
+    resetCapabilityCache()
+    expect(await hasCapability('pg_stat_statements', target)).toMatchObject({ available: true, indeterminate: false })
+    const upkept = await runDriftEventUpkeep(new Date(), [REGION])
+    // The region's own database first, then each project database of the region.
+    expect(upkept[0].database).toBeUndefined()
+    expect(upkept.find((r) => r.database === database)).toMatchObject({
+      region: REGION,
+      health: { status: 'healthy' },
+      backlog: { pending: 0, orphaned: 0 },
+      errors: [],
+    })
+
+    // Its PostgREST is its own: with no host for the region it is refused,
+    // naming the variable, though the region's shared PostgREST is configured.
+    set('POSTGREST_URL_US_EAST_1', 'http://127.0.0.1:9')
+    set('POSTGREST_JWT_SECRET_US_EAST_1', SECRET)
+    set('PGRST_HOST_URL_US_EAST_1', undefined)
+    await expect(projectPostgrest(projectId)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED', variable: 'PGRST_HOST_URL_US_EAST_1' })
+  })
+
+  const withPostgrest = process.env.CI || postgrestRunnable() ? it : it.skip
+
+  withPostgrest('is read over v1 and v2 from its own PostgREST on the region’s host, and never from the region’s shared one', async () => {
+    const [{ createPgrstHost }, { readConfig }, { default: app }, { hashApiKey }] = await Promise.all([
+      import('@/services/pgrst-host/server'),
+      import('@/services/pgrst-host/config'),
+      import('@/server/app'),
+      import('@/server/lib/end-user-identity'),
+    ])
+    const host = createPgrstHost({
+      config: readConfig({
+        PGRST_HOST_JWT_SECRET: SECRET,
+        PGRST_HOST_DB_URI: url('backenly_authenticator', passwords.backenly_authenticator, 'postgres'),
+        PGRST_HOST_BINARY: POSTGREST_BINARY,
+      }),
+      log: () => {},
+    })
+    const hostPort = (await host.listen(0, '127.0.0.1')).port
+    // The region's shared PostgREST, counting whatever it is asked.
+    let sharedAsked = 0
+    const shared = http.createServer((_req, res) => {
+      sharedAsked++
+      res.writeHead(500).end()
+    })
+    await new Promise<void>((resolve) => shared.listen(0, '127.0.0.1', resolve))
+    set('POSTGREST_URL_US_EAST_1', `http://127.0.0.1:${(shared.address() as AddressInfo).port}`)
+    set('PGRST_HOST_URL_US_EAST_1', `http://127.0.0.1:${hostPort}`)
+    const server = http.createServer(app)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const raw = `proj_live_${randomBytes(24).toString('hex')}`
+    await prisma.apiKey.create({
+      data: {
+        name: 'own database reads',
+        keyPrefix: raw.slice(0, 16),
+        keyHash: hashApiKey(raw),
+        permissions: ['read'],
+        capabilities: [],
+        userId: ownerId,
+        projectId,
+        keyType: 'public',
+        scope: 'runtime',
+        serviceRole: true,
+        rateLimit: 1000,
+      },
+    })
+    const get = async (route: string) => {
+      const res = await fetch(`${base}${route}`, { headers: { 'x-api-key': raw }, signal: AbortSignal.timeout(30_000) })
+      return { status: res.status, text: await res.text() }
+    }
+    try {
+      const v1 = await get(`/api/v1/${projectId}/db/notes`)
+      expect(v1).toMatchObject({ status: 200 })
+      expect(v1.text).toContain('kept in its own database')
+      const v2 = await get(`/api/v2/${projectId}/notes?select=body`)
+      expect(v2.status).toBe(200)
+      expect(JSON.parse(v2.text)).toEqual([{ body: 'kept in its own database' }])
+      // Served by a process of its own, on its own database.
+      expect(host.registry.state(projectId, database)).toMatchObject({ state: 'ready', database })
+      expect(sharedAsked).toBe(0)
+    } finally {
+      await prisma.apiKey.deleteMany({ where: { projectId } })
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await new Promise<void>((resolve) => shared.close(() => resolve()))
+      await host.close()
+      set('PGRST_HOST_URL_US_EAST_1', undefined)
+    }
+    // The child's sessions end with it; the database creator may not end them for it.
+    await untilNoSessions(database, 'backenly_authenticator')
+  })
+
+  it('is snapshotted from its own database and restored into it, readable by the backup role again', async () => {
+    const backups = await import('@/lib/services/workspace-backup')
+    expect(await backups.backupWorkspace(projectId)).toMatchObject({ success: true })
+    await (await workspaceRawClient(projectId)).$executeRawUnsafe(`INSERT INTO "${schema}".notes VALUES (2, 'after the snapshot')`)
+
+    expect(await backups.restoreWorkspace(projectId)).toMatchObject({ success: true })
+
+    expect(await (await workspaceRawClient(projectId)).$queryRawUnsafe(`SELECT body FROM "${schema}".notes ORDER BY id`)).toEqual([
+      { body: 'kept in its own database' },
+    ])
+    expect(await rows(superUrl(database), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([
+      { owner: 'backenly_app' },
+    ])
+    expect(await rows(superUrl(), `SELECT nspname FROM pg_namespace WHERE left(nspname, length($1)) = $1`, [schema])).toEqual([])
+    expect(await rows(superUrl(database), `SELECT has_schema_privilege('backenly_backup', $1, 'USAGE') AS usable`, [schema])).toEqual([
+      { usable: true },
+    ])
+    expect(await backups.backupWorkspace(projectId)).toMatchObject({ success: true })
+    expect(await prisma.workspaceBackup.count({ where: { projectId, status: 'completed' } })).toBe(2)
+  })
+
+  it('takes CONNECT on its database from its logins when its deletion is asked for, and gives it back when it is restored', async () => {
+    const { provisionFunctionRole, functionRolePassword } = await import('@/lib/services/ai-functions/function-db-role')
+    const { role: fn } = await provisionFunctionRole(projectId)
+    const { ro } = directAccessRoleNames(projectId)
+    const roPassword = generatePassword()
+    await rows(appIn(database), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, roPassword, schema])
+    const logins: Array<[string, string]> = [
+      [fn, functionRolePassword(schema)],
+      [ro, roPassword],
+    ]
+    for (const [login, password] of logins) expect(await refusal(url(login, password, database), 'SELECT 1')).toBeNull()
+
+    const { requestProjectDeletion, restoreDeletedProject } = await import('@/lib/projects/deletion')
+    const actor = { kind: 'system', label: 'own database lifecycle' } as const
+    expect(await requestProjectDeletion(projectId, actor)).toMatchObject({ requested: true })
+    for (const [login, password] of logins) {
+      expect(await canConnect(login, database)).toBe(false)
+      expect(await refusal(url(login, password, database), 'SELECT 1')).toMatch(/permission denied for database/)
+    }
+    // The administrator keeps what it converges the database with, and can give CONNECT through the helpers again.
+    expect(await rows(superUrl(), `SELECT has_database_privilege($1, $2, 'CONNECT WITH GRANT OPTION') AS ok`, [ADMIN, database])).toEqual([
+      { ok: true },
+    ])
+
+    expect(await restoreDeletedProject(projectId, actor)).toEqual({ restored: true })
+    for (const [login, password] of logins) {
+      expect(await canConnect(login, database)).toBe(true)
+      expect(await refusal(url(login, password, database), 'SELECT 1')).toBeNull()
+    }
+  })
+
+  it('is purged: its database dropped, then its logins, and nothing of either left on the instance', async () => {
+    const { functionRoleName } = await import('@/lib/services/ai-functions/function-db-role')
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { dropProjectDatabase } = await import('@/lib/data-plane/project-databases')
+    const logins = [functionRoleName(schema), directAccessRoleNames(projectId).ro].sort()
+    const oids = (await rows<{ oid: string }>(superUrl(), `SELECT oid::text AS oid FROM pg_roles WHERE rolname = ANY($1)`, [logins])).map((r) => r.oid)
+    expect(oids).toHaveLength(2)
+
+    const result = await deleteProjectCompletely(projectId)
+
+    expect(result.schemasDropped).toContain(schema)
+    expect(result.schemasRetired).toEqual([])
+    expect(result.retiredLogins).toEqual([])
+    expect(result.loginsDroppedLater).toEqual([])
+    expect(await databaseExists(database)).toBe(false)
+    expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_shdepend WHERE refobjid = ANY($1::oid[])`, [oids])).toEqual([])
+    expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
+    // Dropping it again is no error: it is gone.
+    expect(await dropProjectDatabase({ region: REGION, database })).toEqual({ existed: false })
+  })
+
+  it('is dropped again when the platform row that would name it cannot be written', async () => {
+    const before = await creatorDatabases()
+    const since = new Date()
+    // An owner that does not exist: the platform transaction fails on its foreign key.
+    await expect(createProvisionedProject({ name: `no owner ${randomUUID()}`, userId: randomUUID(), region: REGION })).rejects.toThrow()
+    expect(await creatorDatabases()).toEqual(before)
+    const records = await prisma.auditLog.findMany({
+      where: { action: 'PROJECT_DATABASE_CREATED', timestamp: { gte: since }, metadata: { path: ['region'], equals: REGION } },
+      select: { metadata: true },
+    })
+    expect(records).toHaveLength(1)
+    const attempted = (records[0].metadata as { database: string }).database
+    expect(attempted).toMatch(/^p_[0-9a-f]{32}$/)
+    expect(await databaseExists(attempted)).toBe(false)
+  })
+
+  it('gives one only to the platform’s own administrators while the switch says staff', async () => {
+    set('BACKENLY_DEDICATED_DATABASES_US_EAST_1', 'staff')
+    const { isStaffAccount } = await import('@/lib/projects/database-tenancy')
+    const customer = await createProvisionedProject({ name: `customer ${randomUUID()}`, userId: ownerId, region: REGION })
+    made.push(customer.id)
+    expect(customer.databaseTenancy).toBe('shared')
+    expect(await rows(superUrl(), `SELECT 1 AS here FROM pg_namespace WHERE nspname = $1`, [customer.postgresSchema])).toEqual([{ here: 1 }])
+
+    staffRoleId = (await prisma.role.create({ data: { name: 'admin', description: 'platform administrators (fixture)' }, select: { id: true } })).id
+    staffUserId = (
+      await prisma.user.create({
+        data: { email: `own-database-staff-${randomUUID()}@example.test`, name: 'staff fixture', roleId: staffRoleId },
+        select: { id: true },
+      })
+    ).id
+    expect(await isStaffAccount(staffUserId)).toBe(true)
+    expect(await isStaffAccount(ownerId)).toBe(false)
+    const own = await createProvisionedProject({ name: `staff ${randomUUID()}`, userId: staffUserId, region: REGION })
+    made.push(own.id)
+    staffProjectId = own.id
+    expect(own.databaseTenancy).toBe('dedicated')
+
+    // The founder's account is the platform's too, as requireAdmin admits it.
+    set('FOUNDER_EMAIL', ownerEmail.toUpperCase())
+    expect(await isStaffAccount(ownerId)).toBe(true)
+    set('FOUNDER_EMAIL', undefined)
+    set('BACKENLY_DEDICATED_DATABASES_US_EAST_1', 'new')
+  })
+
+  it('sweeps only the databases no project names, once their creation is an hour old', async () => {
+    const { createProjectDatabase, dropProjectDatabase, sweepOrphanProjectDatabases } = await import('@/lib/data-plane/project-databases')
+    const old = await createProjectDatabase({ region: REGION, projectId: randomUUID() })
+    const young = await createProjectDatabase({ region: REGION, projectId: randomUUID() })
+    await prisma.auditLog.updateMany({
+      where: { action: 'PROJECT_DATABASE_CREATED', metadata: { path: ['database'], equals: old.database } },
+      data: { timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+    })
+    // One the creator made with no record of it, and one another role made: neither is the sweep's.
+    const unrecorded = `p_${randomUUID().replace(/-/g, '')}`
+    await rows(creatorUrl(), `CREATE DATABASE "${unrecorded}" TEMPLATE ${TEMPLATE}`)
+    const notTheCreators = `p_${randomUUID().replace(/-/g, '')}`
+    await rows(superUrl('postgres'), `CREATE DATABASE "${notTheCreators}"`)
+    const named = (await prisma.project.findUnique({ where: { id: staffProjectId }, select: { databaseName: true } }))?.databaseName as string
+    expect(named).toMatch(/^p_[0-9a-f]{32}$/)
+    try {
+      const [report] = await sweepOrphanProjectDatabases({ regions: [REGION] })
+      expect(report.error).toBeUndefined()
+      expect(report.failed).toEqual([])
+      expect(report.dropped).toEqual([old.database])
+      expect(report.tooRecent).toEqual([young.database])
+      expect(report.unrecorded).toContain(unrecorded)
+      expect(report.unrecorded).not.toContain(named)
+      expect(await databaseExists(old.database)).toBe(false)
+      for (const kept of [young.database, unrecorded, notTheCreators, named]) expect(await databaseExists(kept)).toBe(true)
+      expect(await prisma.auditLog.count({ where: { action: 'PROJECT_DATABASE_ORPHAN_DROPPED', metadata: { path: ['database'], equals: old.database } } })).toBe(1)
+    } finally {
+      for (const leftover of [young.database, unrecorded]) await dropProjectDatabase({ region: REGION, database: leftover }).catch(() => {})
+      await rows(superUrl('postgres'), `DROP DATABASE IF EXISTS "${notTheCreators}"`).catch(() => {})
+    }
+  })
+})
+
+/**
+ * Once every project of the region has a database of its own, close-shared
+ * closes the region's database to every login that is not the platform's
+ * (sql/close-shared.sql): PUBLIC loses CONNECT, and so does a project login
+ * holding it by name, as a function or direct-access login made while its
+ * project's data was here does; the platform's roles keep it by name.
+ */
+suite('the region’s database, closed to every login that is not the platform’s once no project keeps its data there', () => {
+  const projectLogin = `bkn_fn_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+  const projectLoginPassword = generatePassword()
+  const outsider = `outsider_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+  const outsiderPassword = generatePassword()
+  const renamed: Array<{ from: string; to: string }> = []
+  const connectByName = async () =>
+    (
+      await rows<{ name: string }>(
+        superUrl(),
+        `SELECT DISTINCT g.rolname::text AS name
+           FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) x JOIN pg_roles g ON g.oid = x.grantee
+          WHERE d.datname = $1 AND x.privilege_type = 'CONNECT' AND g.oid <> d.datdba ORDER BY 1`,
+        [DB],
+      )
+    ).map((r) => r.name)
+  const publicConnect = async () =>
+    (await rows<{ open: boolean }>(superUrl(), `SELECT has_database_privilege('public', $1, 'CONNECT') AS open`, [DB]))[0].open
+
+  beforeAll(async () => {
+    if (!runnable) return
+    await rows(superUrl('postgres'), `CREATE ROLE ${projectLogin} LOGIN PASSWORD '${projectLoginPassword}'`)
+    await rows(superUrl('postgres'), `GRANT CONNECT ON DATABASE ${DB} TO ${projectLogin}`)
+    await rows(superUrl('postgres'), `CREATE ROLE ${outsider} LOGIN PASSWORD '${outsiderPassword}'`)
+  })
+
+  const nameBack = async () => {
+    for (const { from, to } of renamed.splice(0).reverse()) await rows(superUrl(), `ALTER SCHEMA "${to}" RENAME TO "${from}"`)
+  }
+
+  afterAll(async () => {
+    if (!runnable) return
+    await nameBack()
+    await rows(superUrl('postgres'), `GRANT CONNECT, TEMPORARY ON DATABASE ${DB} TO PUBLIC`)
+    await rows(superUrl('postgres'), `REVOKE ALL ON DATABASE ${DB} FROM ${projectLogin}`).catch(() => {})
+    await rows(superUrl('postgres'), `DROP ROLE IF EXISTS ${projectLogin}`)
+    await rows(superUrl('postgres'), `DROP ROLE IF EXISTS ${outsider}`)
+  })
+
+  it('is refused while a project keeps its data there, and nothing changes', async () => {
+    const before = await connectByName()
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+    expect(result.status).not.toBe(0)
+    expect(result.output).toContain('no move left behind')
+    expect(await publicConnect()).toBe(true)
+    expect(await connectByName()).toEqual(before)
+    expect(await refusal(url(projectLogin, projectLoginPassword), 'SELECT 1')).toBeNull()
+  })
+
+  it('is closed once every workspace schema is one a move left behind: PUBLIC and a project’s login lose CONNECT, the platform keeps it', async () => {
+    // Every workspace schema renamed as a move leaves it (movedSchemaName) for the close, and named back at once,
+    // so the suites after this one find the region as they left it.
+    const schemas = await rows<{ name: string }>(superUrl(), `SELECT nspname::text AS name FROM pg_namespace WHERE starts_with(nspname, 'workspace_') ORDER BY 1`)
+    for (const [i, { name }] of schemas.entries()) {
+      const to = `workspace_${randomUUID()}_moved1_${i}`
+      await rows(superUrl(), `ALTER SCHEMA "${name}" RENAME TO "${to}"`)
+      renamed.push({ from: name, to })
+    }
+    // A session the project's login holds open here is ended.
+    const held = new Client({ connectionString: url(projectLogin, projectLoginPassword) })
+    held.on('error', () => {})
+    await held.connect()
+    try {
+      const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+      expect(result.output).toMatch(new RegExp(`^shared database ${DB}: closed \\(CONNECT by name: .*backenly_app.*\\)$`, 'm'))
+      expect(result.output).toMatch(/^project sessions still connected: 0$/m)
+      expect(result.status).toBe(0)
+      await expect(held.query('SELECT 1')).rejects.toThrow()
+      // Idempotent: a second run changes nothing and reports the same.
+      const named = await connectByName()
+      const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+      expect(again.status).toBe(0)
+      expect(again.output.match(/^shared database .*$/m)?.[0]).toBe(result.output.match(/^shared database .*$/m)?.[0])
+      expect(await connectByName()).toEqual(named)
+    } finally {
+      await held.end().catch(() => {})
+      await nameBack()
+    }
+    expect(await publicConnect()).toBe(false)
+    const named = await connectByName()
+    expect(named).toEqual(expect.arrayContaining(['backenly_app', 'backenly_authenticator', 'backenly_backup', 'backenly_dbcreator', POOLER_AUTH]))
+    expect(named).not.toContain(projectLogin)
+    expect(await refusal(url(projectLogin, projectLoginPassword), 'SELECT 1')).toMatch(/permission denied for database/)
+    expect(await refusal(url(outsider, outsiderPassword), 'SELECT 1')).toMatch(/permission denied for database/)
+    for (const role of LOGINS) expect(await refusal(loginUrl(role), 'SELECT 1')).toBeNull()
+    expect(await refusal(adminUrl(), 'SELECT 1')).toBeNull()
+  })
+
+  it('stays closed through a check and an apply, each of which verifies, and refuses a second run while workspace schemas are back', async () => {
+    const again = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'close-shared', EXPECT_DATABASE: DB })
+    expect(again.status).not.toBe(0)
+    expect(again.output).toContain('no move left behind')
+    expect(bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB }).status).toBe(0)
+    const apply = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: DB })
+    expect(apply.output).toContain('Regional database initialised and verified.')
+    expect(apply.status).toBe(0)
+    expect(await publicConnect()).toBe(false)
+  })
+
+  it('is opened to PUBLIC again by open-shared', async () => {
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'open-shared', EXPECT_DATABASE: DB })
+    expect(result.output).toContain(`shared database ${DB}: open to PUBLIC`)
+    expect(result.status).toBe(0)
+    expect(await publicConnect()).toBe(true)
+    expect(await refusal(url(outsider, outsiderPassword), 'SELECT 1')).toBeNull()
+  })
+})
+
 suite('the procedure refuses', () => {
   it('to replace a live credential it was not asked to, and changes nothing', async () => {
     const before = await catalog()
@@ -1215,6 +2297,30 @@ suite('the procedure refuses', () => {
     expect(
       await rows(superUrl(), `SELECT rotations FROM backenly_meta.bootstrap_credentials WHERE role_name = 'backenly_authenticator'`),
     ).toEqual([{ rotations: 1 }])
+  })
+
+  it('to replace the pooler’s login’s password unasked, and rotates it when asked', async () => {
+    const before = await catalog()
+    const unasked = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(generatePassword()) })
+    expect(unasked.status).not.toBe(0)
+    expect(unasked.output).toContain(`refusing: ${POOLER_AUTH} already has the password this procedure set at`)
+    expect(await catalog()).toEqual(before)
+
+    const old = poolerPassword
+    poolerPassword = generatePassword()
+    const result = bootstrap({
+      DATABASE_URL: superUrl(),
+      BOOTSTRAP_MODE: 'apply',
+      BOOTSTRAP_ROTATE: POOLER_AUTH,
+      BACKENLY_POOLER_AUTH_VERIFIER: scramSha256Verifier(poolerPassword),
+    })
+    expect(result.output).toContain('Regional database initialised and verified.')
+    expect(result.status).toBe(0)
+    expect(await rows(poolerAuthUrl(), 'SELECT current_user AS me')).toEqual([{ me: POOLER_AUTH }])
+    expect(await refusal(url(POOLER_AUTH, old, POOLER_DB), 'SELECT 1')).toMatch(/password authentication failed/)
+    expect(await rows(superUrl(), `SELECT rotations FROM backenly_meta.bootstrap_credentials WHERE role_name = $1`, [POOLER_AUTH])).toEqual([
+      { rotations: 1 },
+    ])
   })
 
   it('to pass a database that has drifted from what it promises', async () => {

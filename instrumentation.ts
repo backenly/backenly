@@ -25,6 +25,13 @@ export async function register() {
     const { assertEditionCompositionOrExit } = await import('./lib/edition/cloud-extension')
     assertEditionCompositionOrExit('Next server')
 
+    // This process is the web: its caps on connections differ from the
+    // runtime's (lib/data-plane/process-kind.ts). Said here, before anything
+    // opens one, because the deployed server's environment need not hold
+    // NEXT_RUNTIME, which Next resolves when it builds this file.
+    const { noteProcessKind } = await import('./lib/data-plane/process-kind')
+    noteProcessKind('web')
+
     // Also before anything serves a request: a deployment that runs several
     // instances while the auth limiter keeps per-process counters has a
     // brute-force budget of (limit x instances) on every auth surface, and
@@ -177,7 +184,13 @@ export async function register() {
       // path that calls a model. It is self-capping (MAX_PER_TICK = 2 per
       // project) and skips findings that already carry a diagnosis, so a tick
       // with nothing escalated costs one indexed query per project.
-      cron.schedule('*/10 * * * *', async () => {
+      //
+      // Every 10 minutes from :02, and Tiers C and D below from :04 and :06:
+      // the three fleet passes used to start in the same second, with the
+      // per-minute passes, the hourly storage snapshot and the usage ingest at
+      // :00, :10 and :20, and together they held every connection of the
+      // small pools a transaction then waited for (lib/db/transaction-defaults.ts).
+      cron.schedule('2-59/10 * * * *', async () => {
         const { diagnoseEscalatedFindings } = await import('./lib/autonomy/escalation-diagnosis')
         const { getFleetScheduler } = await import('./lib/edition')
 
@@ -298,6 +311,21 @@ export async function register() {
         )
       })
 
+      // ── Project databases no project names, dropped, 03:50 UTC ─────────────
+      //
+      // A creation that stopped between cloning a project's database and
+      // writing the row that records it leaves a database nothing names
+      // (lib/data-plane/project-databases.ts). Those more than an hour old are
+      // dropped on every data instance home has a database creator connection
+      // for, as the purge above reaches every region from home. Nothing to do
+      // where no region has one.
+      cron.platform('50 3 * * *', async () => {
+        const { sweepOrphanProjectDatabases } = await import('./lib/data-plane/project-databases')
+        await sweepOrphanProjectDatabases().catch((err: any) =>
+          console.error('[ProjectDatabases] Orphan sweep error:', err?.message)
+        )
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')
@@ -345,6 +373,16 @@ export async function register() {
         } finally {
           g.__contractSweepRunning = false
         }
+      })
+
+      // The import sandbox (lib/import/sandbox-jobs.ts): close every look and
+      // import whose task stopped reporting or ran past its deadline, stop its
+      // task (again, if a stop did not go through), and forget looks after a
+      // day. Home only: the jobs live in the platform database and their tasks
+      // are launched by the home web task.
+      cron.platform('* * * * *', async () => {
+        const { sweepImportSandbox } = await import('./lib/import/sandbox-jobs')
+        await sweepImportSandbox().catch((err: any) => console.error('[ImportSandbox] Sweep error:', err?.message))
       })
 
       // Autonomous background health scan once daily — 01:00 UTC
@@ -562,7 +600,8 @@ export async function register() {
       // Every 10 minutes, not every minute. A ladder is a schema migration, not
       // a probe: the finding it answers is `subsystem_repeat_failure`, which is
       // measured over a 30-day window and does not change between minutes.
-      cron.schedule('*/10 * * * *', async () => {
+      // From :04, so it never starts with Tier B or Tier D (see Tier B).
+      cron.schedule('4-59/10 * * * *', async () => {
         const { FLAGS } = await import('./lib/config/flags')
         if (!FLAGS.ENABLE_MAINTENANCE_SCHEDULER) return
 
@@ -634,8 +673,9 @@ export async function register() {
       // Nothing is relaxed by being reached from here: the scheduler flag is read
       // inside the sweep too, a project with autonomy OFF is skipped, resuming
       // also needs the mutation flag, and the sweep never approves anything or
-      // starts what a person did not approve. Every 10 minutes, like Tier C.
-      cron.schedule('*/10 * * * *', async () => {
+      // starts what a person did not approve. Every 10 minutes, like Tier C,
+      // from :06 (see Tier B).
+      cron.schedule('6-59/10 * * * *', async () => {
         const { FLAGS } = await import('./lib/config/flags')
         if (!FLAGS.ENABLE_EVOLUTION_SCHEDULER) return
 
@@ -670,24 +710,24 @@ export async function register() {
       // design assumes: the samples ARE hour buckets, and running it more often
       // would refine the current bucket repeatedly for no gain.
       //
-      // Runs at :05 rather than :00 so it is not competing with every other
-      // hourly job for the same connections, and reads only pg_stat_* views and
-      // pg_class sizes — no user data, no model call.
-      cron.schedule('5 * * * *', async () => {
+      // Runs at :07, a minute no other pass starts on, so it is not competing
+      // with every other hourly job for the same connections (:05 was also the
+      // daily backup's and the usage close's minute, and every five-minute
+      // platform pass's), and reads only pg_stat_* views and pg_class sizes:
+      // no user data, no model call.
+      cron.schedule('7 * * * *', async () => {
         const g = globalThis as any
         if (g.__baselineCollectorRunning) return
         g.__baselineCollectorRunning = true
         try {
           const { collectBaseline } = await import('./lib/autonomy/baseline/collector')
           const { getFleetScheduler } = await import('./lib/edition')
+          const { allSettledBounded } = await import('./lib/scheduler/bounded')
 
           const projects = await getFleetScheduler().activeTargets()
 
-          const CONCURRENCY = 5
-          for (let i = 0; i < projects.length; i += CONCURRENCY) {
-            const batch = projects.slice(i, i + CONCURRENCY)
-            await Promise.allSettled(batch.map(p => collectBaseline(p.id)))
-          }
+          // A few databases at a time, whichever database each project's data is in.
+          await allSettledBounded(projects, p => collectBaseline(p.id))
           console.log(`[Baseline] sampled ${projects.length} project(s)`)
         } catch (err: any) {
           console.error('[Baseline] Cron error:', err?.message)
@@ -734,7 +774,9 @@ export async function register() {
       // Measures actual on-disk size of each project's workspace and branch
       // schemas: ProjectUsage.dbStorageUsedMb for the quota check, and the
       // `db_bytes` daily-maximum gauge in the usage ledger for billing.
-      cron.schedule('0 * * * *', async () => {
+      // At :29, a minute no other hourly or ten-minute pass starts on (see Tier
+      // B); the gauge is a daily maximum, so the minute does not matter to it.
+      cron.schedule('29 * * * *', async () => {
         const { snapshotScheduledDbStorage } = await import('./lib/usage/db-storage')
         await snapshotScheduledDbStorage().catch((err: any) =>
           console.error('[DbStorageSnapshot] Error:', err?.message)
@@ -745,7 +787,8 @@ export async function register() {
       // Load balancer, S3 and CloudFront access logs into the usage ledger,
       // each log object exactly once. A no-op until USAGE_LOG_SOURCES names the
       // log buckets (Cloud infrastructure). lib/usage/log-ingest.ts.
-      cron.schedule('*/15 * * * *', async () => {
+      // From :08, off the minutes the fleet passes start on (see Tier B).
+      cron.schedule('8-59/15 * * * *', async () => {
         const { ingestConfiguredLogs } = await import('./lib/usage/log-ingest')
         try {
           const s = await ingestConfiguredLogs()
@@ -809,18 +852,20 @@ export async function register() {
         }
       })
 
-      // ── Direct Postgres allowlists — every 5 minutes, from home ───────────
-      // Each region's database endpoint admits only the addresses its projects
-      // allow, kept on a prefix list (lib/services/direct-access-allowlist.ts).
-      // Every change to a project's addresses syncs at once; this repairs what
-      // a failed sync, a purge or an edit made outside Backenly left. The
-      // addresses are platform records and the home web task holds every
-      // region's setting, so it runs once, at home. A no-op, said once, where
-      // no region has a prefix list (a self-hosted deployment).
+      // ── Connection pooler logins — every 5 minutes, from home ─────────────
+      // The pooler serves a project database's login from its row in that
+      // data instance's backenly_pooler.logins (lib/data-plane/pooler.ts).
+      // Each login's row is written as it is made, rotated or revoked; this
+      // writes one a failure or a later-offered pooler left missing, turns a
+      // row back on once its project is no longer paused, and removes the rows
+      // of logins and databases that are gone (lib/services/direct-access.ts).
+      // The logins are platform records and the home web task holds every
+      // region's data instance setting, so it runs once, at home. Nothing to do
+      // where no region offers the pooler (POOLER_HOST[_<REGION>] unset).
       cron.platform('*/5 * * * *', async () => {
-        const { syncDirectAccessAllowlists } = await import('./lib/services/direct-access-allowlist')
-        await syncDirectAccessAllowlists().catch((err: any) =>
-          console.error('[DirectDbAllowlist] Error:', err?.message)
+        const { reconcilePoolerLogins } = await import('./lib/services/direct-access')
+        await reconcilePoolerLogins().catch((err: any) =>
+          console.error('[DirectAccess] pooler logins pass error:', err?.message)
         )
       })
 

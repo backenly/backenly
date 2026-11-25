@@ -1,7 +1,9 @@
 /**
  * POST /api/projects/[id]/database-access/rotate — { mode }
  * New password for an existing direct-access role. Live sessions for the role
- * are terminated server-side, so rotation revokes access immediately.
+ * are terminated server-side, so rotation revokes access immediately. On a
+ * project's own database this answer is the one place a read-write login's
+ * new password is ever shown.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -23,7 +25,7 @@ export async function POST(request: NextRequest) {
     } catch (err: any) {
       // Nothing outside can connect with the login, so there is nothing to rotate it for.
       if (err instanceof DirectAccessUnavailableError) {
-        return NextResponse.json({ error: err.message, code: err.code }, { status: 503 })
+        return NextResponse.json({ error: err.message, code: err.code, reason: err.reason }, { status: 503 })
       }
       console.error('[database-access] rotate failed:', err?.message)
       const status = /No .* credential to rotate/.test(err?.message ?? '') ? 404 : 500

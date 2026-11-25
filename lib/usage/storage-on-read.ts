@@ -2,7 +2,7 @@
  * Database storage measured when someone reads it.
  *
  * Storage is measured, not counted (./db-storage.ts measures one project). The
- * scheduled sweep measures every project on the hour, and nothing else
+ * scheduled sweep measures every project once an hour, and nothing else
  * measured rows an app wrote, so the Usage page showed a bulk load up to an
  * hour late. This is the account-level read the Usage page and the agent's
  * usage read take first. Which projects belong to an account is the same
@@ -27,7 +27,7 @@ const STORAGE_READ_MEASURE_LIMIT = 20
  * Before an account's usage is read, measure each of its projects whose last
  * reading is more than five minutes old, and say when the total was measured.
  *
- * The scheduled sweep measures every project on the hour, and nothing else
+ * The scheduled sweep measures every project once an hour, and nothing else
  * measures rows an app writes, so the Usage page showed a bulk load up to an
  * hour late: production QA (2026-11-09, report 108) read "Database storage
  * 2 MB of 512 MB" more than 30 minutes after loading about 300 MB. A reading is

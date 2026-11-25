@@ -12,16 +12,6 @@ export {
   disconnectMongoDB 
 } from './mongodb'
 
-// Physical database isolation (production-grade)
-export {
-  provisionIsolatedDatabase,
-  getIsolatedPrismaClient,
-  deprovisionIsolatedDatabase,
-  verifyDatabaseIsolation,
-  type IsolatedDatabaseConfig,
-  type ProvisionedDatabase,
-} from './isolated-database-manager'
-
 // Initialize connections on import (for Next.js API routes)
 export async function initializeDatabases() {
   const results = {

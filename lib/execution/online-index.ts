@@ -85,15 +85,10 @@ export type OnlineIndexOutcome =
     }
 
 async function onOwnConnection<T>(projectId: string, fn: (c: PoolClient) => Promise<T>): Promise<T> {
-  const { acquireWorkspaceClient } = await import('@/lib/services/workspace-pool')
-  const client = await acquireWorkspaceClient(projectId)
-  try {
-    return await fn(client)
-  } finally {
-    // Destroyed, never returned to the pool: its timeouts and its advisory
-    // lock go with it.
-    client.release(true)
-  }
+  const { withWorkspaceSession } = await import('@/lib/services/workspace-pool')
+  // Closed afterwards, never returned to the pool: its timeouts and its
+  // advisory lock go with it.
+  return withWorkspaceSession(projectId, fn)
 }
 
 /** Whether the index exists, and whether queries may use it. */

@@ -10,6 +10,12 @@ tools/managed-db/regional/sql/ledger.sql
 tools/managed-db/regional/sql/roles.sql
 tools/managed-db/regional/sql/extensions.sql
 tools/managed-db/regional/sql/verify.sql
+tools/managed-db/regional/sql/project-db.sql
+tools/managed-db/regional/sql/verify-project-db.sql
+tools/managed-db/regional/sql/pooler.sql
+tools/managed-db/regional/sql/verify-pooler.sql
+tools/managed-db/regional/sql/close-shared.sql
+tools/managed-db/regional/sql/open-shared.sql
 scripts/postgrest-install.sh
 scripts/lib/db-admin.sh
 scripts/sql/postgrest-schema-registry.sql

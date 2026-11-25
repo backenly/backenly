@@ -1125,22 +1125,30 @@ export async function switchOffProject(opts: {
   live: Array<{ object: Planted; what: string }>
   facts: DatabaseFacts
   pool: PgPool
+  /**
+   * The project's own database `pool` reaches, when it is one; omitted or null
+   * for the region's own database, as scripts/neutralize-planted-objects.ts
+   * sweeps.
+   */
+  database?: string | null
 }): Promise<ProjectSwitchOff> {
   const { region, projectId, report, facts, pool } = opts
+  const database = opts.database ?? null
   const targets = [...new Set(opts.live.filter((l) => l.object.projectId === projectId).map((l) => l.object))]
   const actions = actionsFor(targets)
   if (actions.length === 0) return { actions, result: { done: [], failed: [], changeSeq: null }, left: [], governed: false }
 
-  const [{ projectRegion, regionRawClient }, { resolveWorkspaceSchema }] = await Promise.all([
+  const [{ projectDatabase, databaseClient, regionRawClient }, { resolveWorkspaceSchema }] = await Promise.all([
     import('@/lib/data-plane/regional'),
     import('@/lib/services/workspace-pool'),
   ])
-  // Governed only where the project's record says this region holds it: its
+  // Governed only where the project's record says this database holds it: its
   // History and its change lock are about that database.
   const record = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } })
-  const governed = !!record && (await projectRegion(projectId)) === region
+  const placement = record ? await projectDatabase(projectId) : null
+  const governed = !!placement && placement.region === region && (placement.tenancy === 'dedicated' ? placement.database : null) === database
   const mainSchema = governed ? await resolveWorkspaceSchema(projectId) : `workspace_${projectId}`
-  const db = regionRawClient(region, projectId)
+  const db = database === null ? regionRawClient(region, projectId) : databaseClient(region, database, projectId)
   const result = await switchOff(projectId, actions, {
     execute: (sql) => db.$executeRawUnsafe(sql),
     governed,
@@ -1166,14 +1174,23 @@ export async function switchOffProject(opts: {
  * database shared by several projects the switch-off therefore runs again for
  * the schemas restored. Null where the database is dedicated to one project, or
  * has helpers too old to say, as scripts/neutralize-planted-objects.ts leaves those.
+ *
+ * Read on the database holding the project's data: its region's, or its own,
+ * which reads as dedicated (backenly_meta.tenancy, set in the template every
+ * such database is cloned from) and is left as it is.
  */
 export async function switchOffAfterRestore(
   projectId: string,
   region: CloudRegionId,
   schemas: string[],
 ): Promise<(ProjectSwitchOff & { found: number }) | null> {
-  const { regionPool } = await import('@/lib/data-plane/regional')
-  const pool = regionPool(region, 'planted-objects', { max: 2 }) as unknown as PgPool
+  const { projectDatabase, projectPool, regionPool } = await import('@/lib/data-plane/regional')
+  const placement = await projectDatabase(projectId)
+  const own = placement.region === region && placement.tenancy === 'dedicated'
+  const database = own ? placement.database : null
+  const pool = (
+    own ? await projectPool(projectId, 'planted-objects', { max: 2 }) : regionPool(region, 'planted-objects', { max: 2 })
+  ) as unknown as PgPool
   const client = await pool.connect()
   let facts: DatabaseFacts
   let report: PlantedReport
@@ -1186,6 +1203,6 @@ export async function switchOffAfterRestore(
   } finally {
     client.release()
   }
-  const out = await switchOffProject({ region, projectId, report, live, facts, pool })
+  const out = await switchOffProject({ region, projectId, report, live, facts, pool, database })
   return { ...out, found: report.planted.length }
 }

@@ -323,7 +323,10 @@ export function ConnectStep({
         )}
       </div>
 
-      <FormFooter error={formError} aside={`Backenly only reads ${from}. Nothing there changes.`}>
+      <FormFooter
+        error={formError}
+        aside={busy ? `This takes about a minute. Backenly only reads ${from}; nothing there changes.` : `Backenly only reads ${from}. Nothing there changes.`}
+      >
         <KitButtonLink href={cancelHref} variant="ghost">
           Cancel
         </KitButtonLink>

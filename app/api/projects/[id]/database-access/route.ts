@@ -2,8 +2,8 @@
  * Direct database access — credential management.
  *
  *   GET    /api/projects/[id]/database-access          — status + connection strings,
- *                                                         the allowed addresses and the
- *                                                         caller's own (`you`)
+ *                                                         or why there are none (200,
+ *                                                         available: false)
  *   POST   /api/projects/[id]/database-access          — provision { mode }
  *   PATCH  /api/projects/[id]/database-access          — { schemaChanges: "allowed" | "refused" }
  *   DELETE /api/projects/[id]/database-access?mode=…   — revoke
@@ -11,18 +11,20 @@
  * READ_ONLY: SELECT-only role — psql/TablePlus/BI/pg_dump, cannot mutate.
  * READ_WRITE: DML. Schema changes over it are refused until the admin allows
  * them; allowed, they skip approvals and History and are captured as drift,
- * adopted or flagged by the autonomy loop (lib/autonomy/drift-watch.ts). On a
- * database shared by several projects they cannot be allowed (409, with why).
+ * adopted or flagged by the autonomy loop (lib/autonomy/drift-watch.ts). They
+ * can be allowed only on a project's own database reached through the
+ * connection pooler, never on a database shared by several projects (409,
+ * with why).
  *
- * Secrets: responses include the decrypted password/connection string — this
- * is the owner-authenticated management surface, same trust boundary as the
- * env-var manager. Everything is audit-logged by the service.
+ * Secrets: responses include passwords and connection strings — this is the
+ * owner-authenticated management surface, same trust boundary as the env-var
+ * manager. On a project's own database a read-write login's password is in
+ * the POST (and rotate) answer only, once. Everything is audit-logged by the
+ * service.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
-import { clientIpFromHeaders } from '@/lib/security/client-ip'
-import { describeCallerAddress } from '@/lib/services/direct-access-addresses'
 import {
   DirectAccessPausedError,
   DirectAccessUnavailableError,
@@ -35,9 +37,9 @@ import {
   type DirectAccessMode,
 } from '@/lib/services/direct-access'
 
-/** A region with no public endpoint: no login is issued or changed, and the answer says why. */
+/** Nothing outside Backenly can connect here: no login is issued or changed, and the answer says why. */
 function unavailable(err: DirectAccessUnavailableError) {
-  return NextResponse.json({ error: err.message, code: err.code }, { status: 503 })
+  return NextResponse.json({ error: err.message, code: err.code, reason: err.reason }, { status: 503 })
 }
 
 function parseMode(v: unknown): DirectAccessMode | null {
@@ -51,11 +53,7 @@ function parseMode(v: unknown): DirectAccessMode | null {
 // Membership alone handed an organization VIEWER a live Postgres login.
 export async function GET(request: NextRequest) {
   return withProjectValidation<any>(request, async (validated) => {
-    const status = await getDirectAccessStatus(validated.projectId)
-    if (!status.available) return NextResponse.json(status)
-    // What "Allow my address" allows: the caller's own address as the load
-    // balancer saw it (lib/security/client-ip.ts).
-    return NextResponse.json({ ...status, you: describeCallerAddress(clientIpFromHeaders(request)) })
+    return NextResponse.json(await getDirectAccessStatus(validated.projectId))
   }, { floor: 'administer' })
 }
 
@@ -104,11 +102,12 @@ export async function PATCH(request: NextRequest) {
       if (err instanceof DirectAccessUnavailableError) return unavailable(err)
       // Not allowed here, and the reason is the answer: a database shared by
       // several projects never allows them (scripts/setup-direct-access.sql,
-      // section 5c); one whose helpers predate that cannot say.
+      // section 5c), nor a project's own database where its region offers no
+      // pooler; one whose helpers predate that cannot say.
       if (err instanceof SchemaChangesUnavailableError) {
         return NextResponse.json(
           { error: err.message, code: err.code, reason: err.reason },
-          { status: err.reason === 'shared_database' ? 409 : 503 },
+          { status: err.reason === 'helpers_outdated' ? 503 : 409 },
         )
       }
       const msg: string = err?.message ?? ''

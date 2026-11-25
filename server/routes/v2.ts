@@ -159,12 +159,15 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
   // not with a 503 that hides the authorization result.
   //
   // The PostgREST serving the project's region; never another region's, which
-  // serves a database without this project's schema.
+  // serves a database without this project's schema. A project with a
+  // database of its own is served by its own PostgREST on the region's host;
+  // without one configured, projectPostgrest refuses it (503 through the
+  // region-error handler), never null, so it is never sent to the shared one.
   const postgrest = await projectPostgrest(projectId)
   if (!postgrest) {
     return res.status(503).json({ code: 'V2_UNAVAILABLE', message: 'PostgREST is not configured.' })
   }
-  const { url: baseUrl, jwtSecret: secret } = postgrest
+  const { url: baseUrl, jwtSecret: secret, database } = postgrest
 
   // Authenticated, in quota, and past the serving gate: real use.
   void touchProjectActivity(projectId)
@@ -199,6 +202,8 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
       projectId,
       endUserId: auth.endUserId,
       serviceRole: auth.isServiceRole,
+      // Only for a database of its own; absent, the claims are as they always were.
+      database,
     }),
     secret,
   )

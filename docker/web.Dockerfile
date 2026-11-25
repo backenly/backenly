@@ -55,6 +55,9 @@ ARG NEXT_PUBLIC_API_URL=http://localhost:3001
 # advertised unless a release passes `published`, and then only the rates the
 # catalog publishes. The default is an explicit non-publishing value, not empty.
 ARG NEXT_PUBLIC_USAGE_PRICING=unpublished
+# The migration guide (/migrate) and its footer link (components/migrate/flag.ts),
+# shown only when a release passes `published`.
+ARG NEXT_PUBLIC_MIGRATION=unpublished
 ARG NEXT_PUBLIC_SENTRY_DSN=""
 ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY=""
 ARG NEXT_PUBLIC_ENABLE_PHASE_10_BUILD_HISTORY=true
@@ -64,6 +67,7 @@ ARG BACKENLY_EDITION=cloud
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
     NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     NEXT_PUBLIC_USAGE_PRICING=$NEXT_PUBLIC_USAGE_PRICING \
+    NEXT_PUBLIC_MIGRATION=$NEXT_PUBLIC_MIGRATION \
     NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN \
     NEXT_PUBLIC_TURNSTILE_SITE_KEY=$NEXT_PUBLIC_TURNSTILE_SITE_KEY \
     NEXT_PUBLIC_ENABLE_PHASE_10_BUILD_HISTORY=$NEXT_PUBLIC_ENABLE_PHASE_10_BUILD_HISTORY \
@@ -100,6 +104,11 @@ RUN npx tsx scripts/verify-public-build-inputs.ts --artifact
 
 # The function runner and supervisor, self-contained (see the final stage).
 RUN node scripts/build-function-runner.mjs --out /src/dist-fn
+
+# The import sandbox task, self-contained, held to the sandbox's boundary
+# (scripts/build-import-worker.mjs fails the build rather than bundle
+# Backenly's own clients into it).
+RUN node scripts/build-import-worker.mjs --out /src/dist-import
 
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM node:20-slim AS runtime
@@ -286,6 +295,14 @@ EXPOSE 3000
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/*
+# The import sandbox task (lib/import/worker/entry.ts). This container never
+# runs it: the web registers a task definition from this image that runs it as
+# node, with no role and no secret (lib/import/sandbox.ts). It reads nothing
+# under /app.
+COPY --from=build /src/dist-import/ /opt/backenly-import/
+RUN chown -R root:root /opt/backenly-import \
+ && chmod -R u=rwX,go=rX /opt/backenly-import \
+ && test -s /opt/backenly-import/import-worker.cjs
 COPY --from=build /src/dist-fn/ /opt/backenly-fn/
 COPY docker/function-isolation/entrypoint.sh /opt/backenly-fn/entrypoint.sh
 RUN cp /app/certs/rds-ca-cloud-regions.pem /opt/backenly-fn/rds-ca-cloud-regions.pem \

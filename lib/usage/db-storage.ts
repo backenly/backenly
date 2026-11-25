@@ -89,12 +89,15 @@ export async function snapshotProjectDbStorage(projectId: string, billingAccount
  * control-plane code.
  *
  * allSettled rather than all: one project schema being mid-migration, locked or
- * already dropped must not abandon the rest of the sweep.
+ * already dropped must not abandon the rest of the sweep. A few projects at a
+ * time (lib/scheduler/bounded.ts): each one measured opens its database, and a
+ * project with a database of its own opens a database of its own.
  */
 export async function snapshotScheduledDbStorage(): Promise<void> {
   const { getFleetScheduler } = await import('@/lib/edition')
+  const { allSettledBounded } = await import('@/lib/scheduler/bounded')
   const targets = await getFleetScheduler().maintenanceTargets()
   // The ledger resolves each project's billing account (its organization on
   // Cloud) when it applies the batch; the target's owner is not that account.
-  await Promise.allSettled(targets.map(t => snapshotProjectDbStorage(t.id)))
+  await allSettledBounded(targets, (t) => snapshotProjectDbStorage(t.id))
 }

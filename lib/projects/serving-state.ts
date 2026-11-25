@@ -60,6 +60,7 @@
  */
 import { authorizingProjectWithAge } from '@/lib/auth-projection/read'
 import { authMaxStalenessMs } from '@/lib/auth-projection/mode'
+import { noteTenancyEpoch } from '@/lib/data-plane/regional'
 
 export type ProjectServingState =
   | { kind: 'serving' }
@@ -205,8 +206,19 @@ export function withStalenessBound<T extends object>(
   return answer.row ? { ...answer.row, freshForMs: boundMs - answer.ageMs } : null
 }
 
+// The same read tells this process where the project's data is now: a row read
+// at home carries Project.tenancyEpoch, and a project whose data moved to a
+// database of its own (lib/data-plane/tenancy-migration.ts) is never resolved
+// to its old one again here after this read (lib/data-plane/regional.ts). So
+// every door learns of a move within FRESH_MS, as it learns of the pause that
+// covers it.
 const reader = createServingStateReader({
-  load: async projectId => withStalenessBound(await authorizingProjectWithAge(projectId)),
+  load: async projectId => {
+    const answer = await authorizingProjectWithAge(projectId)
+    const epoch = answer.row?.tenancyEpoch
+    if (typeof epoch === 'number') noteTenancyEpoch(projectId, epoch)
+    return withStalenessBound(answer)
+  },
 })
 
 export function getProjectServingState(projectId: string): Promise<ProjectServingState> {
@@ -242,8 +254,19 @@ export const DELETED_PAUSE_REASON = 'deleted'
 export const DELETED_MESSAGE =
   'This project was deleted. Its owner can restore it from the dashboard until it is removed for good, 7 days after it was deleted.'
 
+/**
+ * The pause a move to a database of its own sets for its few minutes
+ * (lib/data-plane/tenancy-migration.ts): every door answers PROJECT_PAUSED,
+ * as for any pause, and the project serves again by itself when the move ends.
+ */
+export const MIGRATING_PAUSE_REASON = 'migrating'
+
+export const MIGRATING_MESSAGE =
+  'This project is being moved to a database of its own and is back in a few minutes. Nothing needs to be done.'
+
 /** The message for a paused project, by why it is paused. */
 export function pausedMessage(reason: string | null | undefined): string {
+  if (reason === MIGRATING_PAUSE_REASON) return MIGRATING_MESSAGE
   return reason === DELETED_PAUSE_REASON ? DELETED_MESSAGE : PAUSED_MESSAGE
 }
 
@@ -274,8 +297,11 @@ export function pausedDetails(
     hint: deleted
       ? 'This project was deleted, so every API call is refused. Its owner can restore it from the Projects page of the ' +
         'Backenly dashboard until it is removed for good, 7 days after it was deleted.'
-      : 'This project is paused, so every API call is refused until it is resumed. ' +
-        'Its owner can resume it from the Backenly dashboard.',
+      : state.reason === MIGRATING_PAUSE_REASON
+        ? 'This project is being moved to a database of its own, so every API call is refused for a few minutes. ' +
+          'It serves again by itself when the move ends.'
+        : 'This project is paused, so every API call is refused until it is resumed. ' +
+          'Its owner can resume it from the Backenly dashboard.',
     fixUrl: resumeUrl,
   }
 }

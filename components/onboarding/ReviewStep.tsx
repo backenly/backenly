@@ -419,7 +419,11 @@ function NewProjectPanel({
             {errors.form}
           </p>
         ) : (
-          <p className="text-[12.5px] leading-[18px] text-faint">Backenly only reads {from}. Nothing there changes.</p>
+          <p className="text-[12.5px] leading-[18px] text-faint">
+            {busy
+              ? `Checking ${from} again before the project is made. This takes about a minute; nothing there changes.`
+              : `Backenly only reads ${from}. Nothing there changes.`}
+          </p>
         )}
         <div className="mt-[12px] flex items-center justify-end gap-[8px]">
           <KitButton variant="ghost" onClick={onBack} disabled={busy}>

@@ -15,8 +15,8 @@ jest.mock('@/lib/import/driver', () => ({ ImportInputError: class extends Error 
 jest.mock('@/lib/import/jobs', () => ({ ImportRefusedError: class extends Error {} }))
 jest.mock('@/lib/import/redact', () => ({ redactedMessage: (m: unknown) => String(m) }))
 
-import { readFileSync } from 'fs'
-import { join } from 'path'
+import { readFileSync, readdirSync } from 'fs'
+import { join, relative } from 'path'
 import { cloudOnly, importEnabled } from '@/lib/import/http'
 
 const saved = process.env.BACKENLY_IMPORT
@@ -51,12 +51,28 @@ it('never answers off Cloud, whatever the variable says', () => {
   expect(cloudOnly()?.status).toBe(404)
 })
 
-it.each([
-  'app/api/import/route.ts',
-  'app/api/import/inspect/route.ts',
-  'app/api/import/[jobId]/route.ts',
-  'app/api/import/[jobId]/cancel/route.ts',
-])('%s asks cloudOnly() before anything else in every handler', (file) => {
+/** Every route under app/api/import, found rather than listed, so a new one is held to the same rule. */
+function importRoutes(dir = join(process.cwd(), 'app/api/import')): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? importRoutes(join(dir, e.name)) : e.name === 'route.ts' ? [relative(process.cwd(), join(dir, e.name)).split('\\').join('/')] : [],
+  )
+}
+
+it("finds every import route, the sandbox task's included", () => {
+  expect(importRoutes()).toEqual(
+    expect.arrayContaining([
+      'app/api/import/route.ts',
+      'app/api/import/inspect/route.ts',
+      'app/api/import/inspect/[lookId]/route.ts',
+      'app/api/import/[jobId]/route.ts',
+      'app/api/import/[jobId]/start/route.ts',
+      'app/api/import/[jobId]/cancel/route.ts',
+      'app/api/import/worker/[action]/route.ts',
+    ]),
+  )
+})
+
+it.each(importRoutes())('%s asks cloudOnly() before anything else in every handler', (file) => {
   const source = readFileSync(join(process.cwd(), file), 'utf8')
   const handlers = [...source.matchAll(/export async function (GET|POST|PUT|PATCH|DELETE)\([^)]*\)[^{]*\{\s*([^\n]*)/g)]
   expect(handlers.length).toBeGreaterThan(0)

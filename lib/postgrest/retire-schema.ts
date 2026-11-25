@@ -33,11 +33,16 @@
  * (lib/queue/index.ts, PURGE_STATUS): a released worker completes a 'queued'
  * job it has no handler for, and this row is the only record that a schema
  * still has to go.
+ *
+ * A project with a database of its own keeps its schemas there, a branch's
+ * included: the row then names that database too (`database`), and the pass
+ * drops the schema in it, on its region's data instance. A database already
+ * gone, its project purged meanwhile, took the schema with it.
  */
 
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
-import { regionRawClient } from '@/lib/data-plane/regional'
+import { databaseClient, isProjectDatabaseName, regionRawClient } from '@/lib/data-plane/regional'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { isProjectOwnedSchema, quoteIdent } from '@/lib/security/workspace-schema'
@@ -112,35 +117,58 @@ export async function dropOrRetireSchemas(
  * region, are to be dropped DROP_AFTER_MS from now, and with them the logins a
  * deletion retired (`logins`, and `via`, what retired them, for the record of
  * any the pass cannot drop). Pass the transaction that retired them when it is
- * the platform's own, so the record commits with it.
+ * the platform's own, so the record commits with it. `database` names the
+ * project's own database when the schemas are in it; omitted or null, they are
+ * in the region's own database. `afterMs`, when given, is how long they wait
+ * instead of DROP_AFTER_MS: what a move to a database of its own leaves behind
+ * is kept for days (lib/data-plane/tenancy-migration.ts), never less than
+ * DROP_AFTER_MS.
  */
 export async function scheduleSchemaDrop(
   platform: Pick<Prisma.TransactionClient, 'backgroundJob'>,
-  entry: { projectId: string; region: CloudRegionId; schemas: string[]; logins?: string[]; via?: string },
+  entry: {
+    projectId: string
+    region: CloudRegionId
+    schemas: string[]
+    logins?: string[]
+    via?: string
+    database?: string | null
+    afterMs?: number
+  },
   now: Date = new Date(),
 ): Promise<void> {
   const schemas = entry.schemas.filter((schema) => isProjectOwnedSchema(entry.projectId, schema))
   if (schemas.length === 0) return
   const logins = entry.logins ?? []
+  if (entry.database !== undefined && entry.database !== null && !isProjectDatabaseName(entry.database)) {
+    throw new Error(`Refusing to schedule a drop in "${String(entry.database).slice(0, 80)}": not a project database name.`)
+  }
   await platform.backgroundJob.create({
     data: {
       type: RETIRED_SCHEMAS_JOB_TYPE,
       status: RETIRED_SCHEMAS_STATUS.pending,
-      // The project's id, its region, the schema names and its logins' names:
-      // no rows, no credentials.
+      // The project's id, its region, the schema names and its logins' names,
+      // and its own database's name when it has one: no rows, no credentials.
       payload: {
         projectId: entry.projectId,
         region: entry.region,
         schemas,
+        ...(entry.database ? { database: entry.database } : {}),
         ...(logins.length > 0 ? { logins, via: entry.via ?? 'project deletion' } : {}),
       },
       attempts: 0,
       maxAttempts: RETRY_DELAYS_MS.length,
-      runAt: new Date(now.getTime() + DROP_AFTER_MS),
+      runAt: new Date(now.getTime() + Math.max(DROP_AFTER_MS, entry.afterMs ?? DROP_AFTER_MS)),
       // Null as a purge's is: the project may already be gone.
       projectId: null,
     },
   })
+}
+
+/** Whether a project's own database is still on its region's data instance. */
+async function projectDatabaseStillThere(region: CloudRegionId, database: string): Promise<boolean> {
+  const { projectDatabaseExists } = await import('@/lib/data-plane/project-databases')
+  return projectDatabaseExists(region, database)
 }
 
 /**
@@ -207,8 +235,10 @@ export async function dropRetiredSchemas(
   const jobs = await prisma.backgroundJob.findMany({ where: { id: { in: ids }, status: RETIRED_SCHEMAS_STATUS.running } })
 
   for (const job of jobs) {
-    const payload = (job.payload ?? {}) as { projectId?: unknown; schemas?: unknown; logins?: unknown; via?: unknown }
+    const payload = (job.payload ?? {}) as { projectId?: unknown; schemas?: unknown; logins?: unknown; via?: unknown; database?: unknown }
     const projectId = typeof payload.projectId === 'string' ? payload.projectId : ''
+    // A project's own database, when the row names one; anything else it names is no database of a project.
+    const database = payload.database === undefined ? null : isProjectDatabaseName(payload.database) ? payload.database : undefined
     const named = Array.isArray(payload.schemas) ? payload.schemas.filter((s): s is string => typeof s === 'string') : []
     let owned: string[] = []
     try {
@@ -217,18 +247,26 @@ export async function dropRetiredSchemas(
       owned = []
     }
     const logins = owned.length === named.length ? loginsOf(payload, projectId, owned) : null
-    if (owned.length === 0 || owned.length !== named.length || logins === null) {
+    if (owned.length === 0 || owned.length !== named.length || logins === null || database === undefined) {
       // Unrecoverable: no retry finds an owner the row never named. Kept, failed, for a person.
       await prisma.backgroundJob.update({
         where: { id: job.id },
-        data: { status: RETIRED_SCHEMAS_STATUS.failed, error: 'The row names a schema or a login that is not this project\'s, so nothing was dropped.', completedAt: now, timeoutAt: null },
+        data: { status: RETIRED_SCHEMAS_STATUS.failed, error: 'The row names a schema, a login or a database that is not this project\'s, so nothing was dropped.', completedAt: now, timeoutAt: null },
       })
       out.failed++
       continue
     }
 
     try {
-      const db = regionRawClient(region, projectId)
+      if (database !== null && !(await projectDatabaseStillThere(region, database))) {
+        // Dropped with its project since: the schemas went with it.
+        await prisma.backgroundJob.update({
+          where: { id: job.id },
+          data: { status: 'completed', result: { dropped: [], databaseGone: database }, completedAt: now, error: null, timeoutAt: null },
+        })
+        continue
+      }
+      const db = database === null ? regionRawClient(region, projectId) : databaseClient(region, database, projectId)
       const servedAgain = await servedAmong(db, owned)
       for (const schema of servedAgain) await unregisterSchemaOn(db, schema)
       for (const schema of owned.filter((s) => !servedAgain.includes(s))) {

@@ -27,18 +27,25 @@
  * DATABASE_URL), in every region, after a release once no task of the previous
  * release is still running: until then those tasks put their own function
  * bodies back. Safe to run again.
+ *
+ * A region's projects with a database of their own keep their channels and
+ * functions there, so after the region's own database each of those databases
+ * is done the same way, a few at a time, over the region's data instance
+ * connection (DATA_DATABASE_URL[_REGION]); each line names its database.
  */
 
 import { randomBytes } from 'crypto'
 import type { Pool } from 'pg'
-import { CLOUD_REGIONS, type CloudRegionId } from '../lib/regions'
+import { CLOUD_REGIONS } from '../lib/regions'
 import { disconnectRegionalClients, regionDatabaseUrl } from '../lib/data-plane/regional'
+import { forEachProjectDatabase } from '../lib/data-plane/project-databases'
 import { prisma } from '../lib/db/prisma'
 import {
   bringFunctionsCurrent,
   installRealtimePlatform,
   readRealtimePlatformStatus,
-  realtimePool,
+  realtimeDatabasePool,
+  type RealtimeDatabase,
 } from '../lib/realtime/channels'
 import {
   ALL_FUNCTION_STATE_SQL,
@@ -155,9 +162,11 @@ async function createChannels(pool: Pool, schemas: string[]): Promise<number> {
   return created
 }
 
-async function upgradeRegion(region: CloudRegionId): Promise<boolean> {
-  const say = (line: string) => console.log(`[${region}] ${line}`)
-  const pool = realtimePool(region)
+/** One database: a region's own (`database` null), or a project's own in it. */
+async function upgradeDatabase(target: RealtimeDatabase): Promise<boolean> {
+  const label = target.database === null ? target.region : `${target.region}/${target.database}`
+  const say = (line: string) => console.log(`[${label}] ${line}`)
+  const pool = await realtimeDatabasePool(target)
   let ok = true
 
   // ── Platform objects ──
@@ -241,19 +250,34 @@ async function main(): Promise<void> {
   }
 
   let failures = 0
+  let projectDatabases = 0
   for (const region of regions) {
     try {
-      if (!(await upgradeRegion(region))) failures += 1
+      if (!(await upgradeDatabase({ region, database: null }))) failures += 1
     } catch (err) {
       failures += 1
       console.error(`[${region}] failed: ${errorText(err)}`)
     }
+    // Then each project database of the region, two at a time.
+    try {
+      const walked = await forEachProjectDatabase(region, (ref) => upgradeDatabase({ region, database: ref.database }), { concurrency: 2 })
+      projectDatabases += walked.length
+      for (const { ref, result } of walked) {
+        if (result.status === 'fulfilled' && result.value) continue
+        failures += 1
+        if (result.status === 'rejected') console.error(`[${region}/${ref.database}] failed: ${errorText(result.reason)}`)
+      }
+    } catch (err) {
+      failures += 1
+      console.error(`[${region}] its project databases could not be listed: ${errorText(err)}`)
+    }
   }
 
+  const where = `${regions.length} region(s) and ${projectDatabases} project database(s)`
   console.log(
     APPLY
-      ? `Done in ${regions.length} region(s)${failures ? `, ${failures} with failures` : ''}.`
-      : `Report only, ${regions.length} region(s). Run with --apply to install, create channels and replace functions.`,
+      ? `Done in ${where}${failures ? `, ${failures} with failures` : ''}.`
+      : `Report only, ${where}. Run with --apply to install, create channels and replace functions.`,
   )
   if (failures > 0) process.exitCode = 1
 }

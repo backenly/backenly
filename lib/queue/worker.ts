@@ -23,6 +23,7 @@ import {
   failJob,
   failPurgeJob,
   failRegionalJob,
+  TENANCY_MIGRATION_JOB_TYPE,
 } from './index'
 import type { Prisma } from '@prisma/client'
 import { emit } from '@/lib/events/bus'
@@ -281,7 +282,7 @@ export async function processRegionalJobs(region: CloudRegionId = serviceRegion(
     let failed = 0
     for (const job of jobs) {
       try {
-        await completeRegionalJob(job.id, await runRegionalJob(job.type, job.payload))
+        await completeRegionalJob(job.id, await runRegionalJob(job.type, job.payload, job.id))
         succeeded++
       } catch (err: any) {
         console.error(`[RegionalJobs] ${job.type} ${job.id} failed in ${region}:`, err?.message ?? err)
@@ -308,14 +309,23 @@ function failureSentence(type: string, region: CloudRegionId): string {
   if (type === 'evolution_undo') return `The undo of the architecture change did not run in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_rerequest') return `The architecture change was not checked again in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_assess') return `The look for architecture changes did not run in ${region}. The reason is in that region's logs.`
+  if (type === TENANCY_MIGRATION_JOB_TYPE) return `The move to a database of its own did not complete in ${region}. The reason is in that region's logs.`
   return type === 'workspace_restore'
     ? `The restore did not complete in ${region}. The reason is in that region's logs.`
     : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
 }
 
-async function runRegionalJob(type: string, payload: unknown): Promise<Record<string, any>> {
+async function runRegionalJob(type: string, payload: unknown, jobId: string): Promise<Record<string, any>> {
   const { projectId, backupId, requestedBy: asker } = (payload ?? {}) as { projectId?: unknown; backupId?: unknown; requestedBy?: unknown }
   if (typeof projectId !== 'string' || projectId.length === 0) throw new RegionalJobRefusal('The job names no project.')
+
+  if (type === TENANCY_MIGRATION_JOB_TYPE) {
+    // A move into a database of its own (lib/data-plane/tenancy-migration.ts).
+    // A refusal or an abort is how this run ended, not a failed job: the report
+    // is the job's result, and a person decides whether to start it again.
+    const { runTenancyMigrationJob } = await import('@/lib/data-plane/tenancy-migration')
+    return (await runTenancyMigrationJob(jobId, payload)) as unknown as Record<string, any>
+  }
 
   if (type === 'maintenance_backfill') {
     // One batch, then the next queued in this region (primitives/backfill-job.ts).

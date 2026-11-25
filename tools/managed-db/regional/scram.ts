@@ -4,40 +4,24 @@
  * `ALTER ROLE r PASSWORD '<verifier>'` stores a verifier PostgreSQL accepts
  * as-is, so the database (and the one-off admin task that talks to it) never
  * sees the password itself: only the operator's machine holds it, long enough
- * to write the connection string to Secrets Manager.
+ * to write it to Secrets Manager.
  *
- * Format (PostgreSQL src/common/scram-common.c):
- *   SCRAM-SHA-256$<iterations>:<salt, base64>$<StoredKey, base64>:<ServerKey, base64>
- * where SaltedPassword = PBKDF2-HMAC-SHA-256(password, salt, iterations),
- *       StoredKey      = SHA-256(HMAC(SaltedPassword, "Client Key")),
- *       ServerKey      = HMAC(SaltedPassword, "Server Key").
+ * ONE IMPLEMENTATION. The verifier is lib/data-plane/scram.ts's, the same code
+ * that computes the verifiers of customers' logins for the connection pooler,
+ * re-exported here so the procedure and the application can never disagree on
+ * the format. Only launch.ts (run from a checkout with `npx tsx`) and the tests
+ * import this file; the procedure's image carries bootstrap.sh and SQL alone
+ * (image-files.txt, Dockerfile.bootstrap), so the relative import never has to
+ * resolve inside it.
  *
- * Only printable ASCII passwords are accepted. PostgreSQL runs SASLprep on the
- * password before hashing; for ASCII that is the identity, so the verifier
- * computed here is exactly the one PostgreSQL would compute. The procedure's
- * own passwords are random hex, so this costs nothing.
+ * Its rules suit every password the procedure makes: printable ASCII without
+ * spaces (generatePassword() is hex), a random 16-byte salt, and 4096
+ * iterations, PostgreSQL's default and what backenly_pooler.logins requires.
  */
 
-import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 
-export const SCRAM_ITERATIONS = 4096
-
-export function scramSha256Verifier(
-  password: string,
-  { salt = randomBytes(16), iterations = SCRAM_ITERATIONS }: { salt?: Buffer; iterations?: number } = {},
-): string {
-  if (!/^[\x21-\x7e]+$/.test(password)) {
-    throw new Error('Only printable ASCII passwords are supported (no spaces), so SASLprep cannot change them.')
-  }
-  if (!Number.isInteger(iterations) || iterations < 4096) {
-    throw new Error('SCRAM iterations must be an integer of at least 4096.')
-  }
-  const salted = pbkdf2Sync(Buffer.from(password, 'utf8'), salt, iterations, 32, 'sha256')
-  const clientKey = createHmac('sha256', salted).update('Client Key').digest()
-  const storedKey = createHash('sha256').update(clientKey).digest()
-  const serverKey = createHmac('sha256', salted).update('Server Key').digest()
-  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`
-}
+export { SCRAM_ITERATIONS, scramSha256Verifier } from '../../../lib/data-plane/scram'
 
 /** A random password the procedure can use: 32 bytes of hex. */
 export function generatePassword(): string {

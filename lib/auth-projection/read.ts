@@ -79,6 +79,14 @@ export interface AuthorizingProject {
   jwtSecret: string | null
   userId: string | null
   organizationId: string | null
+  /**
+   * Project.tenancyEpoch, when home answered: the serving-state read carries
+   * it so every process learns that a project's data moved within the same
+   * bound as a pause (lib/projects/serving-state.ts). The region's copy does
+   * not keep it; there the placement's own bounded age covers it
+   * (lib/data-plane/regional.ts).
+   */
+  tenancyEpoch?: number
 }
 
 /**
@@ -140,6 +148,7 @@ function projectAtHome(projectId: string): Promise<AuthorizingProject | null> {
       jwtSecret: true,
       userId: true,
       organizationId: true,
+      tenancyEpoch: true,
     },
   })
 }

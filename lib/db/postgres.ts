@@ -1,5 +1,7 @@
 import { PrismaClient } from '@prisma/client'
 
+import { transactionDefaults } from './transaction-defaults'
+
 // PrismaClient is attached to the `global` object in development to prevent
 // exhausting your database connection limit.
 // Learn more: https://pris.ly/d/help/nextjs-best-practices
@@ -12,6 +14,8 @@ export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
     log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
+    // A transaction waits for a connection as long as a query does (transaction-defaults.ts).
+    transactionOptions: transactionDefaults(),
   })
 
 // Always use singleton pattern in both dev and production to prevent connection exhaustion

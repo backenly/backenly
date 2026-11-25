@@ -164,6 +164,19 @@ model Project {
   // changed. lib/data-plane/regional.ts opens every connection to the
   // project's data in this region and never falls back to another.
   region                  String?
+  // Which database in that region holds the project's data
+  // (lib/data-plane/regional.ts projectDatabase). 'shared': its
+  // workspace_{projectId} schema is in the region's own database, as every
+  // project's has always been. 'dedicated': the project has a database of its
+  // own, databaseName (p_ followed by 32 lowercase hex digits; null while
+  // shared), on the region's data instance named by databaseInstance (null is
+  // the region's primary one). tenancyEpoch moves each time the project's data
+  // moves to another database, so a process that cached the old answer can
+  // tell and read the row again.
+  databaseTenancy         String                 @default("shared")
+  databaseName            String?                @unique
+  databaseInstance        String?
+  tenancyEpoch            Int                    @default(0)
   // Where the project was moved in from, when an import made it
   // (lib/import/jobs.ts): { source, at, tables, rows, users?, files?,
   // rulesPending }. Counts and a kind only, never a name of the source's.
@@ -4019,11 +4032,10 @@ model DatabaseCredential {
   @@map("database_credentials")
 }
 
-// The addresses a project's direct Postgres logins may connect from
-// (lib/services/direct-access-addresses.ts). Where a region's database has a
-// public endpoint, its network allowlist admits the union of every project's
-// addresses there and nothing else (lib/services/direct-access-allowlist.ts).
-// Adding or removing one is a governed change with a History entry
+// The addresses a project's direct Postgres logins could connect from, a
+// retired feature: direct connections now go through the connection pooler
+// (lib/data-plane/pooler.ts), which keeps no address list, and nothing adds a
+// row. Kept so History entries made while it existed can still be restored
 // (lib/changes/resources/addresses.ts). Gone with the project.
 model DirectAccessAddress {
   id        String   @id @default(cuid())

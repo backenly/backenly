@@ -3,7 +3,6 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
-import { provisionWorkspaceDatabase } from '@/lib/services/databaseProvisioning'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canWriteProject } from '@/lib/edition/guard'
 
@@ -138,20 +137,9 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       },
     })
 
-    // Automatically provision databases for the workspace (Option 1: Shared infrastructure)
-    // This makes Backenly a true BaaS - no manual database setup required!
-    try {
-      const provisionResult = await provisionWorkspaceDatabase(workspace.id, validatedData.projectId)
-      if (!provisionResult.success) {
-        console.error('Database provisioning failed:', provisionResult.error)
-        // Don't fail workspace creation - databases can be provisioned later
-        // But log the error for monitoring
-      }
-    } catch (error: any) {
-      console.error('Error during database provisioning:', error)
-      // Continue - workspace is created, databases can be provisioned later
-    }
-
+    // Only the row. A project's workspace schema is created with the project
+    // (createProvisionedProject, lib/projects/provision.ts), which writes this
+    // row too; this route creates no database and no schema.
     return NextResponse.json(
       {
         success: true,

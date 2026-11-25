@@ -17,6 +17,11 @@
  *   - Phone-only and anonymous users have no email, which Backenly's users
  *     table requires: counted and said, not moved.
  *   - Banned users arrive blocked. Deleted users do not arrive.
+ *
+ * Two halves: copyAuthUsers reads the source (in the import's sandbox, where
+ * one runs); insertAuthUsers writes the project (in the control plane), and
+ * checks every user it is handed first (keptAuthUser), since the reader is
+ * only as trustworthy as the source it read.
  */
 
 import type { Pool } from 'pg'
@@ -56,6 +61,54 @@ export interface UsersContext {
   onUsers: (copied: number) => void
   /** The same room as the tables' rows: users are rows of the project's database too. */
   room: RowRoom
+  /** Write one batch into the project (PgDestination.insertUsers); how many arrived. */
+  write: (users: AuthUserRow[]) => Promise<number>
+}
+
+/**
+ * A bcrypt hash as Backenly's sign-in checks one (lib/auth/password.ts): the
+ * $2a$, $2b$ or $2y$ form, at a cost from 4 to MAX_VERIFIED_BCRYPT_COST (14),
+ * 53 characters of salt and hash. Anything else, a dearer hash included, which
+ * sign-in would refuse to check, arrives as no password, and its owner sets one
+ * with "Forgot password", as a user who never had one does.
+ */
+export const KEPT_BCRYPT_HASH = /^\$2[aby]\$(?:0[4-9]|1[0-4])\$[./A-Za-z0-9]{53}$/
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** The longest each text a moved user carries may be; a longer one arrives empty. */
+const USER_TEXT_MAX = { email: 320, name: 512, avatar_url: 2048, provider: 64, provider_id: 512, at: 40 } as const
+
+/**
+ * The user as it may be written, or null when it cannot be: an id that is a
+ * uuid, an email, every other field of its type and within its length, and a
+ * password only in a form Backenly keeps. Run where users are written, on
+ * whatever the reader sent.
+ */
+export function keptAuthUser(u: unknown): AuthUserRow | null {
+  const r = u as Record<string, unknown> | null
+  if (!r || typeof r !== 'object') return null
+  const text = (v: unknown, max: number): string | null => (typeof v === 'string' && v.length > 0 && v.length <= max ? v : null)
+  const at = (v: unknown): string | null => {
+    const s = text(v, USER_TEXT_MAX.at)
+    return s && Number.isFinite(Date.parse(s)) ? s : null
+  }
+  const id = typeof r.id === 'string' && UUID.test(r.id) ? r.id : null
+  const email = text(r.email, USER_TEXT_MAX.email)
+  if (!id || !email) return null
+  return {
+    id,
+    email,
+    password: typeof r.password === 'string' && KEPT_BCRYPT_HASH.test(r.password) ? r.password : null,
+    verified: r.verified === true,
+    name: text(r.name, USER_TEXT_MAX.name),
+    avatar_url: text(r.avatar_url, USER_TEXT_MAX.avatar_url),
+    created_at: at(r.created_at),
+    last_sign_in_at: at(r.last_sign_in_at),
+    banned: r.banned === true,
+    provider: text(r.provider, USER_TEXT_MAX.provider),
+    provider_id: text(r.provider_id, USER_TEXT_MAX.provider_id),
+  }
 }
 
 /** The users rows to insert, column by column, for whatever shape the users table has now. */
@@ -76,11 +129,20 @@ function userColumns(columns: Set<string>, passwordColumn: string, createdAt: st
   return cols
 }
 
+/** What one moved user is counted at against the plan's room: every field it carries. */
+export function userCost(u: AuthUserRow): number {
+  return rowCost(Object.values(u))
+}
+
 /**
- * Copy the users, in id order, inside the source snapshot the tables came
- * from. Returns how many arrived.
+ * Write moved users into the project's users table, for whatever shape it has
+ * now: each checked first (keptAuthUser); one that cannot be written is left
+ * out. Returns how many arrived. An address two users shared (differing in
+ * case) arrives once.
  */
-export async function copyAuthUsers(source: SourceReader, projectId: string, shape: AuthShape, ctx: UsersContext): Promise<number> {
+export async function insertAuthUsers(projectId: string, users: readonly unknown[]): Promise<number> {
+  const kept = users.map(keptAuthUser).filter((u): u is AuthUserRow => u !== null)
+  if (kept.length === 0) return 0
   const { introspectAuthUsersTable } = await import('@/lib/services/end-user-auth-table')
   const { projectPool } = await import('@/lib/data-plane/regional')
   const { rlsSessionSql, rlsSessionParams } = await import('@/lib/services/rls-session')
@@ -88,14 +150,20 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
   const pool: Pool = await projectPool(projectId, 'import', { max: 4 })
   const cols = userColumns(schema.columns, schema.passwordColumn, schema.createdAtColumn, schema.lastLoginColumn)
   const names = cols.map((c) => q(c.name)).join(', ')
-
-  /** Insert these users' rows; how many arrived. */
-  const insert = async (values: unknown[][]): Promise<number> => {
+  // PostgreSQL takes at most 65,535 parameters in one statement.
+  const perInsert = Math.max(1, Math.floor(60_000 / cols.length))
+  let written = 0
+  for (let i = 0; i < kept.length; i += perInsert) {
     const params: unknown[] = []
-    const tuples = values.map((row) => `(${row.map((v) => {
-      params.push(v)
-      return `$${params.length}`
-    }).join(', ')})`)
+    const tuples = kept.slice(i, i + perInsert).map(
+      (u) =>
+        `(${cols
+          .map((c) => {
+            params.push(c.value(u))
+            return `$${params.length}`
+          })
+          .join(', ')})`,
+    )
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -103,7 +171,7 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
       await client.query(rlsSessionSql(), rlsSessionParams({ isServiceRole: true }))
       const res = await client.query(`INSERT INTO ${q(schema.schemaName)}."users" (${names}) VALUES ${tuples.join(', ')} ON CONFLICT DO NOTHING`, params)
       await client.query('COMMIT')
-      return res.rowCount ?? 0
+      written += res.rowCount ?? 0
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {})
       const code = err?.code ? ` (PostgreSQL error ${err.code})` : ''
@@ -112,7 +180,14 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
       client.release()
     }
   }
+  return written
+}
 
+/**
+ * Read the users, in id order, inside the source snapshot the tables came
+ * from, and hand each batch to `ctx.write`. Returns how many arrived.
+ */
+export async function copyAuthUsers(source: SourceReader, shape: AuthShape, ctx: UsersContext): Promise<number> {
   let copied = 0
   let read = 0
   ctx.onUsers(0)
@@ -126,16 +201,26 @@ export async function copyAuthUsers(source: SourceReader, projectId: string, sha
       // The preview counted the users; a source that sends more than one import moves stops here.
       read += rows.length
       if (read > MAX_IMPORT_USERS) throw new ImportInputError(userCountRefusal(null))
-      const values = rows.map((u) => cols.map((c) => c.value(u)))
-      // As many at a time as the plan's room lets in. An address two source
-      // users shared (differing in case) arrives once.
-      copied += await writeWithinRoom(ctx.room, values, rowCost, insert)
+      // Plain values only: a date the driver parsed travels as its ISO text.
+      const users = rows.map((u) => ({
+        ...u,
+        created_at: isoOrNull(u.created_at),
+        last_sign_in_at: isoOrNull(u.last_sign_in_at),
+      }))
+      // As many at a time as the plan's room lets in.
+      copied += await writeWithinRoom(ctx.room, users, userCost, ctx.write)
       ctx.onUsers(copied)
     }
   } finally {
     await source.query('CLOSE bkn_import_users').catch(() => {})
   }
   return copied
+}
+
+function isoOrNull(v: unknown): string | null {
+  if (v === null || v === undefined) return null
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.toISOString() : null
+  return typeof v === 'string' ? v : null
 }
 
 /** How many users the project's users table holds, read as the service role. */

@@ -51,13 +51,25 @@
  * applies to one region at a time: the probe, the prune, the lock, the cooldown
  * and the restart channel are all the region's, and a heal in one region never
  * touches, waits on or counts against another.
+ *
+ * ── A project with a database of its own ────────────────────────────────────
+ *
+ * Its PostgREST is its own process, run by the region's PostgREST host
+ * (services/pgrst-host), so its heal is its own too: the same steps, verified
+ * on its own process (probeDedicatedPostgrest), pruning its own database's
+ * registry, single-flight and rate-ceilinged per project, and restarted by
+ * asking the host (POST /admin/restart/<projectId>, with a service_role token
+ * for the project), never with the region's restart command. The region's
+ * shared PostgREST is never touched for it.
  */
 
 import { Client } from 'pg'
 import { prisma } from '@/lib/db'
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
-import { projectRegion, regionSetting } from '@/lib/data-plane/regional'
-import { diagnoseAndHeal, probePostgrest, type PostgrestStatus } from './health'
+import { projectDatabase, projectPostgrest, projectRegion, regionSetting } from '@/lib/data-plane/regional'
+import { diagnoseAndHeal, probeDedicatedPostgrest, probePostgrest, pruneDanglingSchemas, type PostgrestStatus } from './health'
+import { internalClaimsFor, mintInternalToken } from './gateway'
+import { PGRST_HOST_URL_SETTING, regionPostgrestHostUrl } from './host'
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -308,7 +320,9 @@ async function waitForRecovery(region: CloudRegionId): Promise<PostgrestStatus> 
  *
  * @param projectId  The project whose finding prompted the heal. It decides the
  *                   region, when `region` is not given, and nothing else: the
- *                   decision is made for the whole region, from the probe.
+ *                   decision is made for the whole region, from the probe. A
+ *                   project with a database of its own is healed alone, its own
+ *                   PostgREST on the region's host (healProjectPostgrest).
  * @param region     The region whose data plane to heal. Defaults to the
  *                   project's, or the home region when there is no project.
  */
@@ -316,6 +330,12 @@ export async function healDataPlane(
   projectId: string | null = null,
   region?: CloudRegionId,
 ): Promise<HealResult> {
+  if (projectId && !region) {
+    const placement = await projectDatabase(projectId)
+    if (placement.tenancy === 'dedicated') {
+      return healProjectPostgrest(projectId, placement.region, placement.database as string)
+    }
+  }
   const notes: string[] = []
   const target = region ?? (projectId ? await projectRegion(projectId) : HOME_REGION)
 
@@ -510,6 +530,172 @@ export async function healDataPlane(
     }
   } finally {
     await unlock(lock, lockKey)
+  }
+}
+
+// ── A project's own PostgREST ────────────────────────────────────────────────
+
+/** The two-key advisory lock namespace of per-project heals ("pheal"); the second key is the project's. */
+const PROJECT_HEAL_LOCK_NAMESPACE = 0x7068656c
+
+/** The project's heal lock, on a connection of its own as the region's is (tryLock). */
+async function tryProjectLock(projectId: string): Promise<Client | null> {
+  const client = new Client({ connectionString: process.env.DATABASE_URL })
+  try {
+    await client.connect()
+    const res = await client.query<{ acquired: boolean }>(
+      'SELECT pg_try_advisory_lock($1::int, hashtext($2)) AS acquired',
+      [PROJECT_HEAL_LOCK_NAMESPACE, projectId],
+    )
+    if (res.rows[0]?.acquired === true) return client
+  } catch {
+    /* refused below */
+  }
+  await client.end().catch(() => {})
+  return null
+}
+
+async function unlockProject(client: Client, projectId: string): Promise<void> {
+  try {
+    await client.query('SELECT pg_advisory_unlock($1::int, hashtext($2))', [PROJECT_HEAL_LOCK_NAMESPACE, projectId])
+  } catch { /* closing the session below releases it regardless */ }
+  await client.end().catch(() => {})
+}
+
+/** The last restart of this project's own PostgREST, from the audit log, as lastRestartAt is for a region's. */
+async function lastProjectRestartAt(projectId: string): Promise<Date | null> {
+  try {
+    const row = await prisma.auditLog.findFirst({
+      where: { action: 'DATA_PLANE_PROJECT_RESTARTED', type: 'health', projectId },
+      orderBy: { timestamp: 'desc' },
+      select: { timestamp: true },
+    })
+    return row?.timestamp ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Poll the project's own PostgREST until it answers or the recovery window expires. */
+async function waitForProjectRecovery(projectId: string): Promise<PostgrestStatus> {
+  const deadline = Date.now() + RECOVERY_TIMEOUT_MS
+  let status = await probeDedicatedPostgrest(projectId)
+  while (status.state !== 'healthy' && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, RECOVERY_POLL_MS))
+    status = await probeDedicatedPostgrest(projectId)
+  }
+  return status
+}
+
+/**
+ * Ask the region's PostgREST host to stop the project's own PostgREST and start
+ * it again. Also what a move into a database of its own asks once the project's
+ * row names that database (lib/data-plane/tenancy-migration.ts), so its own
+ * PostgREST reads the moved schemas afresh before it serves again.
+ */
+export async function restartOnHost(projectId: string, region: CloudRegionId, database: string): Promise<{ ok: boolean; detail: string }> {
+  const base = regionPostgrestHostUrl(region)
+  const target = await projectPostgrest(projectId)
+  if (!base || !target) return { ok: false, detail: `${regionSetting(PGRST_HOST_URL_SETTING, region).variable} is not set` }
+  const token = mintInternalToken(internalClaimsFor({ projectId, serviceRole: true, database }), target.jwtSecret)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), RESTART_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${base}/admin/restart/${encodeURIComponent(projectId)}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+    const text = (await res.text()).slice(0, 300)
+    return res.ok ? { ok: true, detail: `host answered ${res.status}` } : { ok: false, detail: `host answered ${res.status}: ${text}` }
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return { ok: false, detail: aborted ? `the host did not answer within ${RESTART_TIMEOUT_MS}ms` : String(err).slice(0, 300) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * healDataPlane for a project with a database of its own: verify its own
+ * PostgREST, prune its own registry when its cache is wedged, and restart its
+ * process on the region's host when the probe still fails, at most once per
+ * cooldown. Never throws once it knows the project's database.
+ */
+async function healProjectPostgrest(projectId: string, region: CloudRegionId, database: string): Promise<HealResult> {
+  const notes: string[] = []
+  const lock = await tryProjectLock(projectId)
+  if (!lock) {
+    const status = await probeDedicatedPostgrest(projectId)
+    notes.push(`Another heal of this project's database API is already running.`)
+    return { outcome: 'in_progress', healthy: status.state === 'healthy', status, prunedSchemas: 0, restarted: false, notes }
+  }
+  const result = (outcome: HealOutcome, status: PostgrestStatus, prunedSchemas: number, restarted: boolean): HealResult => ({
+    outcome,
+    healthy: status.state === 'healthy',
+    status,
+    prunedSchemas,
+    restarted,
+    notes,
+  })
+
+  try {
+    const status = await probeDedicatedPostgrest(projectId)
+    if (status.state === 'healthy') {
+      notes.push(`The project's own PostgREST answers on the platform probe, so nothing was restarted.`)
+      await audit('DATA_PLANE_HEAL_VERIFIED', projectId, region, { database, outcome: 'already_healthy', notes })
+      return result('already_healthy', status, 0, false)
+    }
+    if (status.state === 'not_configured') {
+      const { variable } = regionSetting(PGRST_HOST_URL_SETTING, region)
+      notes.push(`This process has no PostgREST host for ${region} (${variable}, POSTGREST_JWT_SECRET), so it cannot check or repair this project's database API.`)
+      await audit('DATA_PLANE_REGION_UNREACHABLE', projectId, region, { database, variable, notes })
+      return result('region_not_reachable', status, 0, false)
+    }
+
+    let pruned = 0
+    if (status.state === 'schema_cache_failed') {
+      try {
+        pruned = await pruneDanglingSchemas({ region, database })
+        notes.push(pruned > 0 ? `Pruned ${pruned} dangling schema(s) from the project database's registry.` : 'No dangling schemas found in the project database.')
+      } catch (err) {
+        notes.push(`Prune failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      const after = await probeDedicatedPostgrest(projectId)
+      if (after.state === 'healthy') {
+        notes.push(`The project's own PostgREST recovered without a restart.`)
+        await audit('DATA_PLANE_HEAL_VERIFIED', projectId, region, { database, outcome: 'healed_without_restart', notes })
+        return result('healed_without_restart', after, pruned, false)
+      }
+    }
+
+    const last = await lastProjectRestartAt(projectId)
+    if (last && Date.now() - last.getTime() < RESTART_COOLDOWN_MS) {
+      notes.push(`The project's own PostgREST was restarted ${Math.round((Date.now() - last.getTime()) / 1000)}s ago and is still failing; not restarting it again this soon.`)
+      await audit('DATA_PLANE_HEAL_COOLDOWN', projectId, region, { database, status, notes })
+      return result('cooling_down', status, pruned, false)
+    }
+
+    // Recorded before the call, as the region's restart is, so a crash mid-way still holds the cooldown.
+    await audit('DATA_PLANE_PROJECT_RESTARTED', projectId, region, { database, reason: status.state, prunedSchemas: pruned })
+    const run = await restartOnHost(projectId, region, database)
+    notes.push(run.ok ? `The PostgREST host restarted the project's own PostgREST (${run.detail}).` : `Restart on the PostgREST host failed: ${run.detail}`)
+
+    const recovered = await waitForProjectRecovery(projectId)
+    if (recovered.state === 'healthy') {
+      notes.push(`The project's own PostgREST is answering again (${recovered.latencyMs}ms).`)
+      await audit('DATA_PLANE_HEAL_SUCCEEDED', projectId, region, { database, notes })
+      return result('healed_by_restart', recovered, pruned, true)
+    }
+    notes.push(`The project's own PostgREST did not recover within ${RECOVERY_TIMEOUT_MS / 1000}s of the restart.`)
+    await audit('DATA_PLANE_HEAL_FAILED', projectId, region, { database, status: recovered, notes })
+    return result('unrecovered', recovered, pruned, run.ok)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    notes.push(`Heal aborted: ${message}`)
+    return result('unrecovered', { state: 'unreachable', detail: message }, 0, false)
+  } finally {
+    await unlockProject(lock, projectId)
   }
 }
 

@@ -370,6 +370,11 @@
     "reason": "DELETE now goes through requireProjectCapability(canAdministerProject) in lib/tenant/isolation.ts, which resolves the x-project-id header for the caller and refuses a project they may not administer. The earlier ACCEPTED reason was wrong: the handler carried a `// TODO: Verify user has access to this project` and scoped to the header, not the caller, so any signed-in account could delete another project's OAuth client. Pinned by __tests__/auth/workspace-oauth-authorization.test.ts."
   },
   {
+    "route": "/api/workspaces/[workspaceId]/provision-database",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: retired (2026-11-21). The handler answers a flat 404 to everyone before reading the request or any identity, and does nothing else; a project's workspace schema is created with the project (lib/projects/provision.ts). Kept only because tests/integration/workspace-routes-create-no-database.spec.ts pins that it stays shut."
+  },
+  {
     "route": "/api/ai-workspace/detect-new-tables",
     "method": "POST",
     "floor": "view",

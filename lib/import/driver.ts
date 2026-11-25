@@ -11,6 +11,7 @@
  * Wire types (what the console sees) live in ./contract.ts.
  */
 
+import type { ImportDestinations } from './destination'
 import type {
   ImportConnection,
   ImportPreview,
@@ -56,6 +57,12 @@ export interface RunContext extends DriverContext {
   /** The job's id, for records that say which import made them (e.g. rules held for approval). */
   jobId?: string
   include: { users: boolean; files: boolean }
+  /**
+   * Where everything the import writes goes (lib/import/destination.ts). A
+   * driver never opens the project's database, buckets or records itself: in
+   * Backenly Cloud it runs in a sandbox that cannot (lib/import/worker/main.ts).
+   */
+  destinations: ImportDestinations
   /**
    * Report progress. Merge semantics: tables are keyed by name; counts only go
    * up. Call it at least once per batch so the console's ledger moves.

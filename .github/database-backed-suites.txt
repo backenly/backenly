@@ -40,26 +40,16 @@ tests/integration/mcp-oauth-flow.spec.ts
 tests/integration/mcp-oauth-consent.spec.ts
 tests/integration/mcp-direct-access-url.spec.ts
 
-# A region with no developer-facing Postgres host issues no login and shows no
-# connection string, in the console's routes and over MCP, and says so; logins
-# that exist stay listed by name to be revoked (production QA re-test,
-# 2026-11-16, N4).
+# A project nothing outside can reach issues no login and shows no connection
+# string, in the console's routes and over MCP, and says why (a self-hosted
+# database with no host; on Backenly Cloud, a shared database); logins that
+# exist stay listed by name to be revoked (production QA re-test, 2026-11-16,
+# N4).
 tests/integration/direct-postgres-only-where-reachable.spec.ts
 
-# Where a region's database endpoint admits only allowed addresses, each
-# project keeps its own (public IPv4, at most /16, the plan's number), every
-# add and remove is a History entry with a restore, and the region's prefix
-# list is kept equal to the union of every project's addresses there, never
-# dropping one another project still allows. EC2 is a stand-in; no AWS call.
-tests/integration/direct-postgres-allowed-addresses.spec.ts
-tests/integration/direct-postgres-allowed-addresses-history.spec.ts
-tests/integration/direct-postgres-allowlist-sync.spec.ts
-
-# Where the endpoint fronts RDS, each login has a libpq string (verify-full
-# through hostaddr) and one for every other client (verify-ca), both naming the
-# published RDS CA bundle; each login holds its plan's connections at once,
-# set at creation and at every read of its credentials, enforced by Postgres.
-tests/integration/direct-postgres-verified-strings-and-limits.spec.ts
+# Each login holds its plan's connections at once, set at creation and at every
+# read of its credentials and by the hourly pass, enforced by Postgres.
+tests/integration/direct-postgres-connection-limits.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
@@ -790,6 +780,38 @@ tests/integration/migration-ownership-recovery.spec.ts
 # verify.sql, which is the gap), and a check that tolerates every changed step
 # fails the three that pin the strict check and the signal.
 tests/integration/regional-bootstrap.spec.ts
+
+# ── The connection pooler's logins ──────────────────────────────────────────
+#
+# Customers connect PostgreSQL clients to their project's own database through
+# services/pooler, which signs a login in to the server with the keys from the
+# client's own SCRAM proof, so the server must hold exactly the verifier
+# lib/data-plane/scram.ts computed. Proven on a PostgreSQL 16 cluster the suite
+# creates with initdb (it creates backenly_app and backenly_pooler_auth by
+# their real names): the verifier is stored byte for byte and the plain
+# password logs in through node-postgres and libpq; and
+# tools/managed-db/regional/sql/pooler.sql, run twice by psql as an
+# administrator that is not a superuser, leaves lookup() answering only for an
+# active login of the database asked about, databases() listing only existing
+# project databases with an active login (the only names the pooler serves),
+# backenly_pooler_auth able to do nothing else, backenly_app able to write the
+# logins and nothing more, and PUBLIC nothing. Needs PostgreSQL 16 server
+# binaries (PG_BINDIR); fails rather than skips in CI.
+tests/integration/pooler-auth.spec.ts
+
+# A project database's logins through the application
+# (lib/services/direct-access.ts), with a cluster the suite creates as the data
+# instance: each login is made inside the project's database with a verifier
+# Backenly computed, and backenly_pooler.lookup, as the pooler's login calls it,
+# returns exactly the server's verifier; a rotation keeps the two equal and the
+# old password stops; a pause makes the role NOLOGIN, ends its sessions and
+# empties the lookup (from the role alone, and with the row off); a resume puts
+# the same verifier back, so the password signs in again; a revocation removes
+# the row and the role; the scheduled pass writes back a missing row and
+# removes a stray one; schema changes are allowed only while the region offers
+# the pooler; run_query signs in as the read-only login. Needs PostgreSQL 16
+# server binaries (PG_BINDIR); fails rather than skips in CI.
+tests/integration/pooler-logins.spec.ts
 
 # ── Credential rotation ─────────────────────────────────────────────────────
 #
@@ -1585,6 +1607,45 @@ tests/integration/reset-link-opens-a-page.spec.ts
 # property, so it needs a real Postgres.
 tests/integration/project-region.spec.ts
 
+# A project with a database of its own is reached there and only there: real
+# databases named as projects' own, home and in another region, are what its
+# raw client, pools and connection string land on, while region work stays on
+# the region's own database; without the data instance's variable it is
+# refused, never sent to the platform database or another region's; a moved
+# epoch is never answered with the old database; the SQL recorder captures
+# statements sent on such a client once; and the drift event store answers as
+# the Prisma model does on the same rows. Real databases are the property.
+tests/integration/project-database-resolution.spec.ts
+
+# A project with a database of its own holds its sessions there: real databases
+# named as projects' own are where its change lock is taken (another process
+# waits for it there, the region's same key stays free), where a change reads
+# the catalog it records, and where its realtime channel is NOTIFYed and heard,
+# by that project's subscribers only; a project database's listener closes after
+# its last stream and past the cap a stream is refused in so many words; pooled
+# workspace queries leave no search_path or timeout on the connection; and the
+# cap on a process's connections to a data instance waits, then refuses with a
+# retryable 503. Real databases and sessions are the property.
+tests/integration/project-database-sessions.spec.ts
+
+# A shared project moved into a database of its own, on a PostgreSQL 16 cluster
+# the suite builds with initdb and the regional procedure (template, database
+# creator and roles, as tests/integration/regional-bootstrap.spec.ts builds
+# them): a dry run verifies and leaves the project exactly as it was; a failed
+# verification stops with its database gone and nothing lost; the move carries
+# every row (counted and checksummed under FORCE ROW LEVEL SECURITY), sequence,
+# branch, vault, allowlisted extension, realtime channel and function login,
+# delivers the webhook event its outbox held, and fences the old schemas from
+# the project's logins; a second run is refused; deletion finds what the move
+# left; and the region's own database closes to PUBLIC only once no project
+# there is shared. Then, onto a second cluster standing for a data instance
+# that is another instance (as the home region's is), a project's read-only,
+# read-write and function logins move with it: each signs in there, the
+# read-write one with its old password, the pooler is served the server's
+# verifiers, and none is left on the old instance. Real databases, roles and
+# pg_dump/psql are the property.
+tests/integration/tenancy-migration.spec.ts
+
 # A regional project's customer data on platform rows stays in its region: a
 # second database stands in for another region's, holding the real
 # regional_bodies table. Webhook and trigger payloads and replies, and function
@@ -1979,6 +2040,16 @@ tests/integration/project-deletion-change-ledger.spec.ts
 # granted in the vault, and DDL outside served schemas notifies nothing. Event
 # triggers and notifications are the property, so it needs a real Postgres.
 tests/integration/postgrest-reload-on-drop.spec.ts
+
+# The PostgREST host runs one real postgrest process per project database
+# (the binary CI takes from the image services/pgrst-host/Dockerfile pins):
+# two projects in two databases of their own are served by two children, A's
+# token is refused on B's path by the host and by B's PostgREST, a NOTIFY pgrst
+# in one database reloads only its child, a killed child is started again, the
+# cap answers 503 DATA_PLANE_BUSY while every child is busy, and an idle child's
+# process is stopped. Prints each child's cold start and resident memory. The
+# databases and PostgREST are the property, so it needs a real Postgres.
+tests/integration/pgrst-host.spec.ts
 
 # A schema PostgREST serves stops being served at once and is dropped at least
 # two minutes later by the regional pass (a merge's, a discard's and a project
@@ -2500,3 +2571,23 @@ tests/integration/import-source-reads-real-postgres.spec.ts
 # than the room. Real provisioned project, governed table creation and the
 # project's own database; the source is a stand-in reader.
 tests/integration/import-stops-at-the-plans-room.spec.ts
+# The import sandbox end to end: the sandbox task's own code reads a real
+# PostgreSQL source (a look, then a whole move into a provisioned project), and
+# every call it makes goes to the control plane's real handler, which runs each
+# write; then what a task may not do: speak with the wrong token or from the
+# wrong task, write Backenly's own tables or a table the project lacks, write
+# past the plan's room, or anything once its job ended.
+tests/integration/import-sandbox-end-to-end.spec.ts
+# The workspace routes create no database: POST /api/workspaces writes the row
+# only, with no connection string in postgresSchema and an existing row kept;
+# provision-database answers 404 to everyone and changes nothing; DELETE
+# removes the row and never drops a database the row's column names. The
+# catalog and rows are the property, so it needs a real Postgres.
+tests/integration/workspace-routes-create-no-database.spec.ts
+# A build's preview branch is looked for in the database holding the project's
+# data: for a project in another region (a second database stands in for it)
+# onlyOnBranch reads that region's catalog, says no for a table only a home
+# decoy has, and is refused without the region's connection rather than
+# answered from home; a home project reads the home database as before. Both
+# databases and their catalogs are the property, so it needs a real Postgres.
+tests/integration/build-branch-regional.spec.ts

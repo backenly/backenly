@@ -3,7 +3,6 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
-import { deprovisionWorkspaceDatabase } from '@/lib/services/databaseProvisioning'
 import { withAuth } from '@/lib/auth/route-protection'
 
 const updateWorkspaceSchema = z.object({
@@ -203,8 +202,6 @@ export const DELETE = withAuth(async (
       },
       select: {
         id: true,
-        projectId: true,
-        databaseProvisioned: true,
       },
     })
 
@@ -218,21 +215,9 @@ export const DELETE = withAuth(async (
       )
     }
 
-    // Deprovision databases before deleting workspace
-    // This will drop the PostgreSQL schema and MongoDB database
-    if (workspace.databaseProvisioned) {
-      try {
-        const deprovisionResult = await deprovisionWorkspaceDatabase(workspace.id, workspace.projectId)
-        if (!deprovisionResult.success) {
-          console.error('Database deprovisioning failed:', deprovisionResult.error)
-          // Continue with workspace deletion anyway - databases can be cleaned up manually
-        }
-      } catch (error: any) {
-        console.error('Error during database deprovisioning:', error)
-        // Continue with workspace deletion anyway
-      }
-    }
-
+    // Only the row. Nothing here drops a database or a schema: a project's
+    // data goes with the project (lib/projects/delete.ts), and what
+    // Workspace.postgresSchema holds is never read as a database to drop.
     await prisma.workspace.delete({
       where: { id: workspaceId },
     })

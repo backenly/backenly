@@ -13,8 +13,14 @@ import type { CatalogSnapshot } from './catalog'
  * snapshot_restore  a person replacing the whole database from a snapshot
  *                   (lib/services/workspace-backup.ts). In the history, and not
  *                   restorable from it: going back is restoring another snapshot.
+ * tenancy_migration Backenly moving the project's data, unchanged, from its
+ *                   region's shared database into a database of its own
+ *                   (lib/data-plane/tenancy-migration.ts). In the history, never
+ *                   restorable from it, and passed over by a restore to an
+ *                   earlier point: it changed no table, so the changes before it
+ *                   are restored in the database the data is in now.
  */
-export type ChangeKind = 'change' | 'recovery' | 'snapshot_restore'
+export type ChangeKind = 'change' | 'recovery' | 'snapshot_restore' | 'tenancy_migration'
 
 /**
  * Where a change came from. Recorded so the history can say who did what:

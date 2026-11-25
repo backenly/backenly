@@ -5,7 +5,10 @@ export const maxDuration = 120
  * POST /api/import — move a backend into a NEW project.
  *   Body: { orgId, source?, connection, name, region, include: { users, files } }
  *   202 { jobId, projectId }: the project exists and the import runs on; poll
- *   GET /api/import/{jobId}.
+ *   GET /api/import/{jobId}. On Backenly Cloud the source is first checked in
+ *   the import sandbox (lib/import/sandbox.ts) and the project created once it
+ *   passes: 202 { jobId, projectId: null, state: 'checking' }; poll
+ *   GET /api/import/{jobId}/start for the project, or the refusal.
  *
  * GET /api/import?orgId= — the organization's running imports and those that
  * ended in the last 24 hours, newest first: { jobs: ImportProgress[] }.
@@ -14,7 +17,8 @@ export const maxDuration = 120
  * takes (an owner or admin of the organization, room in its plan, an open
  * region, an account in good standing, the platform writable) and has three
  * starts per hour per organization, counted only for callers who may start one. Jobs are listed to whoever administers
- * their project. The connection is held in memory for the job's life only.
+ * their project. The connection is never logged or echoed back; in the sandbox
+ * it is sealed in the job's row until the job ends (lib/import/sandbox-jobs.ts).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -46,7 +50,7 @@ const start = withAuth(async (request: NextRequest, { user }) => {
       { ...parsed.value, userId: user.userId },
       { spendBudget: () => spendBudget(`import:start:org:${parsed.value.orgId}`, IMPORT_BUDGETS.start, 'imports started in this organization in the last hour') },
     )
-    return NextResponse.json({ jobId, projectId }, { status: 202, headers: NO_STORE })
+    return NextResponse.json(projectId ? { jobId, projectId } : { jobId, projectId: null, state: 'checking' }, { status: 202, headers: NO_STORE })
   } catch (err) {
     return errorResponse(sayable(err, parsed.value.connection), secretsOf(parsed.value.connection))
   }
