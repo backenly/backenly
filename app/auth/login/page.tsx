@@ -9,6 +9,7 @@ import { useUserSession } from '@/lib/hooks/useUserSession'
 import { returnPathFrom } from '@/lib/auth/return-path'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { registerSiteIcons } from '@/lib/icons/registry'
+import { GoogleOneTap } from '@/components/auth/GoogleOneTap'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import {
   AuthChrome,
@@ -152,6 +153,7 @@ function LoginForm() {
 
   return (
     <AuthChrome>
+      <GoogleOneTap context="signin" />
       <AuthCard
         title="Sign in to Backenly"
         subtitle="Your projects are where you left them."

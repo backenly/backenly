@@ -50,6 +50,11 @@
     "reason": "ACCEPTED: unauthenticated by design - the provider calls it. CSRF is handled by OAuth state validation, which this route performs before creating a session."
   },
   {
+    "route": "/api/auth/platform-google/one-tap",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - Google One Tap obtains a session here. Accepts only a same-origin JSON POST carrying a Google ID token whose signature, issuer and audience (this deployment's client id) are verified before any account is read; IP rate limited."
+  },
+  {
     "route": "/api/auth/platform-providers",
     "status": "ACCEPTED",
     "reason": "ACCEPTED: unauthenticated read of WHICH providers are configured, needed to render the sign-in page before anybody has a session. Returns no secrets."

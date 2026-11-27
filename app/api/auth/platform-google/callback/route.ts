@@ -2,14 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verify } from 'jsonwebtoken'
-import { prisma } from '@/lib/db'
-import { onSignupCompleted } from '@/lib/platform-signals'
 import { createSession } from '@/lib/auth/session'
-import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
-import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
-import { providerSignInRefusal } from '@/lib/auth/oauth/second-factor'
-import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
+import { signInGoogleIdentity } from '@/lib/auth/oauth/google-sign-in'
 import { fetchGoogleProfilePhoto } from '@/lib/auth/oauth/google-photo'
 import { recordAvatar } from '@/lib/auth/avatar'
 
@@ -101,85 +96,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${appUrl()}/auth/login?error=userinfo_failed`)
   }
   const googleUser = await userInfoResponse.json()
-  // Only an address Google says it verified. The account below is created, or
-  // LINKED to an existing one by address, as email-verified, so accepting
-  // `email` without `verified_email` let an unverified address claim whichever
-  // Backenly account already held it.
-  const email = googleVerifiedEmail(googleUser)
-  if (!email) {
-    return NextResponse.redirect(`${appUrl()}/auth/login?error=email_not_verified`)
+  // Find or create the account: the one path every Google sign-in takes
+  // (lib/auth/oauth/google-sign-in.ts). A brand-new account carries its ?ref=
+  // via the backenly_ref cookie set on the signup page.
+  const signIn = await signInGoogleIdentity(
+    { subject: googleUser.id, profile: googleUser, name: googleUser.name },
+    { ip, referralCode: request.cookies.get('backenly_ref')?.value || null },
+  )
+  if ('error' in signIn) {
+    return NextResponse.redirect(`${appUrl()}/auth/login?error=${signIn.error}`)
   }
-
-  // Founder block/abuse controls.
-  const ipForBlock = ip === 'unknown' ? null : ip
-  const blockHit = await isBlocked({ email, ip: ipForBlock })
-  if (blockHit) {
-    return NextResponse.redirect(`${appUrl()}/auth/login?error=blocked`)
-  }
-
-  // Find or create user.
-  const signedInAt = new Date()
-  let user = await prisma.user.findUnique({
-    where: { email },
-    include: { role: true },
-  })
-  // An account with two-factor authentication signs in with its password and
-  // authenticator code. Asked before anything is written to the account, so
-  // this sign-in links no provider and issues no session for it.
-  const refusal = providerSignInRefusal(user)
-  if (refusal) {
-    return NextResponse.redirect(`${appUrl()}/auth/login?error=${refusal}`)
-  }
-  if (!user) {
-    // An OAuth round trip carries no setup token, so it cannot claim a
-    // self-hosted deployment that is waiting for one.
-    if (!(await oauthMayCreateAccount())) {
-      return NextResponse.redirect(`${appUrl()}/auth/login?error=claim_requires_setup_token`)
-    }
-    const guard = await assertSignupAllowed(email, ipForBlock)
-    if (!guard.ok) {
-      return NextResponse.redirect(`${appUrl()}/auth/login?error=signup_not_allowed`)
-    }
-    user = await prisma.user.create({
-      data: {
-        email,
-        name: googleUser.name,
-        emailVerified: true,
-        provider: 'google',
-        providerId: googleUser.id,
-        lastLogin: signedInAt,
-        lastActiveAt: signedInAt,
-        // Google already proved control of the mailbox, so an OAuth signup is
-        // never held as untrusted. The score is still recorded — a challenge
-        // verdict here is worth being able to see later.
-        signupScore: guard.score ?? null,
-        signupSignals: guard.signals ?? [],
-        signupIp: ipForBlock,
-      },
-      include: { role: true },
-    })
-
-    // A brand-new OAuth account carries its ?ref= via the backenly_ref cookie
-    // set on the signup page. Reporting the signup is a no-op in single-tenant
-    // and never throws, so it cannot block sign-in.
-    const refCode = request.cookies.get('backenly_ref')?.value || null
-    await onSignupCompleted({ userId: user.id, email: user.email, provider: 'google', referralCode: refCode })
-  } else {
-    // Always stamp lastLogin + lastActiveAt on a successful OAuth sign-in;
-    // link the provider on the first OAuth sign-in for an email-only account.
-    const linkProvider = !user.provider || user.provider === 'email'
-    user = await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        lastLogin: signedInAt,
-        lastActiveAt: signedInAt,
-        ...(linkProvider
-          ? { provider: 'google', providerId: googleUser.id, emailVerified: true }
-          : {}),
-      },
-      include: { role: true },
-    })
-  }
+  const user = signIn.user
 
   // The console avatar: the Google account's own photo, or initials when it
   // has none. Undefined means Google could not say, so the recorded photo

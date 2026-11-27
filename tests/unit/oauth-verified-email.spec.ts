@@ -84,7 +84,8 @@ describe('the callbacks use it', () => {
   const path = require('path') as typeof import('path')
 
   it.each([
-    ['app/api/auth/platform-google/callback/route.ts', 'googleVerifiedEmail'],
+    // The platform's Google sign-in, shared by the redirect callback and One Tap.
+    ['lib/auth/oauth/google-sign-in.ts', 'googleVerifiedEmail'],
     ['app/api/auth/platform-github/callback/route.ts', 'githubVerifiedEmail'],
     ['app/api/auth/google/callback/route.ts', 'googleVerifiedEmail'],
     ['app/api/auth/github/callback/route.ts', 'githubVerifiedEmail'],
@@ -107,7 +108,7 @@ describe('an OAuth sign-in cannot claim a self-hosted deployment', () => {
   const path = require('path') as typeof import('path')
 
   it.each([
-    'app/api/auth/platform-google/callback/route.ts',
+    'lib/auth/oauth/google-sign-in.ts',
     'app/api/auth/platform-github/callback/route.ts',
     'app/api/auth/google/callback/route.ts',
     'app/api/auth/github/callback/route.ts',
