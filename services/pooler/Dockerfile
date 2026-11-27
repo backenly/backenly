@@ -65,6 +65,11 @@ COPY services/pooler/entrypoint.sh /usr/local/bin/pooler-entrypoint
 RUN chmod 0555 /usr/local/bin/pooler-entrypoint \
  && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin pooler \
  && install -d -m 0700 -o 10001 -g 10001 /run/pooler
+# The writable place under a read-only root: the task mounts a volume here. On
+# Fargate that volume starts empty and owned by root, so uid 10001 could not
+# write to it and the entrypoint refused to start. Declaring the path a VOLUME
+# makes ECS populate the mount from this directory, its owner included.
+VOLUME ["/run/pooler"]
 USER 10001
 
 EXPOSE 5432 6543
