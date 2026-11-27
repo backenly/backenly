@@ -133,7 +133,8 @@ export function HistoryRecord() {
         <div className="min-w-0 px-[10px] pb-[12px] pt-[18px] sm:px-[18px] sm:pb-[16px] sm:pt-[24px]">
           <div className="px-[10px]">
             <p className="text-[14.5px] font-medium tracking-[-0.01em] text-zinc-100">Changes to movie-reviews today</p>
-            <p className="mt-[4px] text-[12.5px] text-faint">Newest first, from the project&apos;s History</p>
+            {/* Says where the 12:15 restore is shown (review of 2026-11-27: a restore inside a "newest first" list read as out of order). */}
+            <p className="mt-[4px] text-[12.5px] text-faint">Newest change first. A restore shows on the change it undid.</p>
           </div>
 
           <ol aria-label="Changes to movie-reviews today, newest first" onPointerLeave={() => setPeek(null)} className="mt-[14px] grid gap-[2px] pl-[16px] sm:pl-[20px]">
@@ -177,6 +178,12 @@ export function HistoryRecord() {
                         {entry.title}
                       </button>
                     </p>
+                    {/* The bracket's words, there from the start so nothing reflows when it draws (review of 2026-11-27: unlabelled, it read as a join). */}
+                    {i === RESTORED - 1 && (
+                      <p className="mt-[4px] text-[12.5px] leading-[18px] text-zinc-400 transition-opacity duration-200 ease-out" style={{ opacity: shown(300) ? 1 : 0 }}>
+                        Made later. The restore leaves it as it is.
+                      </p>
+                    )}
                     {i === RESTORED && (
                       <>
                         <div className="mt-[6px] grid text-[12.5px] leading-[18px] [&>*]:[grid-area:1/1]">
@@ -189,10 +196,9 @@ export function HistoryRecord() {
                           </span>
                         </div>
                         <div className="mt-[6px] max-w-[54ch] text-[13px] leading-[1.5] text-zinc-300 transition-[opacity,transform] duration-[240ms] ease-out [text-wrap:pretty]" style={rise(640)}>
-                          {/* Three facts, one line each: what came back, what newer rows got, and the later change that stays. */}
+                          {/* Two facts, one line each: what came back, and what newer rows got. The later change that stays is said on its own row. */}
                           <p>{code('runtime')} is back with its 1,284 values.</p>
                           <p>The 4 movies added since have no runtime.</p>
-                          <p>The posters bucket, created after it, stays.</p>
                         </div>
                       </>
                     )}

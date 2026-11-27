@@ -8,6 +8,14 @@
  *
  * Diagrams for the "Platform surface" cards.
  *
+ * 2026-11-28, from three designers' review (every value checked in the code):
+ * every figure is the page's one example project, movie reviews, in Backenly's
+ * real shapes (createdAt, Prefer: count=exact and its 206, lowercase realtime
+ * event types, on_signup / on_insert triggers with snake_case names, a private
+ * bucket); sizes are px, since the root font size is 13px and Tailwind's rem
+ * steps other than 1/2/3/4/6/8/12 land between pixels; one dash texture for
+ * every leader (LEADER_LINE); Realtime is drawn 300 wide so it is 1:1 from md.
+ *
  * Each one shows the primitive doing its actual job, using this platform's real
  * grammar — PostgREST query syntax and response headers, the
  * `workspace_{projectId}` schema naming, the real trigger events and webhook
@@ -74,7 +82,7 @@ import { Fragment } from 'react'
 import { MotionConfig, motion, type Variants } from 'motion/react'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 
-const MONO = 'font-mono text-[11px] leading-none tracking-tight'
+const MONO = 'font-mono text-[12px] leading-none tracking-tight'
 const TEXT = 'text-zinc-300'
 const MUTED = 'text-faint'
 /** Emphasis by brightness, not hue — see the file comment. */
@@ -98,7 +106,7 @@ const LEADER_DIAGONAL = 'stroke-white/[0.30]'
 
 const FILL_KEY = 'fill-zinc-200'
 const FILL_DIM = 'fill-[#8b8b94]'
-const FIG_LABEL = 'font-mono text-[10px] tracking-tight'
+const FIG_LABEL = 'font-mono text-[12px] tracking-tight'
 
 /** Applied to every stroked shape. See rule 1 in the file comment. */
 const CRISP = { vectorEffect: 'non-scaling-stroke' } as const
@@ -106,14 +114,20 @@ const CRISP = { vectorEffect: 'non-scaling-stroke' } as const
 /** Node chip: mono label on solid ink so nothing bleeds through a word. Fixed
     height so connector geometry is deterministic. */
 const CHIP =
-  'inline-flex h-8 items-center gap-2 rounded-[5px] border border-white/[0.09] bg-[#0b0b0e] px-2.5'
+  'inline-flex h-8 items-center gap-2 rounded-[6px] border border-white/[0.09] bg-[#0b0b0e] px-[10px]'
 /** The emphasized node reads brighter, not colored. */
 const CHIP_BRIGHT =
-  'inline-flex h-8 items-center gap-2 rounded-[5px] border border-white/[0.18] bg-[#0b0b0e] px-2.5'
+  'inline-flex h-8 items-center gap-2 rounded-[6px] border border-white/[0.18] bg-[#0b0b0e] px-[10px]'
 /** The small type label inside a chip — `event`, `cron`, `signing secret`. */
-const TAG = 'font-mono text-[10px] tracking-[-0.01em] text-faint [font-variant-ligatures:none]'
+const TAG = 'font-mono text-[12px] tracking-[-0.01em] text-faint [font-variant-ligatures:none]'
 
 const EASE_OUT = [0.16, 1, 0.3, 1] as const
+
+/**
+ * The HTML leaders, drawn with the same dash as the SVG ones (2 on, 4 off, white/24) rather than a CSS dotted border,
+ * which is a second texture beside them.
+ */
+const LEADER_LINE = 'h-px bg-[linear-gradient(90deg,rgb(255_255_255/0.24)_2px,transparent_0)] bg-[length:6px_1px] bg-repeat-x'
 
 /** Plays the assembly once, the first time the card is on screen. */
 const sequence: Variants = {
@@ -141,13 +155,13 @@ const drawX: Variants = {
  * reads the preference after hydration; those visitors then get the figure
  * immediately, with transforms disabled, instead of on scroll.
  */
-function Slot({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+function Slot({ children, className = '', floor = true }: { children: React.ReactNode; className?: string; floor?: boolean }) {
   const reduceMotion = useSettledReducedMotion()
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? 'always' : 'never'}>
       <motion.div
-        className={`relative mt-8 flex min-h-[200px] select-none flex-col justify-end ${className}`.trim()}
+        className={`relative mt-8 flex ${floor ? 'min-h-[184px]' : ''} select-none flex-col justify-end ${className}`.trim()}
         aria-hidden
         initial="hidden"
         animate={reduceMotion ? 'visible' : undefined}
@@ -233,18 +247,20 @@ function FigLabel({
   x,
   y,
   bright,
+  anchor = 'middle',
   children,
 }: {
   x: number
   y: number
   bright?: boolean
+  anchor?: 'middle' | 'end'
   children: React.ReactNode
 }) {
   return (
     <text
       x={x}
       y={y}
-      textAnchor="middle"
+      textAnchor={anchor}
       className={`${FIG_LABEL} ${bright ? FILL_KEY : FILL_DIM}`}
     >
       {children}
@@ -254,7 +270,7 @@ function FigLabel({
 
 function Caption({ children }: { children: React.ReactNode }) {
   return (
-    <motion.p variants={step} className={`${MONO} mt-3.5 ${MUTED}`}>
+    <motion.p variants={step} className={`${MONO} mt-[14px] ${MUTED}`}>
       {children}
     </motion.p>
   )
@@ -265,7 +281,10 @@ function Caption({ children }: { children: React.ReactNode }) {
 /**
  * Two tenants drawn as separate stores with a dashed wall between them, and an
  * fk bracket inside the near one — "relations" is in the paragraph and was in
- * nothing on the card.
+ * nothing on the card. The near project is the page's example, movie reviews
+ * (reviews.movie_id → movies.id); the far one is another project's, dim. Both
+ * names end at one x, so the bracket keeps the same gap from each. Schema names
+ * are workspace_ plus the project's id (lib/security/workspace-schema.ts).
  */
 export function DatabaseDiagram() {
   return (
@@ -273,32 +292,24 @@ export function DatabaseDiagram() {
       <motion.div variants={step}>
         <Fig w={360} h={192}>
           <Store cx={90.5} top={22} body={126} rx={78} bright />
-          <FigLabel x={90.5} y={78} bright>
-            posts
+          <FigLabel x={96.5} y={78} anchor="end" bright>
+            movies
           </FigLabel>
-          <FigLabel x={90.5} y={100} bright>
-            authors
+          <FigLabel x={96.5} y={100} anchor="end" bright>
+            reviews
           </FigLabel>
-          {/* posts.author_id → authors.id, drawn as a bracket rather than a
+          {/* reviews.movie_id → movies.id, drawn as a bracket rather than a
               label, so it reads as a constraint and not as more prose. */}
-          <path d="M116.5 74.5 H134.5 V96.5 H116.5" className={DIM} {...CRISP} />
-          <text x={140} y={88.5} className={`${FIG_LABEL} ${FILL_DIM}`}>
+          <path d="M102.5 74.5 H120.5 V96.5 H102.5" className={DIM} {...CRISP} />
+          <text x={126} y={88.5} className={`${FIG_LABEL} ${FILL_DIM}`}>
             fk
           </text>
           <FigLabel x={90.5} y={178} bright>
-            workspace_a1b2
+            workspace_8f2a…
           </FigLabel>
 
-          {/* The grant boundary. Nothing crosses it, which is the whole claim. */}
-          <line
-            x1={180.5}
-            y1={8}
-            x2={180.5}
-            y2={184}
-            strokeDasharray="2 6"
-            className={DIM}
-            {...CRISP}
-          />
+          {/* The grant boundary, in the leaders' dash. Nothing crosses it, which is the whole claim. */}
+          <line x1={180.5} y1={8} x2={180.5} y2={184} strokeDasharray="2 4" className={LEADER} {...CRISP} />
 
           <Store cx={270.5} top={22} body={126} rx={78} bright={false} />
           <FigLabel x={270.5} y={78}>
@@ -308,7 +319,7 @@ export function DatabaseDiagram() {
             customers
           </FigLabel>
           <FigLabel x={270.5} y={178}>
-            workspace_c3d4
+            workspace_c3d4…
           </FigLabel>
         </Fig>
       </motion.div>
@@ -320,60 +331,56 @@ export function DatabaseDiagram() {
 /* ─── REST APIs ─────────────────────────────────────────────── */
 
 /**
- * A browser window with a live query in the bar, the real `content-range`
- * header PostgREST answers with, and the embedded resource in the body. The
- * window runs off the bottom of the cell — the crop is the point, and it is
- * sized so the visible part fills the slot like the other five figures rather
- * than floating at the bottom of it.
+ * The request a client really makes for one page of the example's reviews: the
+ * PostgREST grammar at /api/v2 (server/routes/v2.ts), an embedded movie, a
+ * filter, the createdAt column every table gets (lib/mcp/migration-parser.ts),
+ * and Prefer: count=exact, without which the total is "*"
+ * (lib/postgrest/translate.ts). A counted partial page answers 206, with its
+ * content-range. The window runs off the bottom of the cell — the crop is the
+ * point. No window dots (it is not a browser) and no skeleton bars (they read
+ * as loading): the response body itself runs into the crop. On hover the embed
+ * in the request lights up with the key it returns.
  */
 export function RestApiDiagram() {
   return (
     <Slot>
       <motion.div
         variants={step}
-        className="-mb-16 overflow-hidden rounded-t-lg border border-b-0 border-white/[0.09] bg-[#0a0a0d]"
+        className="-mb-[64px] h-[248px] overflow-hidden rounded-t-[8px] border border-b-0 border-white/[0.09] bg-[#0a0a0d]"
       >
-        <div className="flex items-center gap-2.5 border-b border-white/[0.06] bg-white/[0.015] px-3 py-2.5">
-          <span className="flex gap-1.5">
-            {[0, 1, 2].map((i) => (
-              <span key={i} className="h-2 w-2 rounded-full border border-white/[0.14]" />
-            ))}
-          </span>
+        <div className="flex items-center gap-[10px] border-b border-white/[0.06] bg-white/[0.015] px-[12px] py-[10px]">
           <span className={`${MONO} min-w-0 flex-1 truncate ${TEXT}`}>
-            <span className={BRIGHT}>GET</span> /posts?select=*,author(*)
+            <span className={BRIGHT}>GET</span> /api/v2/…/reviews
           </span>
-          <span className={`${MONO} shrink-0 ${MUTED}`}>200</span>
+          <span className={`${MONO} shrink-0 ${MUTED}`}>206</span>
         </div>
-        <div className="space-y-2 px-3 pb-4 pt-3">
+        <div className="space-y-[8px] px-[12px] pb-[16px] pt-[12px]">
           <motion.p variants={step} className={`${MONO} ${MUTED}`}>
-            &amp;status=eq.published · &amp;order=created_at.desc
+            ?select=*,
+            <span className="transition-colors duration-150 [@media(hover:hover)_and_(pointer:fine)]:group-hover:text-zinc-100">movies(title)</span>
+            &amp;limit=25
           </motion.p>
-          {/* Pagination is a claim in the paragraph; this is the header that
-              answers it. */}
           <motion.p variants={step} className={`${MONO} ${MUTED}`}>
-            content-range: <span className={TEXT}>0-24/1042</span>
+            &amp;rating=gte.4&amp;order=createdAt.desc
           </motion.p>
-          {/* Pretty-printed on purpose — a wrapped one-liner reads as an
-              accident; indented lines read as a response body. The last row is
-              left open because the array continues past the crop. */}
-          <motion.div variants={step} className={`${MONO} space-y-1.5 pt-0.5 ${MUTED}`}>
-            <p>[ {'{'} &quot;title&quot;: &quot;…&quot;,</p>
-            <p className="pl-4">&quot;status&quot;: &quot;published&quot;,</p>
+          <motion.p variants={step} className={`${MONO} ${MUTED}`}>
+            prefer: <span className={TEXT}>count=exact</span>
+          </motion.p>
+          {/* Pagination is a claim in the paragraph; this is the header that answers it. */}
+          <motion.p variants={step} className={`${MONO} ${MUTED}`}>
+            content-range: <span className={TEXT}>0-24/6107</span>
+          </motion.p>
+          {/* Pretty-printed on purpose: indented lines read as a response body. The array runs on past the crop. */}
+          <motion.div variants={step} className={`${MONO} space-y-[6px] pt-[2px] ${MUTED}`}>
+            <p>[ {'{'} &quot;rating&quot;: 5, &quot;body&quot;: &quot;…&quot;,</p>
             <p className="pl-4">
-              <span className={BRIGHT}>&quot;author&quot;</span>: {'{'} &quot;name&quot;:
-              &quot;Ada&quot; {'}'} {'}'},
+              <span className={BRIGHT}>&quot;movies&quot;</span>: {'{'} &quot;title&quot;: &quot;Metropolis&quot; {'}'} {'}'},
             </p>
-            <p className="pl-2">{'{'} &quot;title&quot;: &quot;…&quot;,</p>
-          </motion.div>
-          {/* The other 1017 rows, cropped by the cell edge. */}
-          <motion.div variants={step} className="space-y-1.5 pt-1">
-            {[74, 52, 66, 58, 43, 34].map((pct) => (
-              <div
-                key={pct}
-                className="h-1.5 rounded-full bg-white/[0.05]"
-                style={{ width: `${pct}%` }}
-              />
-            ))}
+            <p className="pl-2">{'{'} &quot;rating&quot;: 4, &quot;body&quot;: &quot;…&quot;,</p>
+            <p className="pl-4">
+              &quot;movies&quot;: {'{'} &quot;title&quot;: &quot;Sunrise&quot; {'}'} {'}'},
+            </p>
+            <p className="pl-2">{'{'} &quot;rating&quot;: 5, &quot;body&quot;: &quot;…&quot;,</p>
           </motion.div>
         </div>
       </motion.div>
@@ -389,28 +396,31 @@ export function RestApiDiagram() {
  * as a stray chevron. The elbow block is fixed-width so its corners stay
  * square; only the leader after the junction stretches.
  *
- * Chip pitch is h-8 with a 10px gap, so route centres land on 16 / 58 / 100 of
- * a 116-unit block and the junction sits at its exact middle.
+ * The token is what a project's runtime issues: a JWT signed HS256 with the
+ * project's own secret, for 7 days, carrying the user's id (a UUID) and role
+ * (server/routes/auth.ts). OAuth is named by two of its providers.
+ *
+ * Chip pitch is h-8 (32px) with a 10px gap, so route centres land on 16 / 58 /
+ * 100 of a 116-unit block and the junction sits at its exact middle (a
+ * `gap-2.5` here was 8.125px at the 13px root, 1.5px off).
  */
 export function AuthDiagram() {
-  const methods = ['password', 'oauth', 'magic link']
+  const methods = ['password', 'google · github', 'magic link']
 
   return (
     <Slot>
       <div className="flex items-center">
         {/* items-stretch: every route leaves the column at the same x, so the
             three stubs are the same length. */}
-        <div className="flex shrink-0 flex-col items-stretch gap-2.5">
+        <div className="flex shrink-0 flex-col items-stretch gap-[10px]">
           {methods.map((method) => (
             <motion.span key={method} variants={step} className={CHIP}>
               <span className={`${MONO} ${TEXT}`}>{method}</span>
             </motion.span>
           ))}
         </div>
-        {/* The block stops at the junction, not past it. An SVG dash pattern
-            and a CSS dotted border are different textures, so a line that
-            changes from one to the other mid-run reads as two lines spliced
-            together; ending the SVG on the dot makes the dot the transition. */}
+        {/* The block stops at the junction, not past it; ending the SVG on the
+            dot makes the dot the transition to the HTML leader. */}
         <motion.div variants={step} className="shrink-0">
           <svg viewBox="0 0 30 116" width={30} height={116} fill="none" strokeWidth={1} aria-hidden>
             {/* One path per route so the dashes run continuously around the
@@ -421,76 +431,82 @@ export function AuthDiagram() {
             <circle cx={26.5} cy={58.5} r={2} className="fill-white/45" stroke="none" />
           </svg>
         </motion.div>
-        <motion.span
-          variants={drawX}
-          style={{ originX: 0 }}
-          className="min-w-0 flex-1 border-t border-dotted border-white/[0.24]"
-        />
+        <motion.span variants={drawX} style={{ originX: 0 }} className={`min-w-0 flex-1 ${LEADER_LINE}`} />
         <motion.span variants={step} className={`${CHIP_BRIGHT} shrink-0`}>
-          <span className={`${MONO} ${BRIGHT}`}>jwt</span>
-          <span className={TAG}>signing secret</span>
+          <span className={`${MONO} ${BRIGHT}`}>JWT</span>
+          <span className={TAG}>HS256</span>
         </motion.span>
       </div>
       {/* What the token actually carries — the claims RLS then reads. */}
       <motion.p variants={step} className={`${MONO} mt-4 ${MUTED}`}>
-        {'{'} &quot;userId&quot;: &quot;usr_8f2a&quot;, &quot;role&quot;:{' '}
+        {'{'} &quot;userId&quot;: &quot;3f9c61e2-…&quot;, &quot;role&quot;:{' '}
         <span className={TEXT}>&quot;user&quot;</span> {'}'}
       </motion.p>
-      <Caption>hs256 · never shared across projects</Caption>
+      <Caption>expires in 7 days · secret per project</Caption>
     </Slot>
   )
 }
 
 /* ─── Storage ───────────────────────────────────────────────── */
 
-/** A bucket listing with dotted leaders; the expiring signed URL is the point,
-    so it is the one row with a drawn lifetime under it. */
+/**
+ * The example project's posters bucket (public-domain films), as create_bucket
+ * makes it: private, with uploads from the project's server only
+ * (lib/mcp/domains.ts). The expiring signed link is the point, so it is the one
+ * row with a drawn lifetime: at rest part-run; on hover it drains in real linear
+ * time (tailwind.config.ts remaps `ease-linear` to an ease-out, so the timing is
+ * written out) and ends in the 401 an expired link gets. Under reduced motion
+ * the same states change without animating. (The hover classes are written out
+ * in full: Tailwind only generates classes it finds whole in the source.)
+ */
 export function StorageDiagram() {
   const rows = [
-    { name: 'avatar.png', value: 'signed url', bright: true },
-    { name: 'invoice.pdf', value: '2.1 MB', bright: false },
-    { name: 'exports/q2.csv', value: '61 MB', bright: false },
-    { name: 'logo.svg', value: '12 KB', bright: false },
+    { name: 'metropolis.jpg', size: '388 KB', signed: true },
+    { name: 'the-general.jpg', size: '341 KB', signed: false },
+    { name: 'sunrise.jpg', size: '296 KB', signed: false },
+    { name: 'the-kid.jpg', size: '412 KB', signed: false },
   ]
 
   return (
     <Slot>
       <motion.div
         variants={step}
-        className={`${MONO} flex items-center justify-between border-b border-white/[0.10] pb-2.5 ${MUTED}`}
+        className={`${MONO} flex items-center justify-between border-b border-white/[0.10] pb-[10px] ${MUTED}`}
       >
-        <span>bucket · uploads</span>
-        <span>s3 | local</span>
+        <span>bucket · posters</span>
+        <span>S3</span>
       </motion.div>
       {rows.map((row) => (
         <motion.div key={row.name} variants={step}>
           <div className="flex items-end gap-2 pt-4">
-            <span className={`${MONO} ${row.bright ? TEXT : MUTED}`}>{row.name}</span>
-            <span className="mb-[3px] min-w-0 flex-1 border-b border-dotted border-white/[0.16]" />
-            <span className={`${MONO} shrink-0 ${row.bright ? BRIGHT : MUTED}`}>{row.value}</span>
+            <span className={`${MONO} ${row.signed ? TEXT : MUTED}`}>{row.name}</span>
+            <span className={`mb-[3px] min-w-0 flex-1 ${LEADER_LINE}`} />
+            <span className={`${MONO} shrink-0 ${row.signed ? TEXT : MUTED}`}>{row.size}</span>
           </div>
-          {/* The expiry is the whole claim: the URL is temporary. It rests
-              part-run so it reads without a cursor, and only finishes ticking
-              while the cursor is on this card, so it is never ambient noise. */}
-          {row.bright && (
-            <div className="mt-2.5 flex items-center gap-2">
-              {/* The track has to read, or the part-run fill is just a stray
-                  dash under the filename instead of a meter. */}
-              <div className="h-0.5 w-24 overflow-hidden rounded-full bg-white/[0.13]">
-                <span className="block h-full w-full origin-left scale-x-[0.42] rounded-full bg-white/50 transition-transform duration-[2400ms] ease-linear group-hover:scale-x-100 motion-reduce:transition-none" />
+          {row.signed && (
+            <div className="mt-[10px] flex items-center gap-[8px]">
+              {/* The track has to read, or the part-run fill is just a stray dash under the filename. */}
+              <div className="h-[2px] w-[96px] shrink-0 overflow-hidden rounded-full bg-white/[0.17]">
+                <span
+                  className={`block h-full w-full origin-left scale-x-[0.58] rounded-full bg-white/60 transition-transform duration-200 ease-[linear] motion-reduce:transition-none [@media(hover:hover)_and_(pointer:fine)]:group-hover:scale-x-0 [@media(hover:hover)_and_(pointer:fine)]:group-hover:duration-[2400ms]`}
+                />
               </div>
-              <span className={`${MONO} ${MUTED}`}>expires 3600s</span>
+              <span className="grid [&>*]:[grid-area:1/1]">
+                <span className={`${MONO} ${BRIGHT} transition-opacity duration-150 motion-reduce:transition-none [@media(hover:hover)_and_(pointer:fine)]:group-hover:opacity-0 [@media(hover:hover)_and_(pointer:fine)]:group-hover:delay-[2400ms]`}>
+                  signed url · expires 3600s
+                </span>
+                <span
+                  aria-hidden
+                  className={`${MONO} ${TEXT} opacity-0 transition-opacity duration-150 motion-reduce:transition-none [@media(hover:hover)_and_(pointer:fine)]:group-hover:opacity-100 [@media(hover:hover)_and_(pointer:fine)]:group-hover:delay-[2400ms]`}
+                >
+                  expired · 401
+                </span>
+              </span>
             </div>
           )}
         </motion.div>
       ))}
-      <motion.div
-        variants={step}
-        className={`${MONO} mt-4 flex items-center justify-between border-t border-white/[0.10] pt-3.5 ${MUTED}`}
-      >
-        <span>4 objects</span>
-        <span>private bucket · no public read</span>
-      </motion.div>
+      <Caption>private bucket · server_only uploads</Caption>
     </Slot>
   )
 }
@@ -500,31 +516,35 @@ export function StorageDiagram() {
 /**
  * One store fanning out to the three row events, because "table change
  * streams" is invisible until you see one land in a client. Three columns, so
- * the fan endpoints are the column centres by construction rather than by
- * hand-tuned numbers, and the store is the Database store scaled down — same
- * object, same shape.
+ * the fan endpoints are the column centres by construction, and the store is
+ * the Database store scaled down — same object, same shape.
+ *
+ * Drawn 300 wide so it maps 1:1 to its column from md up (the cells are 302 to
+ * 355px wide; at 360 it shrank and its label fell under 12px). The events are
+ * written as they go over the wire, lowercase (lib/realtime/channel-sql.ts),
+ * and the caption is the stream a client opens (server/routes/realtime.ts).
  */
 export function RealtimeDiagram() {
   const reduceMotion = useSettledReducedMotion()
-  const ops = ['INSERT', 'UPDATE', 'DELETE']
-  /** Column centres of a 3-column grid across the 360-unit figure. */
-  const columns = [60.5, 180.5, 300.5]
+  const ops = ['insert', 'update', 'delete']
+  /** Column centres of a 3-column grid across the 300-unit figure. */
+  const columns = [50.5, 150.5, 250.5]
 
   return (
     <Slot>
-      <div className="w-full max-w-[360px]">
+      <div className="w-full max-w-[300px]">
         <motion.div variants={step}>
-          <Fig w={360} h={142}>
-            <Store cx={180.5} top={14} body={88} rx={54} bright />
-            <FigLabel x={180.5} y={62} bright>
-              posts
+          <Fig w={300} h={124}>
+            <Store cx={150.5} top={12} body={71} rx={44} bright />
+            <FigLabel x={150.5} y={52} bright>
+              reviews
             </FigLabel>
-            {/* Origin is the floor's lowest point, so the fan leaves the store
-                rather than appearing to start inside it. */}
+            {/* Origin is just under the floor's lowest point, so the fan leaves
+                the store rather than appearing to start inside it. */}
             {columns.map((x) => (
               <path
                 key={x}
-                d={`M180.5 112 L${x} 141`}
+                d={`M150.5 92 L${x} 123`}
                 strokeDasharray="2 4"
                 className={LEADER_DIAGONAL}
                 {...CRISP}
@@ -535,12 +555,9 @@ export function RealtimeDiagram() {
         <div className="grid grid-cols-3">
           {ops.map((op, i) => (
             <motion.span key={op} variants={step} className={`${CHIP} justify-self-center`}>
-              {/* The one looping element in the grid. A feed that never moves is
-                  a picture of the wrong thing. */}
+              {/* The events light once, in order, as the card arrives. */}
               <motion.span
-                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  i === 0 ? 'bg-zinc-200' : 'bg-white/25'
-                }`}
+                className={`h-[6px] w-[6px] shrink-0 rounded-full ${i === 0 ? 'bg-zinc-200' : 'bg-white/25'}`}
                 initial={false}
                 whileInView={reduceMotion ? undefined : { opacity: [0.25, 1, 0.25, 1] }}
                 viewport={{ once: true, amount: 0.6 }}
@@ -551,14 +568,7 @@ export function RealtimeDiagram() {
           ))}
         </div>
       </div>
-      <motion.div variants={step} className="mt-4 flex items-center gap-2">
-        <div className="flex -space-x-1">
-          {[0, 1, 2].map((i) => (
-            <span key={i} className="h-4 w-4 rounded-full border border-white/[0.14] bg-[#0b0b0e]" />
-          ))}
-        </div>
-        <span className={`${MONO} ${MUTED}`}>3 present · sse · no socket server</span>
-      </motion.div>
+      <Caption>/api/v1/…/realtime?table=reviews · SSE</Caption>
     </Slot>
   )
 }
@@ -566,59 +576,42 @@ export function RealtimeDiagram() {
 /* ─── Functions & triggers ──────────────────────────────────── */
 
 /**
- * Four parallel flows, one per way a function starts: a row event, a second
- * row event, a cron with no event at all, and an inbound webhook. The
- * paragraph claims all four; the card used to draw two.
+ * Three parallel flows, one per way a function starts, in the product's own
+ * words (lib/ai/brain/tools.ts): a sign-up (on_signup), a row event on a table
+ * (on_insert, on reviews) and a five-field cron, each into a snake_case
+ * function (lib/services/ai-functions/names.ts) with its run time.
+ *
+ * A grid, not flex rows: every source chip shares one column width and every
+ * function chip another, so the leaders run in one clean channel. Columns are
+ * `minmax(0,max-content)` so a narrow cell truncates instead of overflowing.
+ * No floor: in its row the figure sits beside "Also built in", whose own
+ * height sets the row.
  */
 export function FunctionsDiagram() {
   const flows = [
-    { source: 'users.signup', tag: 'event', fn: 'sendWelcome', meta: '42ms', bright: true },
-    { source: 'posts.insert', tag: 'event', fn: 'embedPost', meta: '61ms', bright: false },
-    { source: '0 6 * * 1', tag: 'cron', fn: 'weeklyDigest', meta: '187ms', bright: false },
+    { source: 'on_signup', tag: '', fn: 'send_welcome', meta: '42ms', bright: true },
+    { source: 'on_insert', tag: 'reviews', fn: 'update_rating', meta: '61ms', bright: false },
+    { source: '0 6 * * 1', tag: 'cron', fn: 'weekly_digest', meta: '187ms', bright: false },
   ]
 
   return (
-    <Slot>
-      {/* A grid, not four flex rows: every source chip shares one column width
-          and every function chip shares another, so the leaders run in a single
-          clean channel. Four independent flex rows left both inner edges ragged,
-          which is the difference between a figure and a list.
-
-          Below lg the columns are `minmax(0,max-content)` and the labels
-          truncate. Bare `max-content` sized them off their mono labels no
-          matter how narrow the cell got, and at 360px the pair plus the channel
-          between them ran 10px past it — the one element on the page that
-          pushed a phone into horizontal scroll.
-
-          At lg the original `max-content` is restored untouched, three-column
-          layout and all. It does overflow its cell at exactly 1024, where the
-          card's `overflow-hidden` crops the run times off the right-hand chips;
-          that is worth fixing on its own terms, not as a side effect of a
-          phone-width repair. */}
-      <div className="grid grid-cols-[minmax(0,max-content)_minmax(16px,1fr)_minmax(0,max-content)] items-center gap-x-2 gap-y-2.5 sm:gap-x-2.5">
+    <Slot floor={false}>
+      <div className="grid grid-cols-[minmax(0,max-content)_minmax(16px,1fr)_minmax(0,max-content)] items-center gap-x-2 gap-y-[10px] sm:gap-x-[10px]">
         {flows.map((flow) => (
           <Fragment key={flow.fn}>
             <motion.span variants={step} className={`${CHIP} min-w-0 justify-between`}>
               <span className={`${MONO} truncate ${TEXT}`}>{flow.source}</span>
-              {/* The kind steps aside in the three-column grid's narrowest cells (1024-1279), so names never truncate. */}
-              <span className={`${TAG} shrink-0 lg:hidden xl:inline`}>{flow.tag}</span>
+              {flow.tag && <span className={`${TAG} shrink-0`}>{flow.tag}</span>}
             </motion.span>
-            <motion.span
-              variants={drawX}
-              style={{ originX: 0 }}
-              className="border-t border-dotted border-white/[0.24]"
-            />
-            <motion.span
-              variants={step}
-              className={`${flow.bright ? CHIP_BRIGHT : CHIP} min-w-0 justify-between`}
-            >
+            <motion.span variants={drawX} style={{ originX: 0 }} className={LEADER_LINE} />
+            <motion.span variants={step} className={`${flow.bright ? CHIP_BRIGHT : CHIP} min-w-0 justify-between`}>
               <span className={`${MONO} truncate ${flow.bright ? BRIGHT : TEXT}`}>{flow.fn}</span>
               <span className={`${MONO} shrink-0 ${MUTED}`}>{flow.meta}</span>
             </motion.span>
           </Fragment>
         ))}
       </div>
-      <Caption>rate limits · every run logged</Caption>
+      <Caption>every run logged</Caption>
     </Slot>
   )
 }

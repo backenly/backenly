@@ -34,10 +34,11 @@ export function CommandBlock({ className = '' }: { className?: string }) {
 
   return (
     <div
-      className={`flex h-[48px] min-w-0 items-center gap-[14px] rounded-[8px] border border-white/[0.12] bg-[#0b0b0e]/90 pl-[18px] pr-[6px] shadow-[0_20px_50px_-20px_rgba(0,0,0,0.9)] transition-[border-color] duration-150 ease-out [@media(hover:hover)_and_(pointer:fine)]:hover:border-white/[0.20] ${className}`}
+      className={`flex min-h-[48px] min-w-0 items-center gap-[14px] rounded-[8px] border border-white/[0.12] bg-[#0b0b0e]/90 py-[6px] pl-[18px] pr-[6px] shadow-[0_20px_50px_-20px_rgba(0,0,0,0.9)] transition-[border-color] duration-150 ease-out [@media(hover:hover)_and_(pointer:fine)]:hover:border-white/[0.20] ${className}`}
     >
-      {/* select-all: a click on the command takes the whole command, as developers expect. */}
-      <code className="min-w-0 flex-1 select-all truncate font-mono text-[14.5px] text-zinc-100 [font-variant-ligatures:none]">{COMMAND}</code>
+      {/* select-all: a click on the command takes the whole command, as developers expect. On the narrowest phones it wraps
+          at its space rather than ending in "…" (review of 2026-11-27: at 320px it read "npx @backenly/mcp-serve…"). */}
+      <code className="min-w-0 flex-1 select-all font-mono text-[13px] leading-[1.45] text-zinc-100 [overflow-wrap:anywhere] [font-variant-ligatures:none] min-[360px]:text-[14.5px]">{COMMAND}</code>
       <button
         type="button"
         onClick={copy}

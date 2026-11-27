@@ -260,6 +260,13 @@ export function RegionsSunline() {
 
       {narrow ? <NarrowLine now={now} s={s} sec={sec} /> : <WideLine now={now} edges={edges} s={s} sec={sec} quiet={quiet} />}
 
+      {/* What the light is (review of 2026-11-27: both reviewers read the violet as a measurement). A phone, which has no
+          "One check a minute" above, gets that line here. */}
+      <p className="px-[20px] pb-[16px] pt-[6px] text-[12.5px] leading-[1.5] text-zinc-400 sm:px-[24px] sm:pb-[18px]">
+        The violet light is where it is daytime right now, and each region sits at its local time.
+        <span className="sm:hidden"> Every project is checked once a minute, day or night.</span>
+      </p>
+
       <style>{`
 @keyframes sun-ring{from{stroke-dashoffset:var(--c)}to{stroke-dashoffset:0}}
 .sun-ring{animation:sun-ring 60s steps(60,end) infinite}
@@ -336,7 +343,7 @@ function WideLine({ now, edges, s, sec, quiet }: { now: Date | null; edges: { lo
         return <span key={lon} aria-hidden className="absolute w-px bg-white/[0.12]" style={{ left: `${xOf(lon) * 100}%`, top: horizon, height: lon % 90 === 0 ? 7 : 4 }} />
       })}
       {edges.map((e) => (
-        <span key={e.kind} className="absolute -translate-x-1/2 whitespace-nowrap text-[11px] text-faint" style={{ left: `${xOf(e.lon) * 100}%`, top: horizon + 14 }}>
+        <span key={e.kind} className="absolute -translate-x-1/2 whitespace-nowrap text-[12px] text-faint" style={{ left: `${xOf(e.lon) * 100}%`, top: horizon + 14 }}>
           {e.kind === 'sunrise' ? 'Sunrise' : e.kind === 'noon' ? 'Noon' : 'Sunset'}
         </span>
       ))}
@@ -375,7 +382,7 @@ function WideLine({ now, edges, s, sec, quiet }: { now: Date | null; edges: { lo
                   <span className="text-[14.5px] font-medium tracking-[-0.01em] text-zinc-100">{r.city}</span>
                   <Ring size={13} phase={r.phase} sec={sec} />
                 </span>
-                <span className={`mt-[4px] flex items-center gap-[6px] font-mono text-[11.5px] text-faint ${r.left ? 'flex-row-reverse' : ''}`}>
+                <span className={`mt-[4px] flex items-center gap-[6px] font-mono text-[12px] text-faint ${r.left ? 'flex-row-reverse' : ''}`}>
                   {r.code}
                   <span className="text-zinc-600">·</span>
                   <span className="tabular-nums text-zinc-300">{now ? timeIn(r.tz, now) : '––:––'}</span>
@@ -410,7 +417,7 @@ function NarrowLine({ now, s, sec }: { now: Date | null; s: ReturnType<typeof su
             <li key={r.id} className="flex h-[46px] items-center gap-[10px]">
               <Ring size={13} phase={r.phase} sec={sec} />
               <span className="text-[14px] font-medium text-zinc-100">{r.city}</span>
-              <span className="font-mono text-[11.5px] text-faint">{r.code}</span>
+              <span className="font-mono text-[12px] text-faint">{r.code}</span>
               <span className="ml-auto flex items-center gap-[6px] font-mono text-[12px] tabular-nums text-zinc-300">
                 {now ? timeIn(r.tz, now) : '––:––'}
                 {day ? <Sun aria-hidden className="h-[12px] w-[12px] text-zinc-400" strokeWidth={2} /> : <Moon aria-hidden className="h-[12px] w-[12px] text-zinc-400" strokeWidth={2} />}
