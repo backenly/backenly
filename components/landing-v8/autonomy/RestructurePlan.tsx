@@ -21,8 +21,11 @@ import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
    violet lines keep the columns in step, the moderation data fills its own
    table densely in ten batches (only reviews that carry moderation data are
    copied, as the engine does), and the reason becomes the measured verdict
-   30 days on: moderation changes that locked all of reviews, 5 before, 0
-   after. No speed claim: until the old columns go, the move only adds work.
+   30 days on: schema changes to the moderation columns that locked all of
+   reviews, 5 before, 0 after (the engine counts exactly these,
+   lib/evolution-engine/benefit.ts; "schema" since review of 2026-11-27, when
+   a reader asked which lock). No speed claim: until the old columns go, the
+   move only adds work.
    If a visitor never clicks, a pointer approves once per visit, never while
    the visitor's own pointer is in the figure.
 ───────────────────────────────────────────────────────────── */
@@ -204,10 +207,10 @@ export function RestructurePlan() {
           <p className="mt-[10px] text-[15.5px] font-medium leading-[1.4] tracking-[-0.01em] text-white [text-wrap:balance]">Move moderation data out of reviews into its own table</p>
           <div className="relative mt-[8px] grid [&>*]:[grid-area:1/1]">
             <p className="text-[13.5px] leading-[1.55] text-zinc-400 transition-opacity duration-300" style={{ opacity: verdict ? 0 : 1 }}>
-              Changes to these three columns locked all of reviews 5 times in the last 30 days.
+              Schema changes to these three columns locked all of reviews 5 times in the last 30 days.
             </p>
             <p className="text-[13.5px] leading-[1.55] text-zinc-200 transition-opacity duration-500" style={{ opacity: verdict ? 1 : 0 }}>
-              30 days on: changes to these columns locked reviews 0 times, down from 5. It helped.
+              30 days on: schema changes to these columns locked reviews 0 times, down from 5. It helped.
             </p>
           </div>
           <ol className="mt-[16px] grid gap-[7px] text-[13px]">
@@ -305,7 +308,7 @@ function ApprovingPointer({ target, onPress }: { target: React.RefObject<HTMLBut
         <path d="M3 2.2v15.4l3.9-3.7 2.6 6 2.6-1.1-2.6-5.9h5.6L3 2.2Z" fill="#fff" stroke="#0a0a0d" strokeWidth={1.3} strokeLinejoin="round" />
       </svg>
       {/* A person's cursor, named the way shared editors name one, so nobody takes it for their own. */}
-      <span className="absolute left-[15px] top-[19px] whitespace-nowrap rounded-[4px] bg-white px-[5px] py-[1px] text-[11px] font-medium leading-[15px] text-black shadow-[0_2px_6px_rgba(0,0,0,0.45)]">You</span>
+      <span className="absolute left-[15px] top-[19px] whitespace-nowrap rounded-[4px] bg-white px-[5px] py-[1px] text-[12px] font-medium leading-[15px] text-black shadow-[0_2px_6px_rgba(0,0,0,0.45)]">You</span>
     </div>
   )
 }

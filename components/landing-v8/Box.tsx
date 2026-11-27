@@ -79,9 +79,22 @@ export function Light({ art, flip = false, at = 'center', reach = 820, mask = HE
   )
 }
 
-export function Box({ id, children, className = '', light }: { id: string; children: ReactNode; className?: string; light?: BoxLight }) {
+export function Box({
+  id,
+  children,
+  className = '',
+  light,
+  anchor,
+}: {
+  id: string
+  children: ReactNode
+  className?: string
+  light?: BoxLight
+  /** The section's own id, for a link to it (the nav's "Product" goes to #platform); it lands clear of the sticky header. */
+  anchor?: string
+}) {
   return (
-    <section aria-labelledby={id} className={`relative pt-[64px] md:pt-[96px] ${className}`}>
+    <section id={anchor} aria-labelledby={id} className={`relative scroll-mt-[68px] pt-[64px] md:pt-[96px] ${className}`}>
       <div className={WRAP}>
         <div className="relative isolate overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#0b0c0f] shadow-[0_1px_0_rgba(255,255,255,0.04)_inset]">
           {light && <Light {...light} />}

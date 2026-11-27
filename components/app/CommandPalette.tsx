@@ -38,7 +38,9 @@ import {
   MessageSquare,
   CornerDownLeft,
 } from 'lucide-react'
-import { motion, AnimatePresence } from 'framer-motion'
+// motion/react, as the site uses: the root layout imports this palette on every page, so framer-motion here put a
+// second copy of the animation library on the landing (review of 2026-11-27). Same API for what this file uses.
+import { motion, AnimatePresence } from 'motion/react'
 import { useRouter, usePathname } from 'next/navigation'
 import { useAssistantStore } from '@/lib/stores/use-assistant-store'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'

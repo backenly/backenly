@@ -6,7 +6,8 @@ import { usePathname } from 'next/navigation'
 import { migrationPublished } from '@/components/migrate/flag'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 import { Icon } from '@iconify/react'
-import { AnimatePresence, motion } from 'framer-motion'
+// motion/react, the library the landing's own components use: with framer-motion here the landing shipped two copies of it.
+import { AnimatePresence, motion } from 'motion/react'
 import { ArrowRight, BookOpen, ChevronDown, Import, Menu, ScrollText, X, type LucideIcon } from 'lucide-react'
 import { CommandBlock } from '@/components/landing-v8/CommandBlock'
 import { registerSiteIcons } from '@/lib/icons/registry'
@@ -91,6 +92,7 @@ function docsMenu(): DocsEntry[] {
 const DOCS_PATHS = ['/docs', '/migrate', '/changelog']
 
 const NAV_LINKS = [
+  // The landing's Platform box carries this id (components/landing-v8/Box.tsx `anchor`); until 2026-11-27 nothing did.
   { label: 'Product', href: '/#platform', activePath: '/' },
   { label: 'Docs', href: ROUTES.docs, activePath: '/docs' },
   { label: 'Pricing', href: ROUTES.pricing, activePath: ROUTES.pricing },
@@ -223,6 +225,18 @@ export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
     }
   }, [overlay])
   const [mobileOpen, setMobileOpen] = useState(false)
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  // Escape closes the phone menu and hands focus back to its button, as the Docs menu does.
+  useEffect(() => {
+    if (!mobileOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setMobileOpen(false)
+      menuButtonRef.current?.focus()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [mobileOpen])
   // The link group and the buttons drop their entrance once it has played. A
   // finished `nav-drop` holds its end state, and Chrome's full-page capture
   // (DevTools' "Capture full size screenshot", Playwright's fullPage) re-runs
@@ -283,17 +297,16 @@ export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
       {/* Container tracks the landing's 100rem sections so the logo sits on
           the same left edge as the headline below it. */}
       <div className="mx-auto flex h-[68px] w-full max-w-[100rem] items-center justify-between px-5 sm:px-6">
-        <motion.div whileHover={{ y: -1 }} whileTap={{ scale: 0.985 }}>
-          <Link
-            href={ROUTES.home}
-            className="flex items-center gap-2.5 text-white transition-colors hover:text-zinc-200"
-            onClick={() => setMobileOpen(false)}
-            aria-label="Backenly"
-          >
-            <BrandMark size={28} />
-            <span className="text-[19px] font-semibold tracking-[-0.02em]">Backenly</span>
-          </Link>
-        </motion.div>
+        {/* No motion wrapper: its tap gesture made the wrapper a second Tab stop on the logo. The word names the link,
+            so the mark is decorative. */}
+        <Link
+          href={ROUTES.home}
+          className="flex items-center gap-2.5 rounded-md text-white transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+          onClick={() => setMobileOpen(false)}
+        >
+          <BrandMark size={28} decorative />
+          <span className="text-[19px] font-semibold tracking-[-0.02em]">Backenly</span>
+        </Link>
 
         {/* Everything except the logo lives on the right, like the benchmark:
             plain text links (the floating pill container is gone), then the
@@ -348,17 +361,27 @@ export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
           </div>
         </div>
 
-        {/* Mobile hamburger */}
-        <motion.button
-          type="button"
-          onClick={() => setMobileOpen((o) => !o)}
-          aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
-          aria-expanded={mobileOpen}
-          whileTap={{ scale: 0.94 }}
-          className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white lg:hidden"
-        >
-          {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-        </motion.button>
+        {/* Below lg: the same Sign up as the desktop bar, so a phone has a way to start on every screen, beside the menu. */}
+        <div className="flex items-center gap-2 lg:hidden">
+          <Link
+            href={isLoggedIn ? ROUTES.app : ROUTES.signup}
+            onClick={() => setMobileOpen(false)}
+            className="inline-flex h-10 items-center rounded-lg bg-white px-3.5 text-[14px] font-semibold tracking-[-0.01em] text-black transition-colors hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+          >
+            {isLoggedIn ? 'Console' : 'Sign up'}
+          </Link>
+          <motion.button
+            ref={menuButtonRef}
+            type="button"
+            onClick={() => setMobileOpen((o) => !o)}
+            aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={mobileOpen}
+            whileTap={{ scale: 0.94 }}
+            className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white"
+          >
+            {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+          </motion.button>
+        </div>
       </div>
 
       {/* Mobile menu panel */}

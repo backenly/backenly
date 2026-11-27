@@ -94,11 +94,11 @@ export function RepairChart() {
           {/* Rules: the whole table, and nothing. */}
           <span aria-hidden className="absolute inset-x-0 border-t border-dashed border-white/[0.10]" style={{ top: `${Y_TABLE}%` }} />
           <span aria-hidden className="absolute bottom-0 left-0 right-0 h-px bg-white/[0.12]" />
-          <span aria-hidden className="absolute right-0 -translate-y-full pb-[4px] font-mono text-[11px] tabular-nums text-faint" style={{ top: `${Y_TABLE}%` }}>
+          <span aria-hidden className="absolute right-0 -translate-y-full pb-[4px] font-mono text-[12px] tabular-nums text-faint" style={{ top: `${Y_TABLE}%` }}>
             4,120
           </span>
 
-          <span aria-hidden className="absolute right-0 -translate-y-full pb-[4px] font-mono text-[11px] tabular-nums text-faint" style={{ top: `${Y_ROWS}%` }}>
+          <span aria-hidden className="absolute right-0 -translate-y-full pb-[4px] font-mono text-[12px] tabular-nums text-faint" style={{ top: `${Y_ROWS}%` }}>
             3
           </span>
 
@@ -176,7 +176,7 @@ export function RepairChart() {
           {MINUTES.map((m, i) => (
             <span key={m} className="absolute top-0 -translate-x-1/2" style={{ left: `${x(i)}%` }}>
               <span className={`mx-auto block w-px transition-[height,background-color] duration-300 ${i === FOUND && shown(900) ? 'h-[12px] bg-white' : 'h-[6px] bg-white/25'}`} />
-              <span className={`mt-[4px] block font-mono text-[11px] tabular-nums text-faint ${i % 2 ? 'hidden' : i % 4 ? 'hidden sm:block' : 'block'}`}>{m}</span>
+              <span className={`mt-[4px] block font-mono text-[12px] tabular-nums text-faint ${i % 2 ? 'hidden' : i % 4 ? 'hidden sm:block' : 'block'}`}>{m}</span>
             </span>
           ))}
         </div>

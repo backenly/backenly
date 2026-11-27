@@ -52,7 +52,8 @@ const faqs = [
     a: 'Real infrastructure: an isolated PostgreSQL schema per project, live REST endpoints, auth with per-project secrets, file storage, and realtime streams. Schema changes are read back from the live database before they count as done, and the autonomy loop keeps monitoring and repairing the backend after you ship.',
   },
   {
-    q: 'Is Backenly open source? Can I self-host?',
+    // A non-breaking hyphen, so a phone never ends a line on "self-" (review of 2026-11-27).
+    q: 'Is Backenly open source? Can I self‑host?',
     a: 'Yes. The entire platform is open source under Apache-2.0, including the autonomy engine, and the SDK, CLI, MCP server, and agent skill are MIT. Self-host everything on your own infrastructure, with your own Postgres. Or use Backenly Cloud, where we run the infrastructure and handle backups and upgrades. It is the same codebase either way, so you can move between the two.',
   },
   {

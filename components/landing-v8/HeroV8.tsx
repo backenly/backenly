@@ -146,13 +146,14 @@ export function HeroV8() {
           <p className="text-[13px] tracking-[-0.003em] text-zinc-300">Works with any agent that supports MCP</p>
           <div className="mt-[16px] grid grid-cols-[28px_minmax(0,1fr)_28px] items-center gap-[12px]">
             <span aria-hidden />
-            <ul aria-label="Agents that support MCP" className="flex items-center justify-center gap-x-[24px] text-zinc-400 sm:gap-x-[32px] lg:gap-x-[44px] xl:gap-x-[48px]">
+            {/* Named at every width (review of 2026-11-27: on a phone, seven bare marks were unreadable); the row wraps where it must. */}
+            <ul aria-label="Agents that support MCP" className="flex flex-wrap items-center justify-center gap-x-[18px] gap-y-[10px] text-zinc-400 sm:gap-x-[32px] lg:gap-x-[44px] xl:gap-x-[48px]">
               {AGENT_MARKS.map((mark) => (
-                <li key={mark.id} className="flex items-center gap-[8px]">
+                <li key={mark.id} className="flex items-center gap-[7px] sm:gap-[8px]">
                   <span aria-hidden className="block h-[16px] w-[16px] shrink-0" style={{ transform: `scale(${MARK_SCALE[mark.id] ?? 1})` }}>
                     <AgentGlyph mark={mark} className="h-full w-full" />
                   </span>
-                  <span className="sr-only whitespace-nowrap text-[14px] font-medium tracking-[-0.01em] md:not-sr-only">{mark.name}</span>
+                  <span className="whitespace-nowrap text-[13px] font-medium tracking-[-0.01em] sm:text-[14px]">{mark.name}</span>
                 </li>
               ))}
             </ul>

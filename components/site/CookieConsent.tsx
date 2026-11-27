@@ -86,25 +86,58 @@ export function CookieConsent() {
   }
 
   const showCard = choice === 'unset' && !globalPrivacyControl() && !open
+  const cardRef = useRef<HTMLElement>(null)
+
+  // While the card is up, nothing on the page stays hidden under it (WCAG 2.4.11; review of 2026-11-27): the page
+  // gets the card's height as room at its end, so even the footer's last row can scroll clear, and a control that
+  // takes keyboard focus behind the card is scrolled above it, for someone who tabs past the card without choosing.
+  useEffect(() => {
+    if (!showCard) return
+    const root = document.documentElement
+    const card = cardRef.current
+    const room = () => {
+      if (card) root.style.paddingBottom = `${card.offsetHeight + 24}px`
+    }
+    room()
+    window.addEventListener('resize', room)
+    const onFocus = (event: FocusEvent) => {
+      const el = event.target
+      if (!card || !(el instanceof Element) || card.contains(el)) return
+      requestAnimationFrame(() => {
+        const c = card.getBoundingClientRect()
+        const r = el.getBoundingClientRect()
+        if (r.right > c.left && r.left < c.right && r.bottom > c.top - 8) window.scrollBy(0, r.bottom - c.top + 16)
+      })
+    }
+    document.addEventListener('focusin', onFocus)
+    return () => {
+      document.removeEventListener('focusin', onFocus)
+      window.removeEventListener('resize', room)
+      root.style.paddingBottom = ''
+    }
+  }, [showCard])
 
   return (
     <>
       {showCard && (
         <section
+          ref={cardRef}
           aria-label="Cookie consent"
-          className="cookie-card fixed inset-x-3 bottom-3 z-[35] rounded-[10px] border border-white/[0.12] bg-[#0b0c0f]/95 p-[20px] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)] backdrop-blur-md sm:inset-x-auto sm:bottom-6 sm:left-6 sm:w-[380px]"
+          className="cookie-card fixed inset-x-3 bottom-3 z-[35] rounded-[10px] border border-white/[0.12] bg-[#0b0c0f]/95 p-[14px] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)] backdrop-blur-md sm:inset-x-auto sm:bottom-6 sm:left-6 sm:w-[380px] sm:p-[20px]"
         >
-          <div className="flex items-center gap-[10px]">
+          {/* A phone gets the short form, so the hero's Start free stays in view (review of 2026-11-27). */}
+          <div className="hidden items-center gap-[10px] sm:flex">
             <Cookie aria-hidden className="h-[16px] w-[16px] text-zinc-300" strokeWidth={1.75} />
             <h2 className="text-[15px] font-medium tracking-[-0.01em] text-white">Cookies on Backenly</h2>
           </div>
-          <p className="mt-[10px] text-[13.5px] leading-[1.6] text-zinc-400">
-            We use cookies to keep you signed in and, with your permission, to understand how the site is used.{' '}
+          <p className="text-[13px] leading-[1.5] text-zinc-400 sm:mt-[10px] sm:text-[13.5px] sm:leading-[1.6]">
+            <span className="sm:hidden">Cookies keep you signed in. Analytics only if you agree. </span>
+            <span className="hidden sm:inline">We use cookies to keep you signed in and, with your permission, to understand how the site is used. </span>
             <Link href="/privacy#analytics" className={`whitespace-nowrap ${TEXT_LINK}`}>
               Privacy Policy
             </Link>
           </p>
-          <div className="mt-[16px] flex flex-wrap items-center gap-[8px]">
+          <div className="mt-[10px] flex flex-wrap items-center gap-[8px] sm:mt-[16px]">
             <button type="button" className={QUIET} onClick={() => decide(false)}>
               Reject all
             </button>
