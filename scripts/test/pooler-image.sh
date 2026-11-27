@@ -253,6 +253,12 @@ for database in "${OFF_LIMITS[@]}"; do BEFORE[$database]="$(server_logins "$data
 # ── The image ───────────────────────────────────────────────────────────────
 echo "image"
 docker build -q -f services/pooler/Dockerfile -t "$IMAGE" . >/dev/null
+# The tmpfs below is mounted with the image user's owner, which hides what a
+# Fargate task volume does: it starts owned by root, and only an image that
+# declares /run/pooler a VOLUME gets the directory's owner carried onto it.
+[ "$(docker inspect -f '{{json .Config.Volumes}}' "$IMAGE")" = '{"/run/pooler":{}}' ] ||
+  { echo "the image does not declare /run/pooler a VOLUME: a Fargate task volume there stays root's and the pooler cannot start"; exit 1; }
+echo "  declares VOLUME /run/pooler"
 echo "  $(docker run --rm --entrypoint pgbouncer "$IMAGE" --version | head -n 1)"
 
 export POOLER_SERVER_CA_PEM POOLER_TLS_CERT_PEM POOLER_TLS_KEY_PEM POOLER_AUTH_PASSWORD
