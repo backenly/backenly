@@ -36,21 +36,22 @@ Which one a function uses is set by its trigger.
 **`trigger: "http"`: a route module**, served at `https://backenly.com/api/v1/{projectId}/fn/{name}`:
 
 ```ts
-import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+import { db } from '@backenly/functions'
 
 export async function POST(request: Request) {
   const { title } = await request.json()
-  const rows = await prisma.$queryRawUnsafe('SELECT id FROM posts WHERE title = $1', title)
-  return NextResponse.json({ rows })
+  const rows = await db.$queryRawUnsafe('SELECT id FROM posts WHERE title = $1', title)
+  return Response.json({ rows })
 }
 ```
 
-It may import only `next/server`, `@/lib/db` (a `prisma` whose raw SQL runs in this project's schema, and `asService`), `@/lib/auth/jwt` (`verifyToken`, for this project's end-user tokens, and `isAdminRequest`), `@/lib/auth/session` (`createSession`), `crypto`, `bcryptjs` and `jsonwebtoken`. Its SQL logs in as the project's own database role: it reads and writes this project's tables, row-level security applies to the caller the request carries, and PostgreSQL refuses anything outside the project (Backenly's own tables, other projects). `process.env` holds this project's variables (set with `connect { action: "set_env" }`, read as `process.env.KEY`) and `NODE_ENV`: none of Backenly's own configuration, and never the project's signing secret or admin key. Code that reads `JWT_SECRET`, `ADMIN_API_KEY` or `AI_EXECUTION_TOKEN` is refused. Export one handler per HTTP method; when a module exports several, pass `method`.
+It may import only `@backenly/functions`, `crypto`, `bcryptjs` and `jsonwebtoken`. `@backenly/functions` gives `db` (raw SQL that runs in this project's schema), `asService`, `verifyToken` (for this project's end-user tokens), `isAdminRequest` and `createSession`. Answer with `Response.json(body, { status })`; `Response` is a global. This is what Backenly's own builder writes. A function deployed with the earlier imports (`next/server`, `@/lib/db`, `@/lib/auth/jwt`, `@/lib/auth/session`) still runs, and the deploy answer says which module to use from now on.
 
-- An admin-only endpoint checks the project's admin key (Functions page, Copy admin key) without holding it: `if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })`. The key is sent as `x-admin-key`.
+Its SQL logs in as the project's own database role: it reads and writes this project's tables, row-level security applies to the caller the request carries, and PostgreSQL refuses anything outside the project (Backenly's own tables, other projects). `process.env` holds this project's variables (set with `connect { action: "set_env" }`, read as `process.env.KEY`) and `NODE_ENV`: none of Backenly's own configuration, and never the project's signing secret or admin key. Code that reads `JWT_SECRET`, `ADMIN_API_KEY` or `AI_EXECUTION_TOKEN` is refused. Export one handler per HTTP method; when a module exports several, pass `method`.
+
+- An admin-only endpoint checks the project's admin key (Functions page, Copy admin key) without holding it: `if (!isAdminRequest(request)) return Response.json({ error: 'Forbidden' }, { status: 403 })`. The key is sent as `x-admin-key`.
 - Work the caller may not do themselves, such as a checkout that creates the order and takes stock the shopper cannot update, runs in `await asService(async (db) => { … })`: one transaction, as the service role, so row-level security does not apply to its SQL. It still reaches only this project's tables. Check who is calling before you use it; the run's logs record each use.
-- A function that proves who a user is its own way, such as a code sent by SMS or a sign-in from another identity provider, signs them in with `const { token, user } = await createSession(userId)` from `@/lib/auth/session`. Backenly signs the session, the same token password sign-in issues, valid for seven days, for a user who exists in this project's `users` table and is not suspended; the function never holds the signing secret. Whoever reaches that line is signed in as that user, so call it only after the proof succeeds. The run's logs record each session it creates.
+- A function that proves who a user is its own way, such as a code sent by SMS or a sign-in from another identity provider, signs them in with `const { token, user } = await createSession(userId)`. Backenly signs the session, the same token password sign-in issues, valid for seven days, for a user who exists in this project's `users` table and is not suspended; the function never holds the signing secret. Whoever reaches that line is signed in as that user, so call it only after the proof succeeds. The run's logs record each session it creates.
 
 **Every other trigger: a sandbox body**, the inside of an async function that receives `event` and `ctx` and may return a value:
 
@@ -86,7 +87,7 @@ It runs in an isolated worker with no `process`, no `require`, no dynamic `impor
 - it holds no credential written into it (a Stripe, OpenAI, Anthropic, Resend, SendGrid or GitHub key, a private key, a database URL with a password). Put keys in `integrations` and values in `ctx.env`;
 - a row trigger's `table` exists in this project.
 
-The name is lowercased to kebab-case, because it is a URL path segment, and the receipt says when it changed. Deploying a name that exists replaces that function's code: there is no version history, so there is nothing to roll back to, and the receipt carries `codeSha256` and `previousCodeSha256`. A function someone switched off stays off. The receipt never echoes the code.
+The name is lowercased to kebab-case, because it is a URL path segment, and the receipt says when it changed. Deploying a name that exists replaces that function's code, and the change history keeps the code it replaced. The receipt names that change in `change` and carries `codeSha256` and `previousCodeSha256`. Restoring the change in History brings the earlier code back; an agent asks with `deploy { action: "revert_change", changeId }`, which a person approves. A function someone switched off stays off. The receipt never echoes the code.
 
 ## Running and reading runs
 

@@ -59,11 +59,41 @@ describe('the functions docs match the runtime', () => {
     const promptLine = contract.slice(contract.indexOf('- Imports allowed ONLY from:')).split('\n')[0]
     expect([...promptLine.matchAll(/'([^']+)'/g)].map((m) => m[1])).toEqual(named)
 
-    // Every module the docs name is one the runner serves.
+    // The docs offer exactly the modules the runner names, in its order. They
+    // taught the earlier paths (next/server, @/lib/db) and never mentioned
+    // @backenly/functions, which is what Backenly's own builder writes
+    // (production QA, 2026-11-27).
     const docsLine = docs.slice(docs.indexOf('It may import only')).split('\n')[0]
-    const docsModules = [...docsLine.matchAll(/`([^`]+)`/g)].map((m) => m[1]).filter((w) => w.includes('/') || named.includes(w))
-    expect(docsModules.length).toBeGreaterThan(0)
-    for (const id of docsModules) expect(served).toContain(id)
+    const backticked = (text: string) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1])
+    expect(backticked(docsLine.slice(0, docsLine.indexOf('. ')))).toEqual(named)
+    // The earlier paths are named once, as what a function already deployed
+    // with them still runs on, and they are all of what the runner still serves.
+    const earlier = docsLine.slice(docsLine.indexOf('A function deployed with the earlier imports'))
+    expect(backticked(earlier)).toEqual(served.filter((id) => !named.includes(id)))
+    // Everything the module hands a function is named.
+    const functionsModule = runner.slice(runner.indexOf('function makeFunctionsModule('))
+    const given = [...functionsModule.slice(0, functionsModule.indexOf('})')).matchAll(/^\s+([a-zA-Z]+)[:,]/gm)]
+      .map((m) => m[1])
+      .filter((name) => !['Response', 'Request', 'Headers'].includes(name))
+    expect(given).toEqual(['db', 'asService', 'verifyToken', 'isAdminRequest', 'createSession'])
+    for (const name of given) expect(docsLine).toContain(`\`${name}\``)
+    // And the example is written the way the docs say to write one.
+    expect(docs).toContain("import { db } from '@backenly/functions'")
+    expect(docs).toContain('return Response.json({ rows })')
+    expect(docs).not.toMatch(/from '(next\/server|@\/lib\/[^']+)'/)
+    expect(docs).not.toContain('NextResponse')
+  })
+
+  it('say the change history keeps the code a redeploy replaced, as the deploy answer does', () => {
+    // The docs said "there is no version history, so there is nothing to roll
+    // back to" while History kept the earlier code (production QA, 2026-11-27).
+    const note = read('lib/services/ai-functions/previous-code.ts')
+    expect(note).toContain('The previous code is kept in the change history as change #')
+    expect(note).toContain('deploy { action: "revert_change", changeId: ')
+    expect(docs).toContain('the change history keeps the code it replaced')
+    expect(docs).toContain('`deploy { action: "revert_change", changeId }`')
+    expect(docs).not.toMatch(/no version history|nothing to roll back/)
+    expect(read('lib/ai/brain/tools.ts')).not.toMatch(/no version history/)
   })
 
   it('say an http function reads the project’s variables from process.env', () => {
