@@ -34,11 +34,11 @@ import { RestructurePlan } from './autonomy/RestructurePlan'
 import { AuthDiagram, DatabaseDiagram, FunctionsDiagram, RealtimeDiagram, RestApiDiagram, StorageDiagram } from './diagrams'
 
 /*
- * The database's facts, set two by two under its sentence. "Direct connection strings" left on 2026-11-28: on Backenly
- * Cloud a project still in its region's shared database has no connection string (lib/services/direct-access.ts), while
- * SQL migrations are true for every project (apply_migration, lib/mcp/catalog.ts).
+ * The database's facts, set two by two under its sentence, named as /features names them (app/features/data.ts).
+ * Direct connections come with every plan, Free included (lib/entitlements/direct-postgres.ts): on Backenly Cloud every
+ * project has a database of its own, reached through its region's connection pooler (lib/services/direct-access.ts).
  */
-const databaseFacts = ['Standard PostgreSQL', 'pgvector', 'SQL migrations', 'pg_dump exports']
+const databaseFacts = ['Standard PostgreSQL', 'pgvector', 'Direct connections', 'pg_dump exports']
 
 /*
  * Everything a production backend needs (founders, 2026-11-15: "old one in
