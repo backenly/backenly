@@ -78,6 +78,7 @@ import {
   type PoolerLogin,
 } from '@/lib/data-plane/pooler'
 import { isScramVerifier, SCRAM_SALT_BYTES, scramSha256Verifier } from '@/lib/data-plane/scram'
+import { poolerPortShares, type PoolerPortShares } from '@/lib/data-plane/pooler-shares'
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { DELETED_PAUSE_REASON } from '@/lib/projects/serving-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
@@ -250,6 +251,14 @@ export interface DirectAccessStatus {
    * cannot set it yet (helpers from before section 3b).
    */
   connectionLimit?: number | null
+  /**
+   * Through the pooler only: how that number is shared by its two ports, the
+   * sessions a login may have open on the session port and the server
+   * connections its transactions share on the transaction port
+   * (lib/data-plane/pooler-shares.ts). Using one port never takes from the
+   * other.
+   */
+  connectionShares?: PoolerPortShares
   pendingDriftEvents: number
 }
 
@@ -1178,6 +1187,9 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
       : {}),
     credentials,
     connectionLimit,
+    ...(target.kind === 'pooler' && typeof connectionLimit === 'number'
+      ? { connectionShares: poolerPortShares(connectionLimit) }
+      : {}),
     pendingDriftEvents,
   }
 }

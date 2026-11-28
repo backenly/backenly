@@ -139,6 +139,32 @@ may run several tasks, so a database can receive up to
 | `max_prepared_statements` | `POOLER_MAX_PREPARED_STATEMENTS` | Lets clients use named prepared statements in transaction mode. |
 | `tcp_keepidle` / `tcp_keepintvl` / `tcp_keepcnt` | 240 / 30 / 4 | Keepalives inside the network load balancer's 350 s idle timeout, so a quiet session is not cut. |
 
+### A login's connections are shared by the two ports
+
+A project's logins have a connection limit on the server (PostgreSQL's
+`CONNECTION LIMIT`, set from the project's plan). `backenly_pooler.databases()`
+gives the smallest limit among a database's logins, and each pooler sizes that
+database's pool to its share of it:
+
+| Limit | Session pool (5432) | Transaction pool (6543) |
+|-------|---------------------|-------------------------|
+| 2 | 1 | 1 |
+| 5 | 2 | 3 |
+| 20 | 10 | 10 |
+
+Half goes to sessions and the rest to transactions. The two pools together are
+never larger than the limit, so what one port is doing cannot lock the same
+login out of the other. Before this, each pool was the size of the whole limit:
+two sessions closed on port 5432 left two idle server connections there for
+`server_idle_timeout`, and port 6543 refused the same login for a minute.
+
+A limit of 1 cannot be shared, so each pool takes it, and that login can still
+meet the refusal. A database whose logins have no limit uses
+`POOLER_DEFAULT_POOL_SIZE` on both ports.
+
+In session mode a pool of 1 means one session at a time for that login: a
+second waits for the first to end, up to `query_wait_timeout`.
+
 Fixed, not configurable: TLS 1.2 or 1.3 required from clients; no unix
 socket; no admin or stats users, so the `pgbouncer` console database cannot be
 used; `ignore_startup_parameters = extra_float_digits` (below).

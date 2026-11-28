@@ -13,7 +13,8 @@
  *   Read-write                                                    [Create login]
  *   Reads and writes rows. Schema changes are refused unless you allow them.
  *   Each login reaches only this project's schema, over TLS, with up to 2
- *   connections at once. …
+ *   connections at once: 1 on port 5432 and 1 on port 6543, so using one port
+ *   never takes from the other. …
  *   Port 5432 is session pooling … Prisma: … (the pooler's guidance)
  *
  *   A project with a database of its own is reached through its region's
@@ -98,6 +99,8 @@ interface Status {
   logins?: Array<{ mode: Mode; roleName: string; createdAt: string; rotatedAt: string | null }>
   /** Connections each login may hold at once, by the plan. */
   connectionLimit?: number | null
+  /** Through the pooler: how many of them each of its two ports gets. */
+  connectionShares?: { session: number; transaction: number }
   pendingDriftEvents: number
 }
 
@@ -559,6 +562,15 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
             Each login reaches only this project&apos;s schema, over TLS
             {typeof status?.connectionLimit === 'number' &&
               `, with up to ${status.connectionLimit} ${status.connectionLimit === 1 ? 'connection' : 'connections'} at once`}
+            {/* What the number covers: the pooler's two ports each have a
+                share of it, so a migration on one cannot lock the app out of
+                the other (lib/data-plane/pooler-shares.ts). */}
+            {typeof status?.connectionLimit === 'number' &&
+              status.connectionShares &&
+              status.pooler &&
+              // A limit of 1 cannot be shared, and nothing is promised for it.
+              status.connectionShares.session + status.connectionShares.transaction === status.connectionLimit &&
+              `: ${status.connectionShares.session} on port ${status.pooler.sessionPort} and ${status.connectionShares.transaction} on port ${status.pooler.transactionPort}, so using one port never takes from the other`}
             . Every change to a login is recorded; rotate at once if a connection string leaks.
           </p>
         )}

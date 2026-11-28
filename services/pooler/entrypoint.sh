@@ -308,15 +308,41 @@ EOF
 }
 
 # ── databases.ini ─────────────────────────────────────────────────────────────
+# pool_share LIMIT: how many of the LIMIT connections the server lets a login
+# hold this pooler may open for it.
+#
+# The session pooler and the transaction pooler are two processes, and both
+# sign in to the server as the same login. Each used to size its pool to the
+# whole limit. Two sessions on port 5432 then left two server connections idle
+# in that pool for server_idle_timeout after they closed, the login's limit
+# was spent, and port 6543 refused the same login for a minute: first "too
+# many connections for role", then PgBouncer's cached copy of that error
+# (production QA, 2026-11-27). The mix Connect recommends, an application on
+# 6543 and migrations on 5432, is exactly the one that met it.
+#
+# So the limit is shared between the two, and their pools together are never
+# larger than it: half to sessions, the rest to transactions, which is where an
+# application's traffic goes and where the odd connection does most. A limit
+# of 1 cannot be shared, so each takes it. lib/data-plane/pooler.ts
+# (poolerPortShares) holds the same rule for what Connect tells a person.
+pool_share() {
+  local limit="$1" half=$(($1 / 2))
+  if [ "$POOLER_MODE" = session ]; then
+    printf '%s' "$((half > 0 ? half : 1))"
+  else
+    printf '%s' "$((limit - half))"
+  fi
+}
+
 # render_databases: the [databases] list for the lines on standard input, one
-# per database: its name, optionally followed by `|` and its pool size (the
-# smallest connection limit among its logins, backenly_pooler.databases()).
-# Every name must be a project database's and every size a whole number from 1
-# to 1000, or nothing is rendered. A database with a size gets that pool_size,
-# so the pooler never opens more server connections for one of its logins than
-# the server lets that login hold; one without uses default_pool_size. The
-# auth_query of each names its own database, so a login is checked only for the
-# database it belongs to.
+# per database: its name, optionally followed by `|` and its logins' connection
+# limit (the smallest among them, backenly_pooler.databases()). Every name must
+# be a project database's and every limit a whole number from 1 to 1000, or
+# nothing is rendered. A database with a limit gets this pooler's share of it
+# as its pool_size (pool_share), so the two poolers together never open more
+# server connections for one of its logins than the server lets that login
+# hold; one without uses default_pool_size. The auth_query of each names its
+# own database, so a login is checked only for the database it belongs to.
 render_databases() {
   local line name size
   local -a entries=()
@@ -330,9 +356,10 @@ render_databases() {
       return 1
     fi
     if [ -n "$size" ] && ! { [[ "$size" =~ ^[1-9][0-9]{0,3}$ ]] && ((size <= 1000)); }; then
-      printf 'pooler: "%s" is not a pool size for %s; the list was not changed\n' "${size:0:20}" "$name" >&2
+      printf 'pooler: "%s" is not a connection limit for %s; the list was not changed\n' "${size:0:20}" "$name" >&2
       return 1
     fi
+    [ -z "$size" ] || size="$(pool_share "$size")"
     entries+=("$name|$size")
   done
   printf ';; Rendered by services/pooler/entrypoint.sh from backenly_pooler.databases().\n'
