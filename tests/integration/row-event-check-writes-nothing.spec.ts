@@ -88,10 +88,13 @@ beforeAll(async () => {
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     body text NOT NULL
   )`)
-  // No value Backenly would choose satisfies this, so no test row can be built.
+  // No value Backenly tries satisfies the seal, so no test row can be built.
+  // The amount alone would not stop it: a value its rule accepts is found by
+  // asking PostgreSQL (lib/ai/checked-values.ts).
   await prisma.$executeRawUnsafe(`CREATE TABLE ${q('ledger')} (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    amount_cents integer NOT NULL CHECK (amount_cents > 1000)
+    amount_cents integer NOT NULL CHECK (amount_cents > 1000),
+    seal text NOT NULL CHECK (seal = md5('nothing the test tries'))
   )`)
 }, 180_000)
 
@@ -143,7 +146,9 @@ describe('the check of row-event functions', () => {
     await functions({ name: 'ledger-audit', triggerType: 'on_db_insert', table: 'ledger' })
     const { check, verdict } = await rowEventCheck()
     expect(check).toMatchObject({ passed: false, skipped: true })
-    expect(check.skipReason).toMatch(/^Couldn't check ledger-audit: a test row could not be written to "ledger"/)
+    expect(check.skipReason).toBe(
+      `Couldn't check ledger-audit: none of the values the test tries for "ledger"."seal" is allowed by its rule "ledger_seal_check"`,
+    )
     expect(verdict).not.toBe('failed')
     expect(await count('ledger')).toBe(0)
   }, 120_000)

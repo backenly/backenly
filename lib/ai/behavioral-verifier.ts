@@ -38,38 +38,7 @@ import { rlsSessionParams, rlsSessionSql, type RlsIdentity } from '@/lib/service
 import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import type { FunctionEvent } from '@/lib/services/ai-functions/executor'
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/**
- * Placeholder for a value about to be bound by PRISMA.
- *
- * The cast is not cosmetic — on this transport it is mandatory. Prisma's
- * `$queryRawUnsafe` sends string parameters explicitly typed as `text`, so
- * `INSERT INTO t (uuid_col) VALUES ($1)` is rejected with
- * `42804 column "…" is of type uuid but expression is of type text` EVEN WHEN
- * the value is a well-formed uuid. (node-postgres sends parameters untyped and
- * lets Postgres infer from the target column, which is why the same SQL works
- * there — a difference that made this look like a bad value rather than a
- * transport rule.)
- *
- * So the COLUMN TYPE decides, exactly as it already did for timestamp and json.
- * It previously decided from the VALUE's shape for uuid alone, which meant any
- * uuid column whose bound value was not a canonical uuid string got a bare
- * placeholder and failed every single time. That ran 641 times against one
- * production table over six days, swallowed, reported as a passing check.
- *
- * The value-shape test is kept as a last resort for callers that genuinely do
- * not know the column type (dataType defaults to '').
- */
-function typedPlaceholder(val: any, idx: number, dataType: string = ''): string {
-  const t = dataType.toLowerCase()
-  if (t === 'uuid') return `$${idx}::uuid`
-  if (t.includes('timestamp') || t === 'date' || t.includes('time')) return `$${idx}::timestamp`
-  if (t.includes('json')) return `$${idx}::jsonb`
-  if (typeof val === 'string' && UUID_RE.test(val)) return `$${idx}::uuid`
-  return `$${idx}`
-}
+import { chooseCheckedValue, loadTableChecks, ownChecks, type TableCheck } from './checked-values'
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -179,46 +148,6 @@ function settledToCheck(
   }
 }
 
-// ─── Synthetic value generator ────────────────────────────────────────────────
-
-/** Return a safe test value for a given PostgreSQL data_type. */
-function syntheticValue(dataType: string): any {
-  const t = dataType.toLowerCase()
-  if (t.includes('uuid'))                                              return crypto.randomUUID()
-  if (t.includes('bool'))                                              return false
-  if (t.includes('int') || t.includes('serial'))                       return 0
-  if (t.includes('float') || t.includes('double') ||
-      t.includes('decimal') || t.includes('numeric') ||
-      t.includes('real'))                                              return 0
-  if (t.includes('timestamp') || t.includes('date') || t.includes('time')) return new Date().toISOString()
-  if (t.includes('json'))                                              return '{}'
-  if (t.startsWith('_') || t.includes('array'))                       return '{}'
-  // text, varchar, char, citext, name, etc.
-  return '__bv_test__'
-}
-
-// ─── Column loader ────────────────────────────────────────────────────────────
-
-interface ColInfo {
-  column_name: string
-  data_type: string
-  is_nullable: string
-  column_default: string | null
-}
-
-async function loadColumns(projectId: string, schemaName: string, tableName: string): Promise<ColInfo[]> {
-  // The catalog of the project's database, in its region; resolved outside any
-  // catch, so an unreachable region fails the check rather than skipping it.
-  const db = await workspaceRawClient(projectId)
-  return db.$queryRawUnsafe<ColInfo[]>(
-    `SELECT column_name, data_type, is_nullable, column_default
-     FROM information_schema.columns
-     WHERE table_schema = $1 AND table_name = $2
-     ORDER BY ordinal_position`,
-    schemaName, tableName,
-  )
-}
-
 // ─── FK constraint loader ─────────────────────────────────────────────────────
 
 /**
@@ -253,8 +182,8 @@ async function loadFkReferences(projectId: string, schemaName: string, tableName
  * Returns one row per (FK column, referenced parent column) pair. This is the
  * authoritative source — name-based heuristics ("does `user_id` map to `users.id`?")
  * are brittle for compound names like `created_by`, `author_id`, or non-default
- * referenced columns. The seeding code uses this map to insert parent rows with
- * the exact id that the FK will reference, as does run_test's create
+ * referenced columns. A test row's parents are written from this map, with the
+ * exact value each reference points at, as are run_test's create's
  * (lib/ai/brain/verify-create.ts).
  */
 export interface FkColumnMapping {
@@ -304,89 +233,6 @@ export async function loadFkColumnMappings(
     }))
   } catch {
     return []
-  }
-}
-
-/**
- * Return a map of column_name → first valid string from its CHECK constraint.
- * Used to avoid inserting synthetic values that violate enum-style checks, here
- * and by run_test's create (lib/ai/brain/verify-create.ts).
- */
-export async function loadCheckConstraintValues(
-  projectId: string,
-  schemaName: string,
-  tableName: string,
-): Promise<Record<string, string>> {
-  // The catalog of the project's database, in its region; resolved outside any
-  // catch, so an unreachable region fails the check rather than skipping it.
-  const db = await workspaceRawClient(projectId)
-  try {
-    const rows = await db.$queryRawUnsafe<{ attname: string; consrc: string }[]>(
-      `SELECT a.attname, pg_get_constraintdef(c.oid) AS consrc
-       FROM pg_constraint c
-       JOIN pg_class t ON t.oid = c.conrelid
-       JOIN pg_namespace n ON n.oid = t.relnamespace
-       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
-       WHERE c.contype = 'c'
-         AND n.nspname = $1
-         AND t.relname = $2`,
-      schemaName, tableName,
-    )
-    const result: Record<string, string> = {}
-    for (const row of rows) {
-      // Extract first quoted literal from IN (...) or = '...' expressions
-      const match = row.consrc.match(/'([^']+)'/)
-      if (match) result[row.attname] = match[1]
-    }
-    return result
-  } catch {
-    return {}
-  }
-}
-
-/** Build (insertCols, insertVals, colInfoMap) for required non-default columns, skipping id. */
-function buildInsertParts(
-  cols: ColInfo[],
-  overrides: Record<string, any> = {},
-): { insertCols: string[]; insertVals: any[]; colInfoMap: Map<string, string> } {
-  const insertCols: string[] = []
-  const insertVals: any[] = []
-  const colInfoMap = new Map<string, string>()
-  for (const col of cols) {
-    if (col.column_name === 'id') continue
-    if (col.column_name in overrides) {
-      insertCols.push(col.column_name)
-      insertVals.push(overrides[col.column_name])
-      colInfoMap.set(col.column_name, col.data_type)
-      continue
-    }
-    if (col.column_default !== null) continue
-    if (col.is_nullable === 'YES') continue
-    insertCols.push(col.column_name)
-    insertVals.push(syntheticValue(col.data_type))
-    colInfoMap.set(col.column_name, col.data_type)
-  }
-  return { insertCols, insertVals, colInfoMap }
-}
-
-function buildInsertSql(
-  schemaName: string,
-  tableName: string,
-  insertCols: string[],
-  insertVals: any[],
-  colInfoMap: Map<string, string> = new Map(),
-): { sql: string; params: any[] } {
-  if (insertCols.length === 0) {
-    return {
-      sql: `INSERT INTO "${schemaName}"."${tableName}" DEFAULT VALUES RETURNING *`,
-      params: [],
-    }
-  }
-  const colList = insertCols.map(c => `"${c}"`).join(', ')
-  const placeholders = insertVals.map((v, i) => typedPlaceholder(v, i + 1, colInfoMap.get(insertCols[i]) ?? '')).join(', ')
-  return {
-    sql: `INSERT INTO "${schemaName}"."${tableName}" (${colList}) VALUES (${placeholders}) RETURNING *`,
-    params: insertVals,
   }
 }
 
@@ -451,80 +297,418 @@ async function inRolledBackTransaction<T>(
   throw new Error('A probe transaction ended without a result.')
 }
 
-/** A parent row a check writes for its test row's foreign keys. */
-interface ParentSeed {
-  table: string
-  /** The test row's columns that reference this parent. */
-  mappings: FkColumnMapping[]
-  sql: string
-  params: any[]
+// ─── Test rows ────────────────────────────────────────────────────────────────
+//
+// One way to write a row a check needs, for every check that writes one (3.1
+// to 3.4). The row is built from the catalog: a value for each column the
+// database does not fill, of the column's own type, that the column's CHECK
+// rules accept (lib/ai/checked-values.ts asks PostgreSQL which do), with the
+// parent rows its foreign keys need written first.
+//
+// The CRUD, auth and RLS checks used to build theirs another way: 0 for every
+// number, the first quoted text of a CHECK for a column under one, and for the
+// update a fixed text written into the first text column. A rating that must
+// be 1 to 5 was given 0, the insert failed, and the failure was reported as
+// "backend does not behave correctly", which blocks a publish (production QA,
+// 2026-11-21, N1). Which table that happened to depended on the order an
+// unordered query returned them in.
+//
+// A row Backenly cannot build says nothing about the backend. A check that
+// cannot build one for a table says so and tries the next table; with none
+// left it reports itself not run, and does not block.
+
+/** How many levels of parent rows a test row's foreign keys may need. */
+const MAX_PARENT_DEPTH = 3
+
+/** A column, as a test row gives it a value. */
+interface ProbeColumn {
+  name: string
+  /** format_type(): the exact type a value is cast to, schema-qualified where it must be. */
+  type: string
+  typname: string
+  /** pg_type.typcategory: S string, N number, B boolean, D date and time, T interval, A array, E enum. */
+  category: string
+  notNull: boolean
+  hasDefault: boolean
+  /** An identity or generated column: PostgreSQL gives it its value. */
+  computed: boolean
+  enumLabels: string[] | null
 }
 
+interface ProbeTable {
+  table: string
+  columns: ProbeColumn[]
+  /** Every CHECK constraint of the table. */
+  checks: TableCheck[]
+  fks: FkColumnMapping[]
+}
+
+/** SQLSTATEs of a statement that could not run just now: a timeout, a lock held by another session, a conflict. */
+const COULD_NOT_RUN_NOW = new Set(['57014', '55P03', '40001', '40P01'])
+
 /**
- * The INSERT for each parent table a test row's foreign keys need, planned
- * from the catalog before the check's transaction opens. `seedId` is the id
- * each parent is written with, the value every FK pointing at it gets.
+ * Why a test row could not be written.
+ *
+ * `sqlState` is PostgreSQL's code when the database refused the row, and null
+ * when the row was never sent: no value was found for a column, its foreign
+ * keys form a cycle, a table it needs was not found.
  */
-async function planParentSeeds(
+class CannotBuildRow extends Error {
+  constructor(message: string, readonly sqlState: string | null = null) {
+    super(message)
+  }
+
+  /**
+   * Whether the refusal is about the test's own row, and so says nothing of
+   * the table: the row was never sent, its values were refused (a data or
+   * integrity error, an exception a trigger raised), or the statement could
+   * not run just now.
+   *
+   * False for anything else PostgreSQL said: a function a trigger calls that
+   * does not exist, a column that is not there, a policy that refuses the
+   * service role the checks write as. No row could have been written,
+   * whatever it held, so that is the table's own fault, as it always was.
+   */
+  get saysNothingOfTheTable(): boolean {
+    const code = this.sqlState
+    if (code === null) return true
+    return code.startsWith('22') || code.startsWith('23') || code === 'P0001' || COULD_NOT_RUN_NOW.has(code)
+  }
+}
+
+/** The SQLSTATE of a failed raw query, when it carries one. */
+function sqlStateOf(err: unknown): string | null {
+  const code = (err as { meta?: { code?: unknown } } | null)?.meta?.code
+  if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code
+  const text = err instanceof Error ? err.message : String(err ?? '')
+  return /Code: `([0-9A-Z]{5})`/.exec(text)?.[1] ?? null
+}
+
+async function loadProbeTable(projectId: string, schemaName: string, table: string): Promise<ProbeTable | null> {
+  const db = await workspaceRawClient(projectId)
+  const columns = await db.$queryRawUnsafe<Array<{
+    name: string
+    type: string
+    typname: string
+    category: string
+    not_null: boolean
+    has_default: boolean
+    computed: boolean
+    enum_labels: string[] | null
+  }>>(
+    `SELECT a.attname AS name,
+            format_type(a.atttypid, a.atttypmod) AS type,
+            t.typname AS typname,
+            t.typcategory::text AS category,
+            a.attnotnull AS not_null,
+            a.atthasdef AS has_default,
+            (a.attidentity <> '' OR a.attgenerated <> '') AS computed,
+            CASE WHEN t.typtype = 'e' THEN
+              (SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid)
+            END AS enum_labels
+       FROM pg_attribute a
+       JOIN pg_class c ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t ON t.oid = a.atttypid
+      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')
+        AND a.attnum > 0 AND NOT a.attisdropped
+      ORDER BY a.attnum`,
+    schemaName, table,
+  )
+  if (columns.length === 0) return null
+
+  return {
+    table,
+    columns: columns.map((c) => ({
+      name: c.name,
+      type: c.type,
+      typname: c.typname,
+      category: c.category,
+      notNull: c.not_null,
+      hasDefault: c.has_default,
+      computed: c.computed,
+      enumLabels: c.enum_labels,
+    })),
+    checks: await loadTableChecks(projectId, schemaName, table),
+    fks: await loadFkColumnMappings(projectId, schemaName, table),
+  }
+}
+
+const quoteIdent = (name: string) => `"${name.replace(/"/g, '""')}"`
+
+/** A diagnostic sentence as a clause: lower-case start, no closing full stop. */
+const clause = (text: string) => text.charAt(0).toLowerCase() + text.slice(1).replace(/\.\s*$/, '')
+
+/**
+ * Insert a row Backenly can build into `plan.table`, with the parent rows its
+ * foreign keys need, inside the check's transaction. Returns the row's ctid,
+ * and the value of each `mustFill` column as text. Throws CannotBuildRow when
+ * no such row can be written; after that the transaction is aborted, so the
+ * caller must stop.
+ *
+ * `fixed` gives columns the values the caller needs them to have (the owner of
+ * a row, a test user's email). A column that references a parent keeps the
+ * parent's value.
+ */
+async function insertProbeRow(
+  tx: ProbeTx,
   projectId: string,
   schemaName: string,
-  mappingsByParent: Map<string, FkColumnMapping[]>,
-  seedId: () => string,
-  emailPrefix: string,
-): Promise<ParentSeed[]> {
-  const seeds: ParentSeed[] = []
-  for (const [table, mappings] of mappingsByParent) {
-    const refCols = await loadColumns(projectId, schemaName, table)
-    if (refCols.length === 0) continue
-    const id = seedId()
-    const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, table)
-    // buildInsertParts skips 'id', so prepend it: the seeded parent must land
-    // on a known id, which is the value written into every FK pointing at it.
-    const { insertCols, insertVals, colInfoMap } = buildInsertParts(refCols, {
-      ...refCheckOverrides,
-      email: `${emailPrefix}${id.slice(0, 8)}@test.internal`,
-    })
-    const { sql, params } = buildInsertSql(
-      schemaName,
-      table,
-      ['id', ...insertCols],
-      [id, ...insertVals],
-      new Map<string, string>([['id', 'uuid'], ...colInfoMap]),
-    )
-    seeds.push({ table, mappings, sql, params })
+  plan: ProbeTable,
+  salt: string,
+  path: string[] = [],
+  mustFill: string[] = [],
+  fixed: Record<string, string> = {},
+): Promise<Record<string, string | null>> {
+  if (path.includes(plan.table)) {
+    throw new CannotBuildRow(`its foreign keys form a cycle through "${plan.table}"`)
   }
-  return seeds
+  if (path.length >= MAX_PARENT_DEPTH) {
+    throw new CannotBuildRow(`its foreign keys go more than ${MAX_PARENT_DEPTH} tables deep`)
+  }
+
+  // Each parent table this row references, with the columns pointing at it.
+  // A reference to the row's own table is left empty.
+  const parents = new Map<string, FkColumnMapping[]>()
+  for (const fk of plan.fks) {
+    if (fk.foreignTable === plan.table) continue
+    parents.set(fk.foreignTable, [...(parents.get(fk.foreignTable) ?? []), fk])
+  }
+
+  const values = new Map<string, string>(Object.entries(fixed))
+  for (const [parentTable, mappings] of parents) {
+    const parentPlan = await loadProbeTable(projectId, schemaName, parentTable)
+    if (!parentPlan) throw new CannotBuildRow(`the table "${parentTable}" it references was not found`)
+    const referenced = Array.from(new Set(mappings.map((m) => m.foreignColumn)))
+    const parent = await insertProbeRow(tx, projectId, schemaName, parentPlan, salt, [...path, plan.table], referenced)
+    for (const m of mappings) {
+      const value = parent[m.foreignColumn]
+      if (value !== null && value !== undefined) values.set(m.column, value)
+    }
+  }
+
+  const cols: ProbeColumn[] = []
+  for (const col of plan.columns) {
+    if (col.computed) continue
+    // A referenced column with a default (a serial, gen_random_uuid()) keeps it,
+    // and RETURNING reads the value it got.
+    const wanted =
+      values.has(col.name) || (!col.hasDefault && (col.notNull || mustFill.includes(col.name)))
+    if (!wanted) continue
+    if (!values.has(col.name)) {
+      // A value the column's own CHECK rules accept: PostgreSQL is asked.
+      const value = await chooseCheckedValue(tx, col, plan.checks, salt)
+      if (value === null) {
+        const rules = ownChecks(col.name, plan.checks).map((c) => `"${c.name}"`).join(', ')
+        throw new CannotBuildRow(
+          `none of the values the test tries for "${plan.table}"."${col.name}" is allowed by its rule${rules.includes(',') ? 's' : ''} ${rules}`,
+        )
+      }
+      values.set(col.name, value)
+    }
+    cols.push(col)
+  }
+
+  const target = `${quoteIdent(schemaName)}.${quoteIdent(plan.table)}`
+  const returning = ['ctid::text AS "__ctid"', ...mustFill.map((c) => `${quoteIdent(c)}::text AS ${quoteIdent(c)}`)].join(', ')
+  const sql = cols.length === 0
+    ? `INSERT INTO ${target} DEFAULT VALUES RETURNING ${returning}`
+    : `INSERT INTO ${target} (${cols.map((c) => quoteIdent(c.name)).join(', ')})
+       VALUES (${cols.map((c, i) => `$${i + 1}::${c.type}`).join(', ')})
+       RETURNING ${returning}`
+  let rows: Array<Record<string, string | null>>
+  try {
+    rows = await tx.$queryRawUnsafe<Array<Record<string, string | null>>>(sql, ...cols.map((c) => values.get(c.name)))
+  } catch (err) {
+    throw new CannotBuildRow(
+      `a test row could not be written to "${plan.table}" (${clause(sanitizeDiagnostic(err))})`,
+      sqlStateOf(err),
+    )
+  }
+  if (!rows[0]) throw new CannotBuildRow(`writing a test row to "${plan.table}" returned no row`)
+  return rows[0]
 }
 
 /**
- * Write `seeds` in the check's transaction, adding a line to `details` for
- * each. Returns the value each FK column gets, or the parent that could not be
- * written; after that the transaction is aborted, so the check must stop.
+ * Change one column of the test row: a column in `watched` when there are any
+ * (the columns a function runs on), otherwise any column a test may change.
+ * Returns the updated row's ctid. Throws CannotBuildRow when no column can be
+ * changed; after a refused UPDATE the transaction is aborted, unless the
+ * caller set a savepoint to return to.
  */
-async function writeParentSeeds(
+async function updateProbeRow(
   tx: ProbeTx,
-  seeds: ParentSeed[],
-  details: string[],
-): Promise<{ overrides: Record<string, string> } | { failed: string; err: unknown }> {
-  const overrides: Record<string, string> = {}
-  for (const seed of seeds) {
-    let rows: any[]
-    try {
-      rows = await tx.$queryRawUnsafe<any[]>(seed.sql, ...seed.params)
-    } catch (err) {
-      return { failed: seed.table, err }
-    }
-    if (!rows[0]) continue
-    const parentId = String(rows[0].id ?? rows[0][Object.keys(rows[0])[0]])
-    for (const m of seed.mappings) overrides[m.column] = parentId
-    details.push(
-      `✓ Seeded "${seed.table}" id=${parentId.slice(0, 8)}… (FK${seed.mappings.length === 1 ? '' : 's'}: ${seed.mappings.map(m => m.column).join(', ')})`,
+  schemaName: string,
+  plan: ProbeTable,
+  ctid: string,
+  watched: string[],
+  salt: string,
+): Promise<string> {
+  // Never a foreign key (its new value would have to exist) or a computed
+  // column; plain values first, an id last, and of two alike the one under no
+  // rule of its own, which any new value suits.
+  const keys = new Set(plan.fks.map((fk) => fk.column))
+  const settable = (c: ProbeColumn) => !c.computed && !keys.has(c.name)
+  // A column that takes only some values: listed by its type, or kept to them by a CHECK of its own.
+  const ruled = (c: ProbeColumn) => (c.enumLabels?.length ?? 0) > 0 || ownChecks(c.name, plan.checks).length > 0
+  const rank = (c: ProbeColumn) =>
+    (c.name === 'id' ? 10 : 0) +
+    ('SNBDTE'.includes(c.category) ? 0 : c.typname === 'uuid' || c.typname.startsWith('json') ? 5 : 20) +
+    (ruled(c) ? 1 : 0)
+  const candidates = (watched.length > 0
+    ? plan.columns.filter((c) => watched.includes(c.name) && settable(c))
+    : plan.columns.filter((c) => settable(c) && rank(c) < 20)
+  ).sort((a, b) => rank(a) - rank(b))
+  const col = candidates[0]
+  if (!col) {
+    throw new CannotBuildRow(
+      watched.length > 0
+        ? `none of the columns it watches (${watched.join(', ')}) can be changed by a test update`
+        : `no column of "${plan.table}" can be changed by a test update`,
     )
   }
-  return { overrides }
+
+  const target = `${quoteIdent(schemaName)}.${quoteIdent(plan.table)}`
+  const column = quoteIdent(col.name)
+  let set: string
+  const params: unknown[] = [ctid]
+  if (ruled(col)) {
+    // Another value the column takes: PostgreSQL is asked which of the test's
+    // values its rules accept, as it is for the row's first value. A fixed
+    // text written here once broke the rule and failed the check.
+    const current = await tx.$queryRawUnsafe<Array<{ value: string | null }>>(
+      `SELECT ${column}::text AS value FROM ${target} WHERE ctid = $1::tid`, ctid,
+    )
+    const next = await chooseCheckedValue(tx, col, plan.checks, salt, { not: current[0]?.value ?? null })
+    if (next === null) {
+      throw new CannotBuildRow(`"${col.name}" takes no other value the test tries, so a test update cannot change it`)
+    }
+    set = `$2::${col.type}`
+    params.push(next)
+  } else if (col.category === 'N') {
+    set = `COALESCE(${column}, 0) + 1`
+  } else if (col.category === 'B') {
+    set = `NOT COALESCE(${column}, false)`
+  } else if (col.category === 'D') {
+    set = `COALESCE(${column}, now()) + interval '1 day'`
+  } else if (col.category === 'T') {
+    set = `COALESCE(${column}, interval '0') + interval '1 hour'`
+  } else if (col.typname === 'uuid') {
+    set = 'gen_random_uuid()'
+  } else if (col.typname === 'json' || col.typname === 'jsonb') {
+    set = `jsonb_build_object('__bv_probe', '${salt}')::${col.type}`
+  } else {
+    set = `$2::${col.type}`
+    params.push(`__bv_probe_changed_${salt}`)
+  }
+  try {
+    const rows = await tx.$queryRawUnsafe<Array<{ ctid: string }>>(
+      `UPDATE ${target} SET ${column} = ${set} WHERE ctid = $1::tid RETURNING ctid::text AS ctid`,
+      ...params,
+    )
+    if (!rows[0]) throw new CannotBuildRow(`the test row in "${plan.table}" could not be found to update`)
+    return rows[0].ctid
+  } catch (err) {
+    if (err instanceof CannotBuildRow) throw err
+    throw new CannotBuildRow(
+      `"${col.name}" could not be changed by a test update (${clause(sanitizeDiagnostic(err))})`,
+      sqlStateOf(err),
+    )
+  }
+}
+
+/** A check's verdict on one table, or why the table could not be used to reach one. */
+type TableAttempt =
+  | { kind: 'untested'; reason: string }
+  | { kind: 'checked'; passed: boolean; error?: string; details: string[] }
+
+const untested = (reason: string): TableAttempt => ({ kind: 'untested', reason })
+
+/** What a check says when it could write a test row to none of the tables it tried. */
+function notExercised(what: string, tried: Array<{ table: string; reason: string }>, more: number): string {
+  const reasons = tried.map((t) => `"${t.table}": ${t.reason}`).join('; ')
+  return (
+    `${what} not exercised: a test row could not be written to ${tried.length === 1 ? 'the table' : `any of the ${tried.length} tables`} tried. ` +
+    `${reasons}.` +
+    (more > 0 ? ` ${more} more table${more === 1 ? ' was' : 's were'} not tried.` : '') +
+    ` This is a limit of Backenly's test, not a fault in the backend.`
+  )
 }
 
 // ─── CHECK 3.1 — CRUD lifecycle ───────────────────────────────────────────────
+
+/** Tables the CRUD check tries before it says it could exercise none. */
+const MAX_CRUD_TABLES_TRIED = 5
+
+/** create → read → update → delete → read again, on one table, in a transaction that is rolled back. */
+async function crudLifecycleOn(projectId: string, schemaName: string, tableName: string): Promise<TableAttempt> {
+  const plan = await loadProbeTable(projectId, schemaName, tableName)
+  if (!plan) return untested('it was not found in the database')
+
+  const target = `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`
+  const salt = crypto.randomBytes(4).toString('hex')
+  const details: string[] = []
+  const failed = (error: string, line: string): TableAttempt => ({ kind: 'checked', passed: false, error, details: [...details, line] })
+
+  // The test's own end user, so a column whose default reads the signed-in
+  // user (backenly_jwt_claim('sub')) gets one, as a real write would. Every
+  // write below is rolled back with the transaction: nothing to clean up.
+  return inRolledBackTransaction<TableAttempt>(
+    projectId,
+    { userId: crypto.randomUUID(), isServiceRole: true },
+    async (tx) => {
+      // ── INSERT ──────────────────────────────────────────────────────────────
+      let ctid: string
+      try {
+        ctid = (await insertProbeRow(tx, projectId, schemaName, plan, salt)).__ctid as string
+      } catch (err) {
+        if (!(err instanceof CannotBuildRow)) throw err
+        if (err.saysNothingOfTheTable) return untested(err.message)
+        return failed(`INSERT failed: ${err.message}`, '✗ INSERT failed')
+      }
+      details.push(`✓ INSERT succeeded on "${tableName}"`)
+
+      // ── READ ────────────────────────────────────────────────────────────────
+      const readSql = `SELECT 1 AS found FROM ${target} WHERE ctid = $1::tid`
+      if ((await tx.$queryRawUnsafe<unknown[]>(readSql, ctid)).length === 0) {
+        return failed('READ returned 0 rows after INSERT', '✗ READ failed')
+      }
+      details.push('✓ READ returned inserted row')
+
+      // ── UPDATE (best-effort) ────────────────────────────────────────────────
+      // A column the test cannot change, or a rule that refuses its new value,
+      // is not a failed lifecycle. The savepoint keeps the transaction usable
+      // after a refused UPDATE.
+      await tx.$executeRawUnsafe('SAVEPOINT bv_crud_update')
+      try {
+        ctid = await updateProbeRow(tx, schemaName, plan, ctid, [], salt)
+        details.push('✓ UPDATE succeeded')
+      } catch (err) {
+        if (!(err instanceof CannotBuildRow)) throw err
+        await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT bv_crud_update')
+        details.push(`~ UPDATE not exercised: ${err.message}`)
+      }
+
+      // ── DELETE ──────────────────────────────────────────────────────────────
+      const deleted = await tx.$queryRawUnsafe<unknown[]>(
+        `DELETE FROM ${target} WHERE ctid = $1::tid RETURNING 1 AS gone`, ctid,
+      )
+      if (deleted.length === 0) return failed('DELETE matched 0 rows', '✗ DELETE failed')
+      details.push('✓ DELETE succeeded')
+
+      // ── POST-DELETE READ — must return 0 rows ───────────────────────────────
+      if ((await tx.$queryRawUnsafe<unknown[]>(readSql, ctid)).length > 0) {
+        return failed(
+          'Row still exists after DELETE',
+          '✗ Post-delete read returned rows — the DELETE did not remove the row',
+        )
+      }
+      details.push('✓ Post-delete read returns 0 rows')
+
+      return { kind: 'checked', passed: true, details }
+    },
+  )
+}
 
 async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
   // Resolved first and outside any catch, so an unreachable region fails the
@@ -538,197 +722,44 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     details: [],
   }
 
-  // Find the first project table that is not a system table.
-  // Async job/workflow tables (names matching *_jobs, *_tasks, generation_*) often
-  // have FK constraints referencing other tables we can't create rows in during a test.
-  // We skip them and try the next candidate instead of failing the CRUD check.
   const SYSTEM_TABLES = new Set(['users', '_backenly_presence', 'audit_logs', 'email_events', 'sms_events'])
-  const ASYNC_JOB_PATTERN = /(_jobs|_tasks|_queue|_runs|generation_|generated_|_steps|_events)$/i
 
+  // In name order, so the same project is tested the same way every time. An
+  // unordered read once decided which table was tested, and with it whether a
+  // publish was blocked.
   const tables = await prisma.table.findMany({
     where: { projectId },
     select: { name: true },
-    take: 20,
+    orderBy: { name: 'asc' },
   })
+  const candidates = tables.map((t) => t.name.toLowerCase()).filter((name) => !SYSTEM_TABLES.has(name))
+  if (candidates.length === 0) {
+    return { ...base, skipped: true, skipReason: 'No application tables exist yet to exercise a CRUD lifecycle against.' }
+  }
 
   const schemaName = `workspace_${projectId}`
-  let candidate: { name: string } | null = null
-
-  for (const t of tables) {
-    const lName = t.name.toLowerCase()
-    if (SYSTEM_TABLES.has(lName)) continue
-
-    // A foreign key is no longer disqualifying — parents get seeded below, the
-    // same way checkRlsIsolation already does it.
-    //
-    // This used to `continue` on any FK to another table, with the reasoning
-    // "we can't create a real user in a CRUD test". On a normal relational
-    // schema that is every table, so the check tested nothing and reported it
-    // as though the project were empty. The capability it called impossible
-    // lives a few hundred lines below in this same file.
-    //
-    // Only ONE case still disqualifies: a FK referencing a non-id parent column
-    // (compound PK, unusual target). Synthetic seeding cannot satisfy those, and
-    // guessing produces a confusing 23503 instead of an honest skip — the same
-    // line checkRlsIsolation draws.
-    try {
-      const fkMaps = await loadFkColumnMappings(projectId, schemaName, lName)
-      const unseedable = fkMaps.filter(m => m.foreignColumn !== 'id' && m.foreignTable !== lName)
-      if (unseedable.length > 0) {
-        base.details.push(
-          `⏭ Skipping '${lName}' — FK(s) reference non-id parent columns ` +
-          `(${unseedable.map(m => `${m.column}→${m.foreignTable}.${m.foreignColumn}`).join(', ')})`,
-        )
+  const tried: Array<{ table: string; reason: string }> = []
+  try {
+    // A table Backenly cannot build a row for is passed over for the next one:
+    // the lifecycle is proved on the first table that takes a test row.
+    for (const tableName of candidates.slice(0, MAX_CRUD_TABLES_TRIED)) {
+      const attempt = await crudLifecycleOn(projectId, schemaName, tableName)
+      if (attempt.kind === 'untested') {
+        tried.push({ table: tableName, reason: attempt.reason })
+        base.details.push(`⏭ Couldn't test "${tableName}": ${attempt.reason}`)
         continue
       }
-    } catch {
-      // FK metadata query failed — be conservative and skip this table.
-      base.details.push(`⏭ Skipping '${lName}' — could not read FK constraints`)
-      continue
+      const details = [...base.details, ...attempt.details]
+      return attempt.passed ? { ...base, passed: true, details } : { ...base, error: attempt.error, details }
     }
-
-    candidate = t
-    break
-  }
-
-  if (!candidate) {
-    // Say what was actually true. "No testable tables exist yet" reads as an
-    // empty project, and it was being returned for a fully-built relational
-    // schema where every table simply has a foreign key — which is most real
-    // schemas. That phrasing turned a KNOWN COVERAGE GAP into what looked like
-    // a project with nothing in it.
-    //
-    // FK parents are seeded below (planParentSeeds), so what is left here is a
-    // FK to a parent column other than its id, or FK metadata that could not
-    // be read.
-    const skipped = base.details.filter(d => d.startsWith('⏭')).length
-    return {
-      ...base,
-      skipped: true,
-      skipReason:
-        skipped > 0
-          ? `CRUD lifecycle not exercised: all ${skipped} candidate table(s) carry foreign keys, and this check does not yet seed parent rows. This is a coverage gap, not an empty project.`
-          : 'No application tables exist yet to exercise a CRUD lifecycle against.',
-    }
-  }
-
-  const tableName = candidate.name.toLowerCase()
-
-  // A test user ID to satisfy NOT NULL owner columns and jwt_claim() defaults.
-  const dummyUserId = crypto.randomUUID()
-  const USER_ID_COLS = new Set(['user_id', 'userid', 'author_id', 'authorid', 'owner_id', 'ownerid', 'created_by', 'createdby'])
-
-  try {
-    const cols = await loadColumns(projectId, schemaName, tableName)
-    if (cols.length === 0) {
-      return { ...base, skipped: true, skipReason: `Table '${tableName}' has no columns in information_schema` }
-    }
-
-    // ── Plan the FK parents ───────────────────────────────────────────────────
-    // Authoritative mapping from pg_constraint, not column-name heuristics:
-    // `author_id → users.id` and `parent_comment_id → comments.id` both need the
-    // exact target, and guessing is what produced 23503 in the field.
-    const fkMappings = await loadFkColumnMappings(projectId, schemaName, tableName)
-    const mappingsByParent = new Map<string, FkColumnMapping[]>()
-    for (const m of fkMappings) {
-      // A self-referencing FK is satisfied by leaving the column null; seeding a
-      // parent in the same table would just create a second row.
-      if (m.foreignTable === tableName) continue
-      const arr = mappingsByParent.get(m.foreignTable) ?? []
-      arr.push(m)
-      mappingsByParent.set(m.foreignTable, arr)
-    }
-    const seeds = await planParentSeeds(projectId, schemaName, mappingsByParent, () => crypto.randomUUID(), '__bv_crud_')
-    const checkOverrides = await loadCheckConstraintValues(projectId, schemaName, tableName)
-
-    // Every write below is rolled back with the transaction: nothing to clean up.
-    return await inRolledBackTransaction<BehavioralCheck>(
-      projectId,
-      { userId: dummyUserId, isServiceRole: true },
-      async (tx) => {
-        const seeded = await writeParentSeeds(tx, seeds, base.details)
-        if ('failed' in seeded) {
-          // Skip rather than fail: an unseedable parent says nothing about
-          // whether CRUD works.
-          return {
-            ...base,
-            skipped: true,
-            skipReason:
-              `CRUD lifecycle skipped — could not seed parent table "${seeded.failed}" required by a FK on ` +
-              `"${tableName}": ${sanitizeDiagnostic(seeded.err)}`,
-            details: base.details,
-          }
-        }
-        const fkOverrides = seeded.overrides
-
-        // ── INSERT ────────────────────────────────────────────────────────────
-        // Fill owner and NOT NULL columns that weren't seeded via explicit FKs
-        const ownerOverrides: Record<string, string> = {}
-        for (const c of cols) {
-          if (USER_ID_COLS.has(c.column_name.toLowerCase()) && !fkOverrides[c.column_name]) {
-            ownerOverrides[c.column_name] = dummyUserId
-          }
-        }
-
-        const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides, ...ownerOverrides })
-        const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
-
-        const inserted = await tx.$queryRawUnsafe<any[]>(insertSql, ...insertParams)
-        if (!inserted[0]) {
-          return { ...base, error: 'INSERT returned no row', details: [...base.details, '✗ INSERT failed'] }
-        }
-        const testId = String(inserted[0].id ?? inserted[0][Object.keys(inserted[0])[0]])
-        base.details.push(`✓ INSERT succeeded (id=${testId})`)
-
-        // ── READ ──────────────────────────────────────────────────────────────
-        const readSql = `SELECT * FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`
-        const readRows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
-        if (readRows.length === 0) {
-          return { ...base, error: 'READ returned 0 rows after INSERT', details: [...base.details, '✗ READ failed'] }
-        }
-        base.details.push('✓ READ returned inserted row')
-
-        // ── UPDATE (best-effort — needs a text column) ────────────────────────
-        const textCol = cols.find(
-          c => c.column_name !== 'id' &&
-               ['text', 'character varying', 'varchar', 'character', 'citext'].includes(c.data_type),
-        )
-        if (textCol) {
-          const updateSql = `UPDATE "${schemaName}"."${tableName}" SET "${textCol.column_name}" = $1 WHERE id = $2::uuid RETURNING id`
-          const updated = await tx.$queryRawUnsafe<any[]>(updateSql, '__bv_updated__', testId)
-          if (updated.length > 0) {
-            base.details.push(`✓ UPDATE succeeded on column '${textCol.column_name}'`)
-          } else {
-            base.details.push(`~ UPDATE on '${textCol.column_name}' matched 0 rows (non-fatal)`)
-          }
-        } else {
-          base.details.push('~ UPDATE skipped (no text column available for this table)')
-        }
-
-        // ── DELETE ────────────────────────────────────────────────────────────
-        const deleteSql = `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid RETURNING id`
-        const deleted = await tx.$queryRawUnsafe<any[]>(deleteSql, testId)
-        if (deleted.length === 0) {
-          return { ...base, error: 'DELETE matched 0 rows', details: [...base.details, '✗ DELETE failed'] }
-        }
-        base.details.push('✓ DELETE succeeded')
-
-        // ── POST-DELETE READ — must return 0 rows ─────────────────────────────
-        const postDeleteRows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
-        if (postDeleteRows.length > 0) {
-          return {
-            ...base,
-            error: `Row still exists after DELETE (id=${testId})`,
-            details: [...base.details, '✗ Post-delete read returned rows — the DELETE did not remove the row'],
-          }
-        }
-        base.details.push('✓ Post-delete read returns 0 rows')
-
-        return { ...base, passed: true }
-      },
-    )
   } catch (err: any) {
     return { ...base, error: sanitizeDiagnostic(err), details: base.details }
+  }
+
+  return {
+    ...base,
+    skipped: true,
+    skipReason: notExercised('CRUD lifecycle', tried, candidates.length - tried.length),
   }
 }
 
@@ -767,53 +798,27 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     return { ...base, skipped: true, skipReason: 'Project JWT secret is not configured (will be auto-fixed at deploy)' }
   }
 
-  // 3. Introspect actual users table schema — avoids hardcoded column assumptions
-  //    (OAuth-only tables have no password column; Prisma camelCase tables differ from snake_case)
-  const cols = await loadColumns(projectId, schemaName, 'users')
-  if (cols.length === 0) {
-    return { ...base, skipped: true, skipReason: 'workspace users table has no columns in information_schema' }
+  // 3. The users table as it is, not as it is assumed to be: an OAuth-only
+  //    table has no password column, and one a developer extended has required
+  //    columns of its own (a role, a status), some under CHECK rules.
+  const plan = await loadProbeTable(projectId, schemaName, 'users')
+  if (!plan) {
+    return { ...base, skipped: true, skipReason: 'workspace users table has no columns in the catalog' }
   }
-  const colNames = new Set(cols.map(c => c.column_name.toLowerCase()))
-  if (!colNames.has('id') || !colNames.has('email')) {
+  const has = (name: string) => plan.columns.some((c) => c.name === name)
+  if (!has('id') || !has('email')) {
     return { ...base, skipped: true, skipReason: 'workspace users table is missing required id or email columns' }
   }
 
   const testEmail = `__bv_test_${Date.now()}@backenly.internal`
+  const salt = crypto.randomBytes(4).toString('hex')
 
   try {
-    // ── Signup: dynamic INSERT shaped to the actual table schema ──────────────
-    // Build overrides for all known auth-related columns, then use buildInsertParts
-    // to fill in any remaining NOT NULL columns with synthetic values — this handles
-    // extended users tables that have extra required columns like role, status, etc.
-    const userId = crypto.randomUUID()
-    const overrides: Record<string, any> = {
-      email: testEmail,
-    }
-    if (colNames.has('password')) {
-      overrides.password = await hashPassword(crypto.randomBytes(12).toString('hex'))
-    }
-    if (colNames.has('name'))           overrides.name           = '__bv_test_user__'
-    if (colNames.has('role'))           overrides.role           = 'customer'
-    if (colNames.has('status'))         overrides.status         = 'active'
-    if (colNames.has('is_active'))      overrides['is_active']   = true
-    if (colNames.has('email_verified')) overrides['email_verified'] = false
-    // Only set phone to null when the column actually allows nulls — forcing null on NOT NULL phone columns triggers 23502
-    const phoneColInfo = cols.find(c => c.column_name === 'phone')
-    if (colNames.has('phone') && phoneColInfo?.is_nullable === 'YES') overrides.phone = null
-    // Prisma camelCase timestamps
-    if (cols.some(c => c.column_name === 'createdAt' && c.column_default === null && c.is_nullable === 'NO'))
-      overrides['createdAt'] = new Date().toISOString()
-    if (cols.some(c => c.column_name === 'updatedAt' && c.column_default === null && c.is_nullable === 'NO'))
-      overrides['updatedAt'] = new Date().toISOString()
-
-    // buildInsertParts skips 'id' — prepend it manually
-    const { insertCols, insertVals, colInfoMap: authColInfoMap } = buildInsertParts(cols, overrides)
-    const allCols = ['id', ...insertCols]
-    const allVals: any[] = [userId, ...insertVals]
-    const authColTypes = new Map([['id', 'uuid'], ...authColInfoMap])
-
-    const colList      = allCols.map(c => `"${c}"`).join(', ')
-    const placeholders = allVals.map((v, i) => typedPlaceholder(v, i + 1, authColTypes.get(allCols[i]) ?? '')).join(', ')
+    // ── Signup: a row shaped to the actual table ──────────────────────────────
+    // The email and the password hash are the test's own; every other required
+    // column gets a value its type and its rules accept.
+    const fixed: Record<string, string> = { email: testEmail }
+    if (has('password')) fixed.password = await hashPassword(crypto.randomBytes(12).toString('hex'))
 
     // Service-role: the workspace users table may have RLS enabled
     // (own_rows / public_read templates). Real signup also runs as
@@ -822,17 +827,27 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     // signup route would succeed. The test user is rolled back with the
     // transaction, so it never exists outside it.
     return await inRolledBackTransaction<BehavioralCheck>(projectId, { userId: '', isServiceRole: true }, async (tx) => {
-      const signupResult = await tx.$queryRawUnsafe<any[]>(
-        `INSERT INTO "${schemaName}"."users" (${colList}) VALUES (${placeholders})
-         ON CONFLICT DO NOTHING
-         RETURNING id, email`,
-        ...allVals,
-      )
-
-      if (!signupResult[0]?.id) {
-        return { ...base, error: 'Signup: INSERT into workspace users returned no row', details: base.details }
+      let created: Record<string, string | null>
+      try {
+        created = await insertProbeRow(tx, projectId, schemaName, plan, salt, [], ['id'], fixed)
+      } catch (err) {
+        if (!(err instanceof CannotBuildRow)) throw err
+        if (err.saysNothingOfTheTable) {
+          return {
+            ...base,
+            skipped: true,
+            skipReason:
+              `Auth flow not exercised: a test user could not be written (${err.message}). ` +
+              `This is a limit of Backenly's test, not a fault in the backend.`,
+          }
+        }
+        return { ...base, error: `Signup: ${err.message}`, details: base.details }
       }
-      const testUserId = String(signupResult[0].id)
+
+      const testUserId = created.id
+      if (!testUserId) {
+        return { ...base, error: 'Signup: INSERT into workspace users returned no id', details: base.details }
+      }
       base.details.push(`✓ Signup: test user created (id=${testUserId.slice(0, 8)}…)`)
 
       // ── Token issuance ──────────────────────────────────────────────────────
@@ -879,8 +894,8 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
       // token. Service-role here mirrors what the platform middleware does —
       // resolving the user record from JWT claims is a privileged lookup, not
       // a user-scoped query, so RLS should not gate it.
-      const protectedRead = await tx.$queryRawUnsafe<any[]>(
-        `SELECT id, email FROM "${schemaName}"."users" WHERE id = $1::uuid`,
+      const protectedRead = await tx.$queryRawUnsafe<unknown[]>(
+        `SELECT 1 AS found FROM ${quoteIdent(schemaName)}."users" WHERE id::text = $1`,
         testUserId,
       )
       if (protectedRead.length === 0) {
@@ -897,6 +912,79 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
 
 // ─── CHECK 3.3 — RLS isolation ────────────────────────────────────────────────
 
+/** Tables the RLS check tries before it says it could exercise none. */
+const MAX_RLS_TABLES_TRIED = 5
+
+/** User A writes a row, user B must not see it, on one table, in a transaction that is rolled back. */
+async function rlsIsolationOn(
+  projectId: string,
+  schemaName: string,
+  table: string,
+  ownerCol: string,
+): Promise<TableAttempt> {
+  const plan = await loadProbeTable(projectId, schemaName, table)
+  if (!plan) return untested('it was not found in the database')
+
+  const target = `${quoteIdent(schemaName)}.${quoteIdent(table)}`
+  const salt = crypto.randomBytes(4).toString('hex')
+  const userAId = crypto.randomUUID()
+  const userBId = crypto.randomUUID()
+  const details: string[] = []
+
+  // The owner column is given user A, unless it references a parent: then the
+  // parent row the test writes decides it, and whatever it holds is user A.
+  const fixed: Record<string, string> = plan.fks.some((fk) => fk.column === ownerCol) ? {} : { [ownerCol]: userAId }
+
+  // Each write and read below runs in one transaction that is rolled back,
+  // switching identity between them: nothing to clean up. User A inserts via
+  // the service role, so existing policies do not stand in the way of the
+  // test's own setup.
+  return inRolledBackTransaction<TableAttempt>(
+    projectId,
+    { userId: userAId, isServiceRole: true },
+    async (tx) => {
+      let row: Record<string, string | null>
+      try {
+        row = await insertProbeRow(tx, projectId, schemaName, plan, salt, [], [ownerCol], fixed)
+      } catch (err) {
+        if (!(err instanceof CannotBuildRow)) throw err
+        if (err.saysNothingOfTheTable) return untested(err.message)
+        return { kind: 'checked', passed: false, error: `RLS test: INSERT as user A into '${table}' failed: ${err.message}`, details }
+      }
+      const owner = row[ownerCol]
+      if (owner === null || owner === undefined || owner === '') {
+        return untested(`its owner column "${ownerCol}" was left empty by the test row`)
+      }
+      details.push(`✓ User A (${owner.slice(0, 8)}…) inserted a row into "${table}"`)
+
+      // User B tries to read user A's row — must be denied by RLS
+      const readSql = `SELECT 1 AS seen FROM ${target} WHERE ctid = $1::tid`
+      await actAs(tx, { userId: userBId, isServiceRole: false })
+      const userBRows = await tx.$queryRawUnsafe<unknown[]>(readSql, row.__ctid)
+
+      if (userBRows.length > 0) {
+        return {
+          kind: 'checked',
+          passed: false,
+          error: `RLS isolation failure: user B can read user A's row (table: ${table})`,
+          details: [...details, `✗ User B (${userBId.slice(0, 8)}…) returned ${userBRows.length} row(s) — should be 0`],
+        }
+      }
+      details.push(`✓ User B (${userBId.slice(0, 8)}…) correctly denied — 0 rows returned`)
+
+      // User A reads their own row — should succeed
+      await actAs(tx, { userId: owner, isServiceRole: false })
+      const userARows = await tx.$queryRawUnsafe<unknown[]>(readSql, row.__ctid)
+      details.push(
+        userARows.length > 0
+          ? '✓ User A can read their own row (self-access allowed)'
+          : '~ User A self-read returned 0 rows (own_rows policy may use different column mapping)',
+      )
+      return { kind: 'checked', passed: true, details }
+    },
+  )
+}
+
 async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
   const db = await workspaceRawClient(projectId)
   const base: BehavioralCheck = {
@@ -909,10 +997,12 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
 
   const schemaName = `workspace_${projectId}`
 
-  // Find tables with Backenly-managed RLS policies
+  // Tables with Backenly-managed RLS policies, in name order: the same
+  // project is tested the same way every time.
   const rlsTables = await db.$queryRawUnsafe<{ tablename: string }[]>(
     `SELECT DISTINCT tablename FROM pg_policies
-     WHERE schemaname = $1 AND policyname LIKE 'backenly_%'`,
+     WHERE schemaname = $1 AND policyname LIKE 'backenly_%'
+     ORDER BY tablename`,
     schemaName,
   )
 
@@ -920,179 +1010,82 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     return { ...base, skipped: true, skipReason: 'No Backenly-managed RLS policies exist yet' }
   }
 
-  // Find the first RLS table that has a user_id-like column
+  // Those of them with a user_id-like column: the rows a user owns.
   const USER_ID_COLS = new Set(['user_id', 'userid', 'author_id', 'authorid', 'owner_id', 'ownerid', 'created_by', 'createdby'])
-  let targetTable: string | null = null
-  let userIdCol: string | null = null
-
+  const owned: Array<{ table: string; ownerCol: string }> = []
   for (const { tablename } of rlsTables) {
     const cols = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
-       WHERE table_schema = $1 AND table_name = $2`,
+       WHERE table_schema = $1 AND table_name = $2
+       ORDER BY ordinal_position`,
       schemaName, tablename,
     )
     const match = cols.find(c => USER_ID_COLS.has(c.column_name.toLowerCase()))
-    if (match) {
-      targetTable = tablename
-      userIdCol   = match.column_name
-      break
-    }
+    if (match) owned.push({ table: tablename, ownerCol: match.column_name })
   }
 
-  if (!targetTable || !userIdCol) {
+  if (owned.length === 0) {
     return { ...base, skipped: true, skipReason: 'No RLS-protected table has a user_id-like column' }
   }
-  const table = targetTable
-  const ownerCol = userIdCol
 
-  const userAId = crypto.randomUUID()
-  const userBId = crypto.randomUUID()
-
+  const tried: Array<{ table: string; reason: string }> = []
   try {
-    const cols = await loadColumns(projectId, schemaName, table)
-    if (cols.length === 0) {
-      return { ...base, skipped: true, skipReason: `Table '${table}' has no columns in information_schema` }
-    }
-
-    // ── Plan parent rows for FK columns ──────────────────────────────────────
-    // Use precise FK metadata from pg_constraint so we know the EXACT
-    // (column → parent.column) mapping. Heuristics on column names
-    // ("does user_id map to users.id?") miss compound cases like
-    // `author_id → users.id` or `parent_comment_id → comments.id` and
-    // produce the 23503 failure pattern seen in the field.
-    const fkMappings = await loadFkColumnMappings(projectId, schemaName, table)
-
-    // Group mappings by parent table so we seed each parent once even when
-    // multiple FK columns point at it (e.g. created_by AND updated_by both
-    // referencing users.id).
-    const mappingsByParent = new Map<string, FkColumnMapping[]>()
-    for (const m of fkMappings) {
-      const arr = mappingsByParent.get(m.foreignTable) ?? []
-      arr.push(m)
-      mappingsByParent.set(m.foreignTable, arr)
-    }
-
-    // When any FK references a non-id column we can't easily seed (compound
-    // PKs, unusual referenced columns) — bail with a clear skip reason rather
-    // than producing a confusing 23503.
-    const unseedableFks = fkMappings.filter(m => m.foreignColumn !== 'id')
-    if (unseedableFks.length > 0) {
-      return {
-        ...base,
-        skipped: true,
-        skipReason:
-          `RLS test skipped — table "${table}" has FK(s) referencing non-id parent columns ` +
-          `(${unseedableFks.map(m => `${m.column}→${m.foreignTable}.${m.foreignColumn}`).join(', ')}). ` +
-          `Synthetic seeding cannot satisfy these.`,
+    // A table Backenly cannot build a row for is passed over for the next one.
+    for (const { table, ownerCol } of owned.slice(0, MAX_RLS_TABLES_TRIED)) {
+      const attempt = await rlsIsolationOn(projectId, schemaName, table, ownerCol)
+      if (attempt.kind === 'untested') {
+        tried.push({ table, reason: attempt.reason })
+        base.details.push(`⏭ Couldn't test "${table}": ${attempt.reason}`)
+        continue
       }
-    }
+      // The table that was tested speaks first; what was passed over follows.
+      base.details = [...attempt.details, ...base.details]
+      if (!attempt.passed) return { ...base, error: attempt.error }
 
-    // Every parent is written with id=userAId, the value written into every
-    // FK column that targets it.
-    const seeds = await planParentSeeds(projectId, schemaName, mappingsByParent, () => userAId, '__bv_test_')
-    const rlsCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, table)
-
-    // Each write and read below runs in one transaction that is rolled back,
-    // switching identity between them: nothing to clean up.
-    const failed = await inRolledBackTransaction<BehavioralCheck | null>(
-      projectId,
-      // User A inserts via service role (bypass existing RLS for test setup)
-      { userId: userAId, isServiceRole: true },
-      async (tx) => {
-        const seeded = await writeParentSeeds(tx, seeds, base.details)
-        if ('failed' in seeded) {
-          // Surface the failure clearly. A silent skip here masks the real cause
-          // of downstream 23503 errors — bail with a SKIP so the developer knows.
-          return {
-            ...base,
-            skipped: true,
-            skipReason:
-              `RLS test skipped — could not seed parent table "${seeded.failed}" required by FK on "${table}": ` +
-              sanitizeDiagnostic(seeded.err),
-          }
-        }
-
-        // Build insert overriding the owner column to belong to user A + any FK overrides
-        const { insertCols, insertVals, colInfoMap: rlsColInfoMap } = buildInsertParts(
-          cols,
-          { ...rlsCheckOverrides, ...seeded.overrides, [ownerCol]: userAId },
+      // ── Issue 16 guard: verify the policy expression references the correct column ──
+      // If the `own_rows` policy was applied using a column name that differs from
+      // what the workspace auth system sets as app.user_id, isolation silently breaks.
+      // Fetch the actual policy expression from pg_policies and warn if it looks wrong.
+      try {
+        const policyRows = await db.$queryRawUnsafe<{ qual: string | null; cmd: string }[]>(
+          `SELECT qual, cmd FROM pg_policies
+           WHERE schemaname = $1 AND tablename = $2 AND policyname LIKE 'backenly_%'
+           LIMIT 5`,
+          schemaName, table,
         )
-        const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, table, insertCols, insertVals, rlsColInfoMap)
-
-        const inserted = await tx.$queryRawUnsafe<any[]>(insertSql, ...insertParams)
-        if (!inserted[0]) {
-          return { ...base, error: `RLS test: INSERT as user A into '${table}' failed`, details: base.details }
-        }
-        const testId = String(inserted[0].id ?? inserted[0][Object.keys(inserted[0])[0]])
-        base.details.push(`✓ User A (${userAId.slice(0, 8)}…) inserted row id=${testId}`)
-
-        // User B tries to read user A's row — must be denied by RLS
-        const readSql = `SELECT id FROM "${schemaName}"."${table}" WHERE id = $1::uuid`
-        await actAs(tx, { userId: userBId, isServiceRole: false })
-        const userBRows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
-
-        if (userBRows.length > 0) {
-          return {
-            ...base,
-            error: `RLS isolation failure: user B can read user A's row (table: ${table})`,
-            details: [
-              ...base.details,
-              `✗ User B (${userBId.slice(0, 8)}…) returned ${userBRows.length} row(s) — should be 0`,
-            ],
+        for (const policy of policyRows) {
+          const qual = policy.qual ?? ''
+          // A correct own_rows policy reads the caller identity through
+          // current_setting — either the claim form
+          // (request.jwt.claims ->> 'sub') or the GUC form (app.current_user_id).
+          // rls-session.ts sets BOTH, so either dialect evaluates correctly here.
+          //
+          // The old check looked for the literal 'app.user_id', a GUC name nothing
+          // sets — rlsSessionSql writes 'app.current_user_id'. Combined with the
+          // second clause it could effectively never fire, so it was a guard in
+          // name only.
+          if (qual && !qual.includes('current_setting')) {
+            base.details.push(
+              `⚠ RLS policy on '${table}' (cmd=${policy.cmd}) never reads current_setting, so it ` +
+              `does not depend on the caller identity at all — expression: ${qual.slice(0, 120)}. ` +
+              `A policy that ignores the caller either denies everyone or exposes every row.`,
+            )
           }
         }
-        base.details.push(`✓ User B (${userBId.slice(0, 8)}…) correctly denied — 0 rows returned`)
-
-        // User A reads their own row — should succeed
-        await actAs(tx, { userId: userAId, isServiceRole: false })
-        const userARows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
-        if (userARows.length > 0) {
-          base.details.push('✓ User A can read their own row (self-access allowed)')
-        } else {
-          base.details.push('~ User A self-read returned 0 rows (own_rows policy may use different column mapping)')
-        }
-        return null
-      },
-    )
-    if (failed) return failed
-
-    // ── Issue 16 guard: verify the policy expression references the correct column ──
-    // If the `own_rows` policy was applied using a column name that differs from
-    // what the workspace auth system sets as app.user_id, isolation silently breaks.
-    // Fetch the actual policy expression from pg_policies and warn if it looks wrong.
-    try {
-      const policyRows = await db.$queryRawUnsafe<{ qual: string | null; cmd: string }[]>(
-        `SELECT qual, cmd FROM pg_policies
-         WHERE schemaname = $1 AND tablename = $2 AND policyname LIKE 'backenly_%'
-         LIMIT 5`,
-        schemaName, table,
-      )
-      for (const policy of policyRows) {
-        const qual = policy.qual ?? ''
-        // A correct own_rows policy reads the caller identity through
-        // current_setting — either the claim form
-        // (request.jwt.claims ->> 'sub') or the GUC form (app.current_user_id).
-        // rls-session.ts sets BOTH, so either dialect evaluates correctly here.
-        //
-        // The old check looked for the literal 'app.user_id', a GUC name nothing
-        // sets — rlsSessionSql writes 'app.current_user_id'. Combined with the
-        // second clause it could effectively never fire, so it was a guard in
-        // name only.
-        if (qual && !qual.includes('current_setting')) {
-          base.details.push(
-            `⚠ RLS policy on '${table}' (cmd=${policy.cmd}) never reads current_setting, so it ` +
-            `does not depend on the caller identity at all — expression: ${qual.slice(0, 120)}. ` +
-            `A policy that ignores the caller either denies everyone or exposes every row.`,
-          )
-        }
+      } catch {
+        // pg_policies query failed (e.g. insufficient privileges) — skip validation
       }
-    } catch {
-      // pg_policies query failed (e.g. insufficient privileges) — skip validation
-    }
 
-    return { ...base, passed: true }
+      return { ...base, passed: true }
+    }
   } catch (err: any) {
     return { ...base, error: sanitizeDiagnostic(err), details: base.details }
+  }
+
+  return {
+    ...base,
+    skipped: true,
+    skipReason: notExercised('RLS isolation', tried, owned.length - tried.length),
   }
 }
 
@@ -1132,283 +1125,6 @@ const OPERATION_WORDS: Record<'INSERT' | 'UPDATE' | 'DELETE', string> = {
 
 /** Functions checked in one run; any more are named as not checked. */
 const MAX_ROW_FUNCTIONS_CHECKED = 10
-
-/** How many levels of parent rows the probe creates for a row's foreign keys. */
-const MAX_PARENT_DEPTH = 3
-
-/** A column, as the probe gives it a value. */
-interface ProbeColumn {
-  name: string
-  /** format_type(): the exact type a value is cast to, schema-qualified where it must be. */
-  type: string
-  typname: string
-  /** pg_type.typcategory: S string, N number, B boolean, D date and time, T interval, A array, E enum. */
-  category: string
-  notNull: boolean
-  hasDefault: boolean
-  /** An identity or generated column: PostgreSQL gives it its value. */
-  computed: boolean
-  enumLabels: string[] | null
-}
-
-interface ProbeTable {
-  table: string
-  columns: ProbeColumn[]
-  /** The quoted values a single-column CHECK names, per column, in order. */
-  allowed: Record<string, string[]>
-  fks: FkColumnMapping[]
-}
-
-/** Why a test row could not be written; reported as "couldn't check", never as a failure. */
-class CannotBuildRow extends Error {}
-
-async function loadProbeTable(projectId: string, schemaName: string, table: string): Promise<ProbeTable | null> {
-  const db = await workspaceRawClient(projectId)
-  const columns = await db.$queryRawUnsafe<Array<{
-    name: string
-    type: string
-    typname: string
-    category: string
-    not_null: boolean
-    has_default: boolean
-    computed: boolean
-    enum_labels: string[] | null
-  }>>(
-    `SELECT a.attname AS name,
-            format_type(a.atttypid, a.atttypmod) AS type,
-            t.typname AS typname,
-            t.typcategory::text AS category,
-            a.attnotnull AS not_null,
-            a.atthasdef AS has_default,
-            (a.attidentity <> '' OR a.attgenerated <> '') AS computed,
-            CASE WHEN t.typtype = 'e' THEN
-              (SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid)
-            END AS enum_labels
-       FROM pg_attribute a
-       JOIN pg_class c ON c.oid = a.attrelid
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       JOIN pg_type t ON t.oid = a.atttypid
-      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')
-        AND a.attnum > 0 AND NOT a.attisdropped
-      ORDER BY a.attnum`,
-    schemaName, table,
-  )
-  if (columns.length === 0) return null
-
-  const checks = await db.$queryRawUnsafe<Array<{ column: string; def: string }>>(
-    `SELECT a.attname AS column, pg_get_constraintdef(c.oid) AS def
-       FROM pg_constraint c
-       JOIN pg_class t ON t.oid = c.conrelid
-       JOIN pg_namespace n ON n.oid = t.relnamespace
-       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = c.conkey[1]
-      WHERE c.contype = 'c' AND n.nspname = $1 AND t.relname = $2
-        AND array_length(c.conkey, 1) = 1`,
-    schemaName, table,
-  )
-  // Only a list of values, `col IN (...)` (which PostgreSQL prints as
-  // `= ANY (ARRAY[...])`) or `col = '...'`: the quoted text in any other CHECK,
-  // a pattern such as (email ~* '^.+@.+$') say, is not a value it allows.
-  const allowed: Record<string, string[]> = {}
-  for (const check of checks) {
-    if (!/= ANY \(ARRAY\[/.test(check.def) && !/^CHECK \(+"?[^"\s]+"? = '/.test(check.def)) continue
-    const literals = Array.from(check.def.matchAll(/'((?:[^']|'')*)'/g), (m) => m[1].replace(/''/g, "'"))
-    if (literals.length > 0) allowed[check.column] = [...(allowed[check.column] ?? []), ...literals]
-  }
-
-  return {
-    table,
-    columns: columns.map((c) => ({
-      name: c.name,
-      type: c.type,
-      typname: c.typname,
-      category: c.category,
-      notNull: c.not_null,
-      hasDefault: c.has_default,
-      computed: c.computed,
-      enumLabels: c.enum_labels,
-    })),
-    allowed,
-    fks: await loadFkColumnMappings(projectId, schemaName, table),
-  }
-}
-
-const quoteIdent = (name: string) => `"${name.replace(/"/g, '""')}"`
-
-/** A diagnostic sentence as a clause: lower-case start, no closing full stop. */
-const clause = (text: string) => text.charAt(0).toLowerCase() + text.slice(1).replace(/\.\s*$/, '')
-
-/** A value for `col`, as text PostgreSQL casts to the column's type. */
-function probeValue(col: ProbeColumn, allowed: string[] | undefined, salt: string): string {
-  if (allowed && allowed.length > 0) return allowed[0]
-  if (col.enumLabels && col.enumLabels.length > 0) return col.enumLabels[0]
-  switch (col.typname) {
-    case 'uuid': return crypto.randomUUID()
-    case 'json':
-    case 'jsonb': return '{}'
-    case 'date': return new Date().toISOString().slice(0, 10)
-    case 'time':
-    case 'timetz': return '12:00:00'
-    case 'inet':
-    case 'cidr': return '192.0.2.1'
-    case 'bytea': return '\\x00'
-  }
-  switch (col.category) {
-    // 1, not 0: a CHECK such as (amount > 0) is far commoner than one 1 breaks.
-    case 'N': return '1'
-    case 'B': return 'false'
-    case 'D': return new Date().toISOString()
-    case 'T': return '1 hour'
-    case 'A': return '{}'
-  }
-  return /e[-_]?mail/i.test(col.name) ? `bv-probe-${salt}@example.com` : `__bv_probe_${salt}`
-}
-
-/**
- * Insert a row Backenly can build into `plan.table`, with the parent rows its
- * foreign keys need, inside the probe's transaction. Returns the row's ctid.
- * Throws CannotBuildRow when no such row can be written.
- */
-async function insertProbeRow(
-  tx: ProbeTx,
-  projectId: string,
-  schemaName: string,
-  plan: ProbeTable,
-  salt: string,
-  path: string[] = [],
-  mustFill: string[] = [],
-): Promise<Record<string, string | null>> {
-  if (path.includes(plan.table)) {
-    throw new CannotBuildRow(`its foreign keys form a cycle through "${plan.table}"`)
-  }
-  if (path.length >= MAX_PARENT_DEPTH) {
-    throw new CannotBuildRow(`its foreign keys go more than ${MAX_PARENT_DEPTH} tables deep`)
-  }
-
-  // Each parent table this row references, with the columns pointing at it.
-  // A reference to the row's own table is left empty.
-  const parents = new Map<string, FkColumnMapping[]>()
-  for (const fk of plan.fks) {
-    if (fk.foreignTable === plan.table) continue
-    parents.set(fk.foreignTable, [...(parents.get(fk.foreignTable) ?? []), fk])
-  }
-
-  const values = new Map<string, string>()
-  for (const [parentTable, mappings] of parents) {
-    const parentPlan = await loadProbeTable(projectId, schemaName, parentTable)
-    if (!parentPlan) throw new CannotBuildRow(`the table "${parentTable}" it references was not found`)
-    const referenced = Array.from(new Set(mappings.map((m) => m.foreignColumn)))
-    const parent = await insertProbeRow(tx, projectId, schemaName, parentPlan, salt, [...path, plan.table], referenced)
-    for (const m of mappings) {
-      const value = parent[m.foreignColumn]
-      if (value !== null && value !== undefined) values.set(m.column, value)
-    }
-  }
-
-  const cols: ProbeColumn[] = []
-  for (const col of plan.columns) {
-    if (col.computed) continue
-    // A referenced column with a default (a serial, gen_random_uuid()) keeps it,
-    // and RETURNING reads the value it got.
-    const wanted =
-      values.has(col.name) || (!col.hasDefault && (col.notNull || mustFill.includes(col.name)))
-    if (!wanted) continue
-    if (!values.has(col.name)) values.set(col.name, probeValue(col, plan.allowed[col.name], salt))
-    cols.push(col)
-  }
-
-  const target = `${quoteIdent(schemaName)}.${quoteIdent(plan.table)}`
-  const returning = ['ctid::text AS "__ctid"', ...mustFill.map((c) => `${quoteIdent(c)}::text AS ${quoteIdent(c)}`)].join(', ')
-  const sql = cols.length === 0
-    ? `INSERT INTO ${target} DEFAULT VALUES RETURNING ${returning}`
-    : `INSERT INTO ${target} (${cols.map((c) => quoteIdent(c.name)).join(', ')})
-       VALUES (${cols.map((c, i) => `$${i + 1}::${c.type}`).join(', ')})
-       RETURNING ${returning}`
-  let rows: Array<Record<string, string | null>>
-  try {
-    rows = await tx.$queryRawUnsafe<Array<Record<string, string | null>>>(sql, ...cols.map((c) => values.get(c.name)))
-  } catch (err) {
-    throw new CannotBuildRow(`a test row could not be written to "${plan.table}" (${clause(sanitizeDiagnostic(err))})`)
-  }
-  if (!rows[0]) throw new CannotBuildRow(`writing a test row to "${plan.table}" returned no row`)
-  return rows[0]
-}
-
-/**
- * Change one column of the probe row so the update is one `fn` runs for: a
- * column it watches when it watches any, otherwise any column a test may
- * change. Returns the updated row's ctid.
- */
-async function updateProbeRow(
-  tx: ProbeTx,
-  schemaName: string,
-  plan: ProbeTable,
-  ctid: string,
-  watched: string[],
-  salt: string,
-): Promise<string> {
-  // Never a foreign key (its new value would have to exist) or a computed
-  // column; plain values first, an id last.
-  const keys = new Set(plan.fks.map((fk) => fk.column))
-  const settable = (c: ProbeColumn) => !c.computed && !keys.has(c.name)
-  const rank = (c: ProbeColumn) =>
-    (c.name === 'id' ? 10 : 0) + ('SNBDTE'.includes(c.category) ? 0 : c.typname === 'uuid' || c.typname.startsWith('json') ? 5 : 20)
-  const candidates = (watched.length > 0
-    ? plan.columns.filter((c) => watched.includes(c.name) && settable(c))
-    : plan.columns.filter((c) => settable(c) && rank(c) < 20)
-  ).sort((a, b) => rank(a) - rank(b))
-  const col = candidates[0]
-  if (!col) {
-    throw new CannotBuildRow(
-      watched.length > 0
-        ? `none of the columns it watches (${watched.join(', ')}) can be changed by a test update`
-        : `no column of "${plan.table}" can be changed by a test update`,
-    )
-  }
-
-  const target = `${quoteIdent(schemaName)}.${quoteIdent(plan.table)}`
-  const column = quoteIdent(col.name)
-  const listed = plan.allowed[col.name] ?? col.enumLabels ?? null
-  let set: string
-  const params: unknown[] = [ctid]
-  if (listed && listed.length > 0) {
-    // A different value from the ones the column allows.
-    const current = await tx.$queryRawUnsafe<Array<{ value: string | null }>>(
-      `SELECT ${column}::text AS value FROM ${target} WHERE ctid = $1::tid`, ctid,
-    )
-    const next = listed.find((v) => v !== current[0]?.value)
-    if (next === undefined) {
-      throw new CannotBuildRow(`"${col.name}" allows only one value, so a test update cannot change it`)
-    }
-    set = `$2::${col.type}`
-    params.push(next)
-  } else if (col.category === 'N') {
-    set = `COALESCE(${column}, 0) + 1`
-  } else if (col.category === 'B') {
-    set = `NOT COALESCE(${column}, false)`
-  } else if (col.category === 'D') {
-    set = `COALESCE(${column}, now()) + interval '1 day'`
-  } else if (col.category === 'T') {
-    set = `COALESCE(${column}, interval '0') + interval '1 hour'`
-  } else if (col.typname === 'uuid') {
-    set = 'gen_random_uuid()'
-  } else if (col.typname === 'json' || col.typname === 'jsonb') {
-    set = `jsonb_build_object('__bv_probe', '${salt}')::${col.type}`
-  } else {
-    set = `$2::${col.type}`
-    params.push(`__bv_probe_changed_${salt}`)
-  }
-  try {
-    const rows = await tx.$queryRawUnsafe<Array<{ ctid: string }>>(
-      `UPDATE ${target} SET ${column} = ${set} WHERE ctid = $1::tid RETURNING ctid::text AS ctid`,
-      ...params,
-    )
-    if (!rows[0]) throw new CannotBuildRow(`the test row in "${plan.table}" could not be found to update`)
-    return rows[0].ctid
-  } catch (err) {
-    if (err instanceof CannotBuildRow) throw err
-    throw new CannotBuildRow(`"${col.name}" could not be changed by a test update (${clause(sanitizeDiagnostic(err))})`)
-  }
-}
 
 interface RowFunctionProbe {
   outcome: 'reached' | 'missed' | 'unchecked'
@@ -1723,9 +1439,11 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
   // partially-built tables (e.g. a stray `products` table added to a social
   // backend that the build never generated APIs for).
   const SYSTEM_TABLES = new Set(['users', '_backenly_presence', 'audit_logs', 'email_events'])
+  // In name order, so the same project is tested the same way every time.
   const tables = await prisma.table.findMany({
     where: { projectId },
     select: { name: true },
+    orderBy: { name: 'asc' },
     take: 15,
   })
 

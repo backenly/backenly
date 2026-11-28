@@ -142,7 +142,7 @@ describe("Backenly's database checks", () => {
     // Its verdict is not asserted: the test database connects as a superuser,
     // which row-level security never applies to, so user B always sees the row.
     expect(check('rls_isolation').skipped).toBe(false)
-    expect(check('rls_isolation').details[0]).toMatch(/^✓ User A \(.+\) inserted row id=/)
+    expect(check('rls_isolation').details[0]).toMatch(/^✓ User A \(.+\) inserted a row into "orders"$/)
     expect(check('trigger_execution')).toMatchObject({ passed: true })
   })
 

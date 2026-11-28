@@ -194,6 +194,15 @@ beforeAll(async () => {
     // A CHECK the old sample row ('brain-verify-status') broke.
     `CREATE TABLE ${s()}.drafts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')},
        status text NOT NULL CHECK (status IN ('draft', 'published')))`,
+    // CHECKs that list no value: a range the sample number 1 is outside, and
+    // patterns, whose only quoted text is the pattern itself.
+    `CREATE TABLE ${s()}.ratings (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')},
+       stars integer NOT NULL CHECK (stars >= 3 AND stars <= 5),
+       slug text NOT NULL CHECK (slug ~ '^[a-z0-9-]+$'),
+       currency varchar(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'))`,
+    // A CHECK no value the test tries can meet.
+    `CREATE TABLE ${s()}.sealed (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')},
+       token text NOT NULL CHECK (token = md5('nothing the test tries')))`,
     // A NOT NULL column the database fills in: sending any other value breaks its CHECK.
     `CREATE TABLE ${s()}.stamped (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')},
        kind text NOT NULL DEFAULT 'auto' CHECK (kind = 'auto'), seq integer GENERATED ALWAYS AS IDENTITY)`,
@@ -212,7 +221,7 @@ beforeAll(async () => {
   ]) await prisma.$executeRawUnsafe(ddl)
   await grantDataPlane(projectId)
   await prisma.$executeRawUnsafe(`REVOKE INSERT ON ${s()}.locked FROM authenticated`)
-  for (const table of ['notes', 'gated', 'drafts', 'stamped', 'lists', 'list_items', 'locked', 'refusing', 'replies']) {
+  for (const table of ['notes', 'gated', 'drafts', 'ratings', 'sealed', 'stamped', 'lists', 'list_items', 'locked', 'refusing', 'replies']) {
     await autoApplyRlsIfNeeded(projectId, table)
   }
   const installed = await applyPermissionPolicy(projectId, { tableName: 'categories', template: 'public_read' })
@@ -283,6 +292,31 @@ describe('run_test create, as a signed-in test user', () => {
     expect(result.summary).toMatch(/a row was inserted as a signed-in test user, so the insert path works\. The test row was removed again\./)
     expect(inserts).toEqual([expect.objectContaining({ table: 'drafts', role: 'authenticated', row: expect.objectContaining({ status: 'draft' }) })])
     await expectNothingLeft('drafts')
+  })
+
+  // The value under a CHECK was the first quoted text in its definition: none
+  // for a range, so 1 was sent, and for a pattern the pattern itself. Each
+  // value is now one PostgreSQL says the rule accepts (lib/ai/checked-values.ts).
+  it('inserts a row whose CHECKs are a range and patterns, with values they accept', async () => {
+    const result = await create('ratings')
+
+    expect(result).toMatchObject({ ok: true, statusCode: 201 })
+    expect(inserts).toHaveLength(1)
+    const row = inserts[0].row as { stars: number; slug: string; currency: string }
+    expect(row.stars).toBeGreaterThanOrEqual(3)
+    expect(row.stars).toBeLessThanOrEqual(5)
+    expect(row.slug).toMatch(/^[a-z0-9-]+$/)
+    expect(row.currency).toMatch(/^[A-Z]{3}$/)
+    await expectNothingLeft('ratings')
+  })
+
+  it('says no valid row could be built when no value it tries meets a CHECK, naming the rule', async () => {
+    const result = await create('sealed')
+
+    expect(result).toMatchObject({ ok: false, failureKind: 'no_valid_row', exercised: false, statusCode: null })
+    expect(result.summary).toContain('none of the values the test tries for "sealed"."token" is allowed by its CHECK "sealed_token_check"')
+    expect(inserts).toEqual([])
+    await expectNothingLeft('sealed')
   })
 
   it('leaves a column the database fills in to the database', async () => {
