@@ -232,7 +232,7 @@ const MCP_TEXT: Record<string, { description: string; args: Record<string, strin
         'UPDATE rule: { using, check }. Give both when they differ: using alone lets a caller target a row and ' +
         'rewrite its owner column to themselves.',
       delete: 'DELETE rule: { using }.',
-      role: 'Default authenticated.',
+      role: 'authenticated (default) or anon. With anon, select only: a signed-out caller never writes.',
     },
   },
 }

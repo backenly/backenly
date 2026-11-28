@@ -11624,6 +11624,9 @@ async function executeRemoveSyncColumn(params: any, projectId: string): Promise<
 // PERMISSION / RLS ACTIONS
 // ============================================================================
 
+/** What a caller may name the role of someone who is not signed in. */
+const SIGNED_OUT_ROLES = new Set(['anon', 'anonymous', 'public'])
+
 /**
  * SET_PERMISSION: Apply a Row-Level Security policy to a workspace table
  */
@@ -11690,6 +11693,36 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
     }
   }
 
+  // ── A rule cannot let a signed-out caller write ────────────────────────────
+  //
+  // A publishable key writes nothing without a signed-in end user's
+  // X-User-Token: signed-out callers hold SELECT on a project's tables and no
+  // more, so no policy can open a write to them. set_rls took `role: "anon"`
+  // with an insert rule, answered "Permission policy applied", and the next
+  // insert without a signed-in user was refused 401 42501 (production QA,
+  // 2026-11-21). The rule it had installed let every SIGNED-IN user insert
+  // instead, which nobody had asked for. Refused, with what does work.
+  const WRITE_COMMANDS = ['insert', 'update', 'delete']
+  const namedWrites: string[] = hasCommands
+    ? Object.keys(params.commands).map((c) => c.toLowerCase()).filter((c) => WRITE_COMMANDS.includes(c))
+    : []
+  const role = typeof params.role === 'string' ? params.role.trim().toLowerCase() : ''
+  if (SIGNED_OUT_ROLES.has(role) && namedWrites.length > 0) {
+    const verbs = namedWrites.join(', ')
+    return {
+      success: false,
+      message:
+        `No policy was applied to "${tableName}". A rule for signed-out callers (role "${role}") can cover select only: ` +
+        `${verbs} cannot be opened to them. A publishable key writes nothing without a signed-in end user's ` +
+        `X-User-Token, whatever a table's rules say.\n` +
+        `To take a write from someone who is not signed in (a page view, a contact form), deploy a function that ` +
+        `does the write and call it from the app: deploy_function_code or generate_function with trigger "http".\n` +
+        `To let every signed-in user ${verbs}, send the same rule without role "${role}".`,
+      error: 'Signed-out callers cannot write',
+      code: 'SIGNED_OUT_CANNOT_WRITE',
+    }
+  }
+
   try {
     const { applyPermissionPolicy } = await import('@/lib/services/workspace-rls')
 
@@ -11716,6 +11749,10 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
       ...(params.using ? { using: params.using } : {}),
       ...(params.withCheck ? { withCheck: params.withCheck } : {}),
       ...(hasCommands ? { commands: params.commands } : {}),
+      // Who the rule was written for, recorded with it (it changes nothing in
+      // the policy, which names no role). The argument used to be accepted and
+      // dropped here.
+      ...(SIGNED_OUT_ROLES.has(role) ? { role: 'anon' } : role === 'authenticated' ? { role } : {}),
     })
 
     if (!result.success) {
@@ -11736,7 +11773,9 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
     // and the reason for it, would have been invisible in the response.
     //
     // `result.message` is built from the policy that landed. It is the only
-    // honest thing to print.
+    // honest thing to print. For a write rule that never reads who is calling
+    // it says whom the rule covers, signed-in callers and no signed-out one
+    // (lib/services/workspace-rls.ts, the widening guard).
     return {
       success: true,
       message:

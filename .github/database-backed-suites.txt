@@ -2383,6 +2383,12 @@ __tests__/database/grant-tables-are-not-self-writable.test.ts
 # opened by a later migration, the chat blueprint's steps and REGISTER_TABLE.
 tests/integration/grant-tables-on-every-path.spec.ts
 
+# set_rls does not say it opened a write to signed-out callers: a write rule
+# for role anon is refused with why and what does work, and installs nothing; a
+# read rule for anon is installed; a write rule that never reads the signed-in
+# user says whom it covers. Real schema, through the tool an agent calls.
+tests/integration/set-rls-signed-out-cannot-write.spec.ts
+
 # The teams tables enable_teams creates hold to membership, written as the REST
 # API's roles with production's grants: an owner creates an organization with
 # its first membership and invites; another signed-in user can neither join it

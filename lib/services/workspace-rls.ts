@@ -433,9 +433,14 @@ export function resolveCustomCommands(
       if (!explicit && !!readSource && effective === normalizeForCompare(readSource, validate)) {
         bled.push(command)
       } else {
+        // "And no signed-out one": an insert rule of `true` reads as "anyone
+        // may insert", and was taken to cover a visitor who is not signed in.
+        // It never does: signed-out callers hold SELECT and no more, so a
+        // publishable key writes nothing without an end user's X-User-Token.
         warnings.push(
           `${command.toUpperCase()} is governed by "${effective}", which does not reference the caller's identity — ` +
-          `any authenticated caller can ${VERB[command]} every row that matches it. ` +
+          `any authenticated caller can ${VERB[command]} every row that matches it, and no signed-out caller can: ` +
+          `a publishable key writes nothing without an end user's X-User-Token. ` +
           `This was requested explicitly, so it was applied.`,
         )
       }

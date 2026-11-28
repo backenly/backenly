@@ -742,7 +742,9 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       },
       role: {
         type: 'string',
-        description: 'Database role the policy is recorded against. Defaults to `authenticated`.',
+        description:
+          'Who the rule is written for, recorded with it: `authenticated` (default) or `anon`. With `anon` only ' +
+          '`select` is accepted: a signed-out caller never writes, so use a function for that.',
       },
     },
     ['tableName']),
