@@ -10,12 +10,100 @@
  * Uses ON DELETE SET NULL for optional assignment columns (assigned_to, actor_id).
  */
 
-import { deriveFkBase } from '@/lib/db/fk-shape'
+import { deriveFkBase, foreignKeyTypesMatch } from '@/lib/db/fk-shape'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { asWorkspaceOwner } from '@/lib/data-plane/as-owner'
-import { postgresWords, refusedByExistingRows } from '@/lib/db/existing-rows'
+import { postgresWords, refusedByExistingRows, sqlStateOf } from '@/lib/db/existing-rows'
 import { SAFE_IDENT } from '@/lib/db/sql-expression'
 import { quoteIdent } from '@/lib/security/workspace-schema'
+
+/**
+ * Failure codes of a key that cannot be made as things are, whatever is tried
+ * again: the two columns' types do not link, or the table referenced has no
+ * `id`. An approval answers these as a refusal with its reason, not as a
+ * server fault (app/api/projects/[id]/health/approve).
+ */
+export const KEY_CANNOT_BE_MADE_CODES: ReadonlySet<string> = new Set(['INCOMPATIBLE_TYPES', 'REFERENCED_KEY_NOT_FOUND'])
+
+/** What a person is told when a column's type cannot be linked to the key's. */
+function typesDoNotLink(table: string, column: string, columnType: string, refTable: string, keyType: string): string {
+  return (
+    `"${table}"."${column}" is ${columnType} and "${refTable}"."id" is ${keyType}, and PostgreSQL cannot link ` +
+    `columns of those two types with a foreign key, so none was added and nothing changed. ` +
+    `To link them, change the column's type to ${keyType} first.`
+  )
+}
+
+/**
+ * The type of every column in a project's schema, as `table.column` → the
+ * catalog's type name (uuid, text, int4, …), for telling whether a key can be
+ * made before one is offered or attempted (foreignKeyTypesMatch).
+ */
+export async function loadWorkspaceColumnTypes(projectId: string): Promise<Map<string, string>> {
+  const db = await workspaceRawClient(projectId)
+  const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+  const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+  const rows = await db.$queryRawUnsafe<{ table_name: string; column_name: string; udt_name: string }[]>(
+    `SELECT table_name, column_name, udt_name FROM information_schema.columns WHERE table_schema = $1`,
+    postgresSchema,
+  )
+  return new Map(rows.map((r) => [`${r.table_name}.${r.column_name}`, r.udt_name]))
+}
+
+/**
+ * Whether a foreign key from `table.column` to `refTable.id` can be made, by
+ * the two columns' types: yes, or why not. Unknown types (a column that is not
+ * there) are left for the statement itself to refuse.
+ */
+export function keyCanBeMade(
+  types: ReadonlyMap<string, string>,
+  table: string,
+  column: string,
+  refTable: string,
+): { ok: true } | { ok: false; code: 'INCOMPATIBLE_TYPES' | 'REFERENCED_KEY_NOT_FOUND'; message: string } {
+  const columnType = types.get(`${table}.${column}`)
+  const keyType = types.get(`${refTable}.id`)
+  if (keyType === undefined) {
+    return {
+      ok: false,
+      code: 'REFERENCED_KEY_NOT_FOUND',
+      message: `"${refTable}" has no "id" column to reference, so no foreign key was added and nothing changed.`,
+    }
+  }
+  if (columnType !== undefined && !foreignKeyTypesMatch(columnType, keyType)) {
+    return { ok: false, code: 'INCOMPATIBLE_TYPES', message: typesDoNotLink(table, column, columnType, refTable, keyType) }
+  }
+  return { ok: true }
+}
+
+/**
+ * Whether an open offer to add a foreign key on `table.column` no longer
+ * holds, judged only by what was read from the live schema:
+ *   - the key now exists;
+ *   - the column is gone;
+ *   - the column names no table of this project (an external or polymorphic id);
+ *   - the column's type cannot be linked to the key it would point at, or that
+ *     table has no `id`. Counted only when `columnTypes` was read and holds the
+ *     column's own type: types that could not be read settle nothing.
+ * The observer withdraws such an offer (lib/services/workspace-observer.ts);
+ * one still genuinely missing its key is left alone.
+ */
+export function missingKeyOfferIsSettled(offer: {
+  table: string
+  column: string
+  /** `table.column` of every existing foreign key. */
+  keyed: ReadonlySet<string>
+  /** `table.column` of every existing column. */
+  columns: ReadonlySet<string>
+  tableNameMap: Map<string, string>
+  columnTypes: ReadonlyMap<string, string> | null
+}): boolean {
+  const key = `${offer.table}.${offer.column}`
+  if (offer.keyed.has(key) || !offer.columns.has(key)) return true
+  const target = resolveReferencedTable(offer.column, offer.tableNameMap, offer.table)
+  if (!target) return true
+  return Boolean(offer.columnTypes?.has(key)) && !keyCanBeMade(offer.columnTypes!, offer.table, offer.column, target).ok
+}
 
 /**
  * Whether every name a key would be built from is a plain identifier. The keys
@@ -307,6 +395,15 @@ export async function repairForeignKeyColumn(
     }
   }
 
+  // The two columns' types must be ones PostgreSQL can link. Asked here, so the
+  // answer is a sentence about the two columns rather than PostgreSQL's refusal
+  // of the statement.
+  const types = await loadWorkspaceColumnTypes(projectId).catch(() => null)
+  const linkable = types ? keyCanBeMade(types, tableName, columnName, refTable) : null
+  if (linkable !== null && linkable.ok === false) {
+    return { success: false, code: linkable.code, message: linkable.message, referencedTable: refTable }
+  }
+
   // Self-references (parent_post_id → posts) are a legitimate, common shape for
   // threaded / hierarchical data — no longer skipped. The cascade rule below is
   // chosen to keep them non-destructive.
@@ -374,6 +471,18 @@ export async function repairForeignKeyColumn(
           `was not added and nothing changed. Correct or remove those rows first (PostgreSQL: ${words}).`,
       }
     }
+    // 42804: PostgreSQL's own word that the two types cannot be linked, for a
+    // pair the check above let through.
+    if (sqlStateOf(err) === '42804') {
+      return {
+        success: false,
+        code: 'INCOMPATIBLE_TYPES',
+        message:
+          `PostgreSQL cannot link "${tableName}"."${columnName}" to "${refTable}"."id" with a foreign key, because their ` +
+          `types differ, so none was added and nothing changed (PostgreSQL: ${words}).`,
+        referencedTable: refTable,
+      }
+    }
     return { success: false, message: `Could not add the foreign key ${tableName}.${columnName} → ${refTable}.id: ${words}` }
   }
 }
@@ -417,6 +526,8 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
       postgresSchema
     )
     const fkSet = new Set(existingFKs.map(r => `${r.table_name}.${r.column_name}`))
+    // Every column's type, so a key PostgreSQL would refuse is not attempted.
+    const columnTypes = await loadWorkspaceColumnTypes(projectId)
     // Tables declared in SQL keep exactly the keys their statement declared
     // (lib/db/declared-tables.ts). If that cannot be read, nothing is repaired
     // this time: the repair runs again after the next table is created.
@@ -442,6 +553,9 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
       // A name a project's own SQL gave a table or column can hold anything; the
       // key is added as the platform's own role, so only plain identifiers are keyed.
       if (!plainIdentifiers(table_name, column_name, refTable)) continue
+      // A column whose type cannot be linked to the key's is not a key waiting
+      // to be added: user_id text beside users.id uuid, say.
+      if (!keyCanBeMade(columnTypes, table_name, column_name, refTable).ok) continue
 
       const isSelfRef = refTable.toLowerCase() === table_name.toLowerCase()
       const cascadeRule = getCascadeRule(column_name, table_name, {

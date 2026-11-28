@@ -602,6 +602,9 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
   //   • the column no longer exists (table was reshaped)
   //   • the column has no resolvable target (external/polymorphic id,
   //     e.g. stripe_session_id — never a FK)
+  //   • the column's type cannot be linked to the key it would point at
+  //     (user_id text beside users.id uuid): PostgreSQL refuses that key, so
+  //     it was never one to offer, and approving it could only fail
   // Each is withdrawn, never marked fixed: a repair the loop or an approval ran
   // has already closed its finding, so a row still open here was settled by
   // something else (lib/autonomy/resolution.ts). Anything still genuinely
@@ -627,10 +630,15 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1`,
           wsSchema).catch(() => ({ rows: [] })),
       ])
-      const colSet = new Set((colRows?.rows ?? colRows ?? []).map((r: any) => `${r.table_name}.${r.column_name}`))
-      const fkSet = new Set((fkRows?.rows ?? fkRows ?? []).map((r: any) => `${r.table_name}.${r.column_name}`))
-      const { buildWorkspaceTableNameMap, resolveReferencedTable } = await import('@/lib/ai/fk-repair')
+      const located = (rows: any): string[] => (rows?.rows ?? rows ?? []).map((r: any) => `${r.table_name}.${r.column_name}`)
+      const colSet = new Set<string>(located(colRows))
+      const fkSet = new Set<string>(located(fkRows))
+      const { buildWorkspaceTableNameMap, loadWorkspaceColumnTypes, missingKeyOfferIsSettled } =
+        await import('@/lib/ai/fk-repair')
       const tableMap = await buildWorkspaceTableNameMap(projectId).catch(() => new Map<string, string>())
+      // Null when the types could not be read: then no finding is closed on
+      // their account.
+      const columnTypes = await loadWorkspaceColumnTypes(projectId).catch(() => null)
 
       const settled: typeof openFk = []
       for (const f of openFk) {
@@ -638,8 +646,9 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
         const table = typeof d.tableName === 'string' ? d.tableName : ''
         const column = typeof d.columnName === 'string' ? d.columnName : ''
         if (!table || !column) continue
-        const key = `${table}.${column}`
-        if (fkSet.has(key) || !colSet.has(key) || !resolveReferencedTable(column, tableMap, table)) settled.push(f)
+        if (missingKeyOfferIsSettled({ table, column, keyed: fkSet, columns: colSet, tableNameMap: tableMap, columnTypes })) {
+          settled.push(f)
+        }
       }
       await withdrawFindings(settled, 'fk_reaper')
     }

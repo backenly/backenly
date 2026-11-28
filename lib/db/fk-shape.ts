@@ -51,3 +51,33 @@ export function suggestForeignKeyColumn(table: string): string {
   const base = table.trim().replace(/s$/i, '')
   return `${base}_id`
 }
+
+const WHOLE_NUMBER_TYPES = new Set(['int2', 'int4', 'int8'])
+const TEXT_TYPES = new Set(['text', 'varchar'])
+
+/**
+ * Whether PostgreSQL can make a foreign key from a column of one type to a key
+ * of another. Both are type names as the catalog gives them (pg_type.typname,
+ * information_schema's udt_name): uuid, text, int4, …
+ *
+ * A column's name says what it points at, never whether a key can be made. An
+ * agent that stores the signed-in user as text gets `user_id text`, while
+ * `users.id` is a uuid, and PostgreSQL refuses that pair outright ("foreign key
+ * constraint cannot be implemented … incompatible types: text and uuid").
+ * Backenly offered the key anyway, and approving it answered HTTP 500
+ * (production QA, 2026-11-21 and 2026-11-27).
+ *
+ * The same type always links. Beyond that only the pairs PostgreSQL compares
+ * without a cast written out are counted: the whole numbers with each other,
+ * and text with varchar. Anything else is answered no, so a key is never
+ * offered that the database would refuse.
+ */
+export function foreignKeyTypesMatch(columnType: string, keyType: string): boolean {
+  const column = columnType.toLowerCase()
+  const key = keyType.toLowerCase()
+  if (column === key) return true
+  return (
+    (WHOLE_NUMBER_TYPES.has(column) && WHOLE_NUMBER_TYPES.has(key)) ||
+    (TEXT_TYPES.has(column) && TEXT_TYPES.has(key))
+  )
+}

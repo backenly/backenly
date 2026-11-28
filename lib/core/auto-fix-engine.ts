@@ -546,6 +546,12 @@ export async function executeApprovedFix(
   regionUnavailable?: boolean
   /** Nothing changed because rows already in the table break the rule (lib/db/existing-rows.ts). */
   refusedByRows?: boolean
+  /**
+   * Nothing changed because the fix cannot be made as things are, and asking
+   * again will not change that: the executor's code for why (a foreign key
+   * between two columns whose types do not link, lib/ai/fk-repair.ts).
+   */
+  cannotApply?: string
 }> {
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) return { success: false, message: 'Finding not found.' }
@@ -760,6 +766,12 @@ export async function executeApprovedFix(
     const { EXISTING_ROWS_CODES } = await import('@/lib/db/existing-rows')
     if (result.code && EXISTING_ROWS_CODES.has(result.code)) {
       return { success: false, message: result.message, refusedByRows: true }
+    }
+    // A key that cannot be made between these two columns: the executor's own
+    // sentence says which and why, and that is the answer, not a fault.
+    const { KEY_CANNOT_BE_MADE_CODES } = await import('@/lib/ai/fk-repair')
+    if (result.code && KEY_CANNOT_BE_MADE_CODES.has(result.code)) {
+      return { success: false, message: result.message, cannotApply: result.code }
     }
     return { success: false, message: result.error ?? result.message }
   }

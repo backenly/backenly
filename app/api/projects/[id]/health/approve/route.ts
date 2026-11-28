@@ -173,6 +173,13 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
     if (result.refusedByRows) {
       return NextResponse.json({ success: false, error: result.message, code: 'EXISTING_ROWS' }, { status: 409 })
     }
+    // 422 with the executor's code: the fix cannot be made as things are (a
+    // foreign key between a text column and a uuid key, say). Nothing ran
+    // wrong and nothing changed, and asking again gets the same answer, so
+    // the page shows the reason and does not retry. It used to be a 500.
+    if (result.cannotApply) {
+      return NextResponse.json({ success: false, error: result.message, code: result.cannotApply }, { status: 422 })
+    }
     const statusCode = result.regionUnavailable ? 503 : isLockContention ? 409 : needsUserAction ? 422 : 500
     return NextResponse.json({ success: false, error: result.message }, { status: statusCode })
   }

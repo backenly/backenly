@@ -115,9 +115,14 @@ export async function detectFkColumnsMissingConstraints(
   // once and reuse it across every hit. When a table can be inferred the finding
   // is auto-fixable (the loop adds the FK silently); when it can't, it is left
   // for human review rather than pointed at the wrong table.
-  const { buildWorkspaceTableNameMap, resolveReferencedTable, plannedCascadeRule } =
+  const { buildWorkspaceTableNameMap, resolveReferencedTable, plannedCascadeRule, loadWorkspaceColumnTypes, keyCanBeMade } =
     await import('@/lib/ai/fk-repair')
   const tableMap = await buildWorkspaceTableNameMap(projectId).catch(() => new Map<string, string>())
+  // Every column's type. A key is offered only where PostgreSQL could make one:
+  // `user_id text` beside `users.id uuid` was offered on the column's name
+  // alone, and approving it could only fail (production QA, 2026-11-21). A
+  // read that fails is a probe that could not look, so it throws.
+  const columnTypes = await loadWorkspaceColumnTypes(projectId).catch(probeQueryFailed('detectFkColumnsMissingConstraints'))
 
   // Only flag a *_id column as a missing FK when we can name the table it should
   // reference. A `*_id` column with no resolvable local target is not a missing
@@ -132,6 +137,10 @@ export async function detectFkColumnsMissingConstraints(
   return hits.flatMap((r) => {
     const referencedTable = resolveReferencedTable(r.column_name, tableMap, r.table_name) ?? undefined
     if (!referencedTable) return []
+    // Nor is it one when its type cannot be linked to the key it would point
+    // at: there is no constraint to add, only a column to retype, and that is
+    // a change to data its owner asks for, not a gap Backenly found.
+    if (!keyCanBeMade(columnTypes, r.table_name, r.column_name, referencedTable).ok) return []
 
     // State the cascade rule the repair would install, not just "a constraint".
     //
