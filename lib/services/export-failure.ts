@@ -15,6 +15,11 @@ export type ExportFailureCode =
   | 'EXPORT_CONNECTION_FAILED'
   | 'EXPORT_CREDENTIAL'
   | 'EXPORT_PERMISSION_DENIED'
+  | 'EXPORT_TABLE_LOCKED'
+  | 'EXPORT_BUSY'
+  | 'EXPORT_NO_SPACE'
+  | 'EXPORT_TOOK_TOO_LONG'
+  | 'EXPORT_CANCELLED'
   | 'EXPORT_FAILED'
 
 export interface ExportFailure {
@@ -32,6 +37,10 @@ const CONNECTION =
 // "permission denied for table orders", for schema, sequence, view, … The
 // object is the project's own; quoted or not, depending on its name.
 const PERMISSION = /permission denied for (table|schema|sequence|view|materialized view|relation|function) ("(?:[^"]|"")+"|[^\s"]+)/i
+
+// pg_dump takes a lock on every table before it writes anything, and the
+// export gives it a limited time to wait for one (--lock-wait-timeout).
+const LOCKED = /canceling statement due to lock timeout/i
 
 /**
  * The plain cause of a pg_dump run that exited non-zero.
@@ -55,6 +64,13 @@ export function exportFailure(stderr: string, exitCode: number | null): ExportFa
         "Nothing was exported: the export's database role cannot read tables that use row-level security. Set BACKUP_DATABASE_URL to the backup role (see README, Backups).",
     }
   }
+  if (LOCKED.test(stderr)) {
+    return {
+      code: 'EXPORT_TABLE_LOCKED',
+      message:
+        'Nothing was exported: a table is locked by a change that is still running. Try again when it has finished.',
+    }
+  }
   const denied = PERMISSION.exec(stderr)
   if (denied) {
     const name = denied[2].startsWith('"') ? denied[2] : `"${denied[2]}"`
@@ -66,5 +82,47 @@ export function exportFailure(stderr: string, exitCode: number | null): ExportFa
   return {
     code: 'EXPORT_FAILED',
     message: 'Nothing was exported: pg_dump stopped with an error before the dump was complete. Try again in a few minutes.',
+  }
+}
+
+/** Running pg_dump yourself, for a database the download cannot hand over. */
+const OWN_PG_DUMP = 'Run pg_dump yourself with the read-only connection string on this page.'
+
+/**
+ * The plain cause of an export that stopped for a reason other than pg_dump's
+ * own exit (lib/services/database-export.ts): it could not start because
+ * another is running, or the server stopped it.
+ */
+export function exportRefusal(
+  reason: 'project_busy' | 'server_busy' | 'no_space' | 'time' | 'cancelled' | 'spool',
+): ExportFailure {
+  switch (reason) {
+    case 'project_busy':
+      return {
+        code: 'EXPORT_BUSY',
+        message: 'Nothing was exported: another backup of this project is still being made. Try again when it has finished.',
+      }
+    case 'server_busy':
+      return {
+        code: 'EXPORT_BUSY',
+        message: 'Nothing was exported: this server is making other backups right now. Try again in a minute.',
+      }
+    case 'no_space':
+      return {
+        code: 'EXPORT_NO_SPACE',
+        message: `Nothing was exported: this server does not have the free disk space to hold a dump of this database while it is made. ${OWN_PG_DUMP}`,
+      }
+    case 'time':
+      return {
+        code: 'EXPORT_TOOK_TOO_LONG',
+        message: `Nothing was exported: pg_dump ran longer than a download here may take. ${OWN_PG_DUMP}`,
+      }
+    case 'cancelled':
+      return { code: 'EXPORT_CANCELLED', message: 'Nothing was exported: the backup was cancelled before it finished.' }
+    case 'spool':
+      return {
+        code: 'EXPORT_FAILED',
+        message: 'Nothing was exported: this server could not write the dump before sending it. Try again in a few minutes.',
+      }
   }
 }

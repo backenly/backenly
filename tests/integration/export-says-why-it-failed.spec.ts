@@ -9,6 +9,13 @@
  *
  * The real route, with a stand-in pg_dump on PATH that fails the way the real
  * one does, so every cause can be produced on any machine.
+ *
+ * Production QA, 2026-11-27: every export failed, because the route dumped the
+ * region's database after each project had been given a database of its own.
+ * And 2026-11-21: it held the dump in memory, and a large one took the web
+ * task down. The stand-in also says what it was asked to dump, and can fail
+ * late, so both are pinned here: which database is dumped, and that a dump
+ * failing after its download began is cut short, never ended as though whole.
  */
 
 let currentProjectId = ''
@@ -24,24 +31,53 @@ import { randomUUID } from 'crypto'
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { GET as exportGET } from '@/app/api/projects/[id]/export/database/route'
+import { EXPORT_LIMITS, activeExports } from '@/lib/services/database-export'
+import { EXPORT_COMPLETE_LINE } from '@/lib/services/export-completion'
+import { forgetProjectDatabase } from '@/lib/data-plane/regional'
 
 const HOST = 'workspace-db.internal.example'
+const DATA_HOST = 'data-instance.internal.example'
 const ADDRESS = '10.20.30.40'
-const saved = { PATH: process.env.PATH, BACKUP_DATABASE_URL: process.env.BACKUP_DATABASE_URL }
+const saved = {
+  PATH: process.env.PATH,
+  BACKUP_DATABASE_URL: process.env.BACKUP_DATABASE_URL,
+  DATA_BACKUP_DATABASE_URL: process.env.DATA_BACKUP_DATABASE_URL,
+}
+const answerWithinMs = EXPORT_LIMITS.answerWithinMs
 let bin = ''
 let ownerId = ''
 
-/** The stand-in pg_dump writes STANDIN_STDERR to stderr and exits with STANDIN_EXIT. */
-function standIn(stderr: string, exit: number, stdout = ''): void {
+/**
+ * The stand-in pg_dump writes STANDIN_STDOUT to stdout and STANDIN_STDERR to
+ * stderr, then exits with STANDIN_EXIT. It can also write the arguments it was
+ * given (`args`), wait before it finishes (`sleep`, in seconds), and end by a
+ * signal instead of an exit code (`killed`).
+ */
+function standIn(stderr: string, exit: number, stdout = '', also: { args?: boolean; sleep?: number; killed?: boolean } = {}): void {
   process.env.STANDIN_STDERR = stderr
   process.env.STANDIN_STDOUT = stdout
   process.env.STANDIN_EXIT = String(exit)
+  process.env.STANDIN_ARGS = also.args ? '1' : ''
+  process.env.STANDIN_SLEEP = also.sleep ? String(also.sleep) : ''
+  process.env.STANDIN_KILLED = also.killed ? '1' : ''
 }
 
-async function callExport(mode = 'full') {
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 500 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 20))
+  if (!condition()) throw new Error(`Timed out waiting until ${what}`)
+}
+
+/**
+ * One export, read to its end. The route removes an export's file, and lets the
+ * project be exported again, a moment after its answer has been read, so this
+ * waits for that before the next request; `settle: false` is for a request made
+ * while another export is meant to be running.
+ */
+async function callExport(mode = 'full', { settle = true }: { settle?: boolean } = {}) {
   const req = new NextRequest(`http://localhost/api/projects/${currentProjectId}/export/database?mode=${mode}`)
   const res = await exportGET(req)
   const text = await res.text()
+  if (settle) await until(() => activeExports() === 0, 'the export is released')
   return { status: res.status, text, json: (() => { try { return JSON.parse(text) } catch { return null } })() }
 }
 
@@ -50,11 +86,21 @@ beforeAll(async () => {
   bin = fs.mkdtempSync(path.join(os.tmpdir(), 'standin-pg-dump-'))
   fs.writeFileSync(
     path.join(bin, 'pg_dump'),
-    '#!/bin/sh\nprintf "%s" "$STANDIN_STDOUT"\nprintf "%s\\n" "$STANDIN_STDERR" >&2\nexit "$STANDIN_EXIT"\n',
+    [
+      '#!/bin/sh',
+      'printf "%s" "$STANDIN_STDOUT"',
+      'if [ -n "$STANDIN_ARGS" ]; then printf "%s\\n" "$*"; fi',
+      'if [ -n "$STANDIN_SLEEP" ]; then sleep "$STANDIN_SLEEP"; fi',
+      'printf "%s\\n" "$STANDIN_STDERR" >&2',
+      'if [ -n "$STANDIN_KILLED" ]; then kill -KILL $$; fi',
+      'exit "$STANDIN_EXIT"',
+      '',
+    ].join('\n'),
   )
   fs.chmodSync(path.join(bin, 'pg_dump'), 0o755)
   process.env.PATH = `${bin}${path.delimiter}${saved.PATH ?? ''}`
   process.env.BACKUP_DATABASE_URL = `postgresql://backenly_backup:not-a-real-password@${HOST}:5432/backenly?sslmode=require`
+  process.env.DATA_BACKUP_DATABASE_URL = `postgresql://backenly_backup:not-a-real-password@${DATA_HOST}:5432/postgres?sslmode=require`
 
   ownerId = (await prisma.user.create({ data: { email: `export-why-${randomUUID()}@test.invalid`, name: 'export' }, select: { id: true } })).id
   currentProjectId = (await prisma.project.create({ data: { name: 'export-why', userId: ownerId }, select: { id: true } })).id
@@ -65,9 +111,8 @@ afterAll(async () => {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
   }
-  delete process.env.STANDIN_STDERR
-  delete process.env.STANDIN_STDOUT
-  delete process.env.STANDIN_EXIT
+  for (const name of ['STDERR', 'STDOUT', 'EXIT', 'ARGS', 'SLEEP', 'KILLED']) delete process.env[`STANDIN_${name}`]
+  EXPORT_LIMITS.answerWithinMs = answerWithinMs
   fs.rmSync(bin, { recursive: true, force: true })
   await prisma.project.deleteMany({ where: { id: currentProjectId } }).catch(() => {})
   await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
@@ -136,4 +181,159 @@ it('still hands over the dump when pg_dump finishes', async () => {
   const res = await callExport('schema')
   expect(res.status).toBe(200)
   expect(res.text).toContain('CREATE TABLE public.kept')
+})
+
+it('says a table is locked when pg_dump gave up waiting for one, having been told how long to wait', async () => {
+  standIn(
+    'pg_dump: error: query failed: ERROR:  canceling statement due to lock timeout\npg_dump: detail: Query was: LOCK TABLE public.orders IN ACCESS SHARE MODE',
+    1,
+  )
+  const res = await callExport()
+  expect(res.status).toBe(503)
+  expect(res.json).toEqual({
+    code: 'EXPORT_TABLE_LOCKED',
+    error: 'Nothing was exported: a table is locked by a change that is still running. Try again when it has finished.',
+  })
+
+  standIn('', 0, '', { args: true })
+  expect((await callExport()).text).toContain(`--lock-wait-timeout=${EXPORT_LIMITS.lockWaitMs}`)
+})
+
+it('does not call a pg_dump that was killed one that is not there', async () => {
+  standIn('', 0, 'CREATE TABLE public.half', { killed: true })
+  const res = await callExport()
+  expect(res.status).toBe(503)
+  expect(res.json?.code).toBe('EXPORT_FAILED')
+})
+
+describe('which database is dumped', () => {
+  const OWN_DATABASE = `p_${randomUUID().replace(/-/g, '')}`
+
+  afterAll(async () => {
+    await prisma.project.update({
+      where: { id: currentProjectId },
+      data: { databaseTenancy: 'shared', databaseName: null, databaseInstance: null },
+    })
+    forgetProjectDatabase(currentProjectId)
+  })
+
+  it("is the region's, with the project's schema, for a project without a database of its own", async () => {
+    standIn('', 0, '', { args: true })
+    const res = await callExport()
+    expect(res.status).toBe(200)
+    expect(res.text).toContain(`--host ${HOST} `)
+    expect(res.text).toContain('--dbname backenly ')
+    expect(res.text).toContain(`--schema=workspace_${currentProjectId} `)
+  })
+
+  // Production QA, 2026-11-27: the route asked the region's database for the
+  // schema of a project whose data had moved to a database of its own, and
+  // pg_dump found no such schema, for every project.
+  it("is the project's own, on its region's data instance, once it has one", async () => {
+    await prisma.project.update({
+      where: { id: currentProjectId },
+      data: { databaseTenancy: 'dedicated', databaseName: OWN_DATABASE, databaseInstance: 'primary', tenancyEpoch: { increment: 1 } },
+    })
+    forgetProjectDatabase(currentProjectId)
+
+    standIn('', 0, '', { args: true })
+    for (const mode of ['full', 'schema', 'data']) {
+      const res = await callExport(mode)
+      expect(res.status).toBe(200)
+      expect(res.text).toContain(`--host ${DATA_HOST} `)
+      expect(res.text).toContain(`--dbname ${OWN_DATABASE} `)
+      expect(res.text).toContain(`--schema=workspace_${currentProjectId} `)
+      expect(res.text).not.toContain(HOST)
+      expect(res.text).not.toContain('--dbname backenly')
+    }
+  })
+})
+
+describe('a dump is whole or it is not handed over', () => {
+  afterEach(async () => {
+    EXPORT_LIMITS.answerWithinMs = answerWithinMs
+    await until(() => activeExports() === 0, 'no export is left running')
+  })
+
+  it('gives the length of a finished dump, which ends with the line that says it is whole', async () => {
+    standIn('', 0, 'CREATE TABLE public.kept (id integer);\n')
+    const req = new NextRequest(`http://localhost/api/projects/${currentProjectId}/export/database?mode=schema`)
+    const res = await exportGET(req)
+    const body = Buffer.from(await res.arrayBuffer())
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-length')).toBe(String(body.length))
+    expect(body.toString('utf8').trimEnd().endsWith(EXPORT_COMPLETE_LINE)).toBe(true)
+  })
+
+  it('refuses a dump that failed, with nothing of it in the answer, however much pg_dump had written', async () => {
+    standIn('pg_dump: error: query failed: ERROR:  canceling statement due to conflict with recovery', 1, 'CREATE TABLE public.half (id integer);\n')
+    const res = await callExport()
+    expect(res.status).toBe(503)
+    expect(res.json?.code).toBe('EXPORT_FAILED')
+    expect(res.text).not.toContain('CREATE TABLE')
+    expect(res.text).not.toContain(EXPORT_COMPLETE_LINE)
+  })
+
+  // A dump still running after the wait begins to download, so that a proxy
+  // does not give up on it. If pg_dump fails after that, the body fails: the
+  // server cuts the connection, and no client is left with a whole-looking file.
+  it('cuts the download short when pg_dump fails after it began', async () => {
+    EXPORT_LIMITS.answerWithinMs = 200
+    standIn(
+      'pg_dump: error: query failed: ERROR:  canceling statement due to conflict with recovery',
+      1,
+      'CREATE TABLE public.half (id integer);\n',
+      { sleep: 2 },
+    )
+    const req = new NextRequest(`http://localhost/api/projects/${currentProjectId}/export/database`)
+    const res = await exportGET(req)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-length')).toBeNull()
+    // The body fails with the export's own error, or with one that carries it.
+    const failure = await res.text().then(
+      () => null,
+      (err: { code?: string; cause?: { code?: string } }) => err,
+    )
+    expect(failure).not.toBeNull()
+    expect([failure?.code, failure?.cause?.code]).toContain('EXPORT_INTERRUPTED')
+  })
+
+  it('hands over a dump that finishes after its download began, whole', async () => {
+    EXPORT_LIMITS.answerWithinMs = 200
+    standIn('', 0, 'CREATE TABLE public.kept (id integer);\n', { sleep: 1 })
+    const req = new NextRequest(`http://localhost/api/projects/${currentProjectId}/export/database`)
+    const res = await exportGET(req)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-length')).toBeNull()
+    const text = await res.text()
+    expect(text).toContain('CREATE TABLE public.kept')
+    expect(text.trimEnd().endsWith(EXPORT_COMPLETE_LINE)).toBe(true)
+  })
+
+  it('makes one backup of a project at a time', async () => {
+    standIn('', 0, 'CREATE TABLE public.kept (id integer);\n', { sleep: 1 })
+    const first = callExport()
+    await until(() => activeExports() === 1, 'the first export is running')
+
+    const second = await callExport('full', { settle: false })
+    expect(second.status).toBe(429)
+    expect(second.json).toEqual({
+      code: 'EXPORT_BUSY',
+      error: 'Nothing was exported: another backup of this project is still being made. Try again when it has finished.',
+    })
+    expect((await first).status).toBe(200)
+  })
+
+  it('stops pg_dump when whoever asked has gone', async () => {
+    standIn('', 0, 'CREATE TABLE public.kept (id integer);\n', { sleep: 5 })
+    const gone = new AbortController()
+    const req = new NextRequest(`http://localhost/api/projects/${currentProjectId}/export/database`, { signal: gone.signal })
+    const answer = exportGET(req)
+    await until(() => activeExports() === 1, 'the export is running')
+    gone.abort()
+    const res = await answer
+    expect(res.status).toBe(503)
+    expect((await res.json()).code).toBe('EXPORT_CANCELLED')
+    expect(activeExports()).toBe(0)
+  })
 })
