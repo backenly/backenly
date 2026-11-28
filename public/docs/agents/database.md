@@ -26,6 +26,8 @@ Every table lives in the project's own PostgreSQL schema. Structure changes only
 
 `set_rls` takes the policy as **exact SQL**, one rule per command. Predicates are installed verbatim and read back from `pg_policies` before it reports success. It is idempotent, and commands you do not name are left as they were. Predicates may reach a parent row through `EXISTS (SELECT 1 FROM parent p WHERE p.id = child.parent_id AND …)`; the end-user is `backenly_jwt_claim('sub')`.
 
+No rule lets a signed-out caller write. A publishable key writes nothing without an end-user's `X-User-Token`, whatever the table's rules say, so an insert rule of `true` lets every signed-in user insert and nobody else. `set_rls` with `role: "anon"` therefore takes `select` only and refuses the rest. For a write from someone who is not signed in (a page view, a contact form), deploy a function that does the write and call it from the app.
+
 Use `set_rls` whenever you can write the predicate. Describing a policy to a model means it is re-derived rather than applied, and a re-derived predicate can come back more permissive. When you cannot write it, the named templates are reached through `add_rls` via `backend_chat` ("lock messages down so only the conversation's participants can read them"): `auto`, `owner_read_write`, `participants` (two or more user columns), `owned_via_parent`, `public_read`, `org_members`, `admin_only`, `admin_read_all`, `role_based`, `moderator_access`, `all_access` and `custom`. An unrecognised template is refused with the real list.
 
 ## Types
