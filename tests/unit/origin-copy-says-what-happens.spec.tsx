@@ -18,14 +18,24 @@ const HEALTH = {
   totals: { failures24h: 0, failures1h: 0, bootstraps24h: 0, distinctOriginsFailing: 0, distinctOriginsConnected: 0 },
   summaryText: '',
 }
-const APPS = {
-  apps: [{ id: 'a1', origin: 'https://shop.example', isActive: true, connectedBy: 'u1', backendVersion: 1, connectedAt: new Date().toISOString(), disconnectedAt: null }],
-}
+const app = (origin: string, isActive = true) => ({
+  id: origin,
+  origin,
+  isActive,
+  connectedBy: 'u1',
+  backendVersion: 1,
+  connectedAt: new Date().toISOString(),
+  disconnectedAt: null,
+})
+const BLOCKED = 'Browsers on other sites are blocked. Servers and mobile apps are not affected.'
+const OPEN = /^Any website can still call the API: only development addresses are listed, and those never limit it\. Add your app’s real address to block browsers on other sites\.$/
+let origins: Array<ReturnType<typeof app>>
 
 beforeEach(() => {
+  origins = [app('https://shop.example')]
   global.fetch = jest.fn((input: RequestInfo | URL) => {
     const path = String(input).split('?')[0]
-    const body = path.endsWith('/connection-health') ? HEALTH : path.endsWith('/connected-apps') ? APPS : {}
+    const body = path.endsWith('/connection-health') ? HEALTH : path.endsWith('/connected-apps') ? { apps: origins } : {}
     return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)
   }) as unknown as typeof fetch
 })
@@ -43,6 +53,29 @@ it('says a request without an Origin failed its key check, in a sentence that ag
 
 it('says the allowlist binds browsers, not every caller', async () => {
   await renderCards()
-  expect(screen.getByText('Browsers on other sites are blocked. Servers and mobile apps are not affected.')).toBeInTheDocument()
+  expect(screen.getByText(BLOCKED)).toBeInTheDocument()
   expect(screen.queryByText(/Only these origins can call/)).toBeNull()
+})
+
+// Production QA, 2026-11-27: with http://localhost:5173 the only allowed
+// origin the page said other sites are blocked, and a call from
+// https://evil.example was answered with its own origin allowed. Development
+// origins never make the list exclusive (lib/security/development-origin.ts),
+// and the page now says what the API does.
+it.each([
+  ['a dev server on localhost', ['http://localhost:5173']],
+  ['a dev server and a LAN address', ['http://localhost:5173', 'http://192.168.1.20:3000']],
+  ['a development origin beside a removed real one', ['http://localhost:5173']],
+])('says any website can still call the API while the list holds only %s', async (_name, listed) => {
+  origins = [...listed.map((o) => app(o)), app('https://old.example', false)]
+  await renderCards()
+  expect(screen.getByText(OPEN)).toBeInTheDocument()
+  expect(screen.queryByText(BLOCKED)).toBeNull()
+})
+
+it('says other sites are blocked once a real address is on the list beside the development ones', async () => {
+  origins = [app('http://localhost:5173'), app('https://shop.example')]
+  await renderCards()
+  expect(screen.getByText(BLOCKED)).toBeInTheDocument()
+  expect(screen.queryByText(OPEN)).toBeNull()
 })
