@@ -59,6 +59,18 @@ it('answers 409 with the plain sentence and EXISTING_ROWS when rows already in t
   expect(await approveF1()).toEqual({ status: 409, body: { success: false, error: REFUSAL, code: 'EXISTING_ROWS' } })
 })
 
+// Production QA (2026-11-21, again 2026-11-27): a key offered between
+// reviews.user_id (text) and users.id (uuid), which PostgreSQL cannot make,
+// answered 500 four times. The repair now says why in a sentence, and the
+// approval hands that over as a refusal the page shows and does not retry.
+it('answers 422 with the plain sentence and its code when the fix cannot be made as things are', async () => {
+  const sentence =
+    '"reviews"."user_id" is text and "users"."id" is uuid, and PostgreSQL cannot link columns of those two types ' +
+    "with a foreign key, so none was added and nothing changed. To link them, change the column's type to uuid first."
+  mockOutcome.result = { success: false, message: sentence, cannotApply: 'INCOMPATIBLE_TYPES' }
+  expect(await approveF1()).toEqual({ status: 422, body: { success: false, error: sentence, code: 'INCOMPATIBLE_TYPES' } })
+})
+
 it('still answers 500 for a failure that is not about the rows', async () => {
   mockOutcome.result = { success: false, message: 'Execution failed: connection reset' }
   const out = await approveF1()
