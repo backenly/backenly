@@ -401,7 +401,9 @@ export async function checkBuildBudget(projectId: string): Promise<BudgetResult>
       return {
         allowed: false,
         remaining: 0,
-        blockedReason: `Hourly mutation budget reached (${MAX_OPS_PER_HOUR} operations/hour). Try again in a few minutes.`,
+        // "budget" stays in the sentence: callers tell a paced change from a
+        // failed one by it (lib/ai/build-runtime/mutate.ts, lib/core/auto-fix-engine.ts).
+        blockedReason: `Hourly change budget reached (${MAX_OPS_PER_HOUR} changes an hour). Try again in a few minutes.`,
       }
     }
 
@@ -424,7 +426,8 @@ export async function checkBuildBudget(projectId: string): Promise<BudgetResult>
         return {
           allowed: false,
           remaining: MAX_OPS_PER_HOUR - recentCount,
-          blockedReason: `Cooldown active — wait ${waitSec}s before the next mutation.`,
+          // "Cooldown" stays in the sentence, for the same callers.
+          blockedReason: `Cooldown: a change to this project finished moments ago. Try again in ${waitSec}s.`,
         }
       }
     }

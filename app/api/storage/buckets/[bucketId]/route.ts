@@ -69,6 +69,8 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ bu
           action:         `delete_bucket_${bucketRecord.name}`,
           auditAction:    'STORAGE_DELETE_BUCKET',
           snapshotBefore: false,  // storage bucket deletions don't need schema snapshots
+          // The console's own request: not paced like a change Backenly makes itself.
+          byPerson:       true,
         },
         () => storageService.deleteBucket(params.bucketId, projectId),
       )
@@ -155,6 +157,10 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ buc
           kind:        'storage',
           action:      'update_bucket_settings',
           auditAction: 'STORAGE_UPDATE_BUCKET',
+          // The console's own request. It was refused "Cooldown active — wait
+          // 85s before the next mutation" straight after a publish, and again a
+          // minute after the person's own previous change.
+          byPerson:    true,
         },
         async () => {
           return prisma.storageBucket.update({

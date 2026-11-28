@@ -45,6 +45,9 @@ export async function POST(
         // applyApproval already takes its own pre-fix snapshot internally;
         // no second snapshot needed here.
         snapshotBefore: false,
+        // A person's approval, which is not paced like a change Backenly
+        // makes on its own (as executeApprovedFix is not).
+        byPerson: true,
       },
       () => applyApproval(projectId, params.findingId),
     )

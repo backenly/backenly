@@ -472,4 +472,34 @@ describe('changing who may upload', () => {
     expect(bad.body.error).toContain('signed_in')
     expect((await bucket('products'))?.uploadPolicy).toBe('signed_in')
   }, 60_000)
+
+  // Production QA, 2026-11-21 and again 2026-11-27: a bucket's settings were
+  // refused in the console with "Cooldown active — wait 85s before the next
+  // mutation", first because a publish and an approval had just run, then a
+  // minute after the person's own previous change. The two-minute wait and the
+  // hourly budget space out the changes Backenly makes on its own; a person's
+  // change waits for the project's lock and nothing else.
+  it('is taken from a person straight after another change, while a change nobody asked for in person still waits', async () => {
+    const products = await bucket('products')
+    const { PATCH } = await import('@/app/api/storage/buckets/[bucketId]/route')
+    const { runMutation } = await import('@/lib/ai/build-runtime/mutate')
+    const patch = async (body: unknown) =>
+      answer(await PATCH(consoleReq('PATCH', `/api/storage/buckets/${products!.id}`, body), { params: Promise.resolve({ bucketId: products!.id }) }))
+
+    // One after the other, the second seconds after the first.
+    expect((await patch({ uploads: 'server_only' })).status).toBe(200)
+    expect((await patch({ uploads: 'signed_in' })).status).toBe(200)
+    expect((await bucket('products'))?.uploadPolicy).toBe('signed_in')
+
+    // The pacing is still there for what it is for, and says so without the
+    // word a person was shown.
+    const paced = await runMutation({ projectId, kind: 'storage', action: 'paced_probe' }, async () => 'ran')
+    expect(paced).toMatchObject({ ok: false, budgetExceeded: true })
+    expect(paced.error).toMatch(/^Cooldown: a change to this project finished moments ago\. Try again in \d+s\.$/)
+    expect(paced.error).not.toMatch(/mutation/i)
+
+    // And inside that same wait, a person's change is taken.
+    expect((await patch({ uploads: 'server_only' })).status).toBe(200)
+    expect(await runMutation({ projectId, kind: 'storage', action: 'person_probe', byPerson: true }, async () => 'ran')).toEqual({ ok: true, data: 'ran' })
+  }, 120_000)
 })
