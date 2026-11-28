@@ -39,7 +39,8 @@ import { inferRlsPlan, type RlsPlan } from '@/lib/services/rls-ownership'
 import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
 import { purgeAgainLater } from '@/lib/services/check-account-cleanup'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
-import { loadCheckConstraintValues, loadFkColumnMappings } from '../behavioral-verifier'
+import { loadFkColumnMappings } from '../behavioral-verifier'
+import { chooseCheckedValues, loadTableChecks, ownChecks, type TableCheck } from '../checked-values'
 import type { EndpointTestResult } from './verifier'
 
 /** Where the test sends its requests, and how long each may take. */
@@ -65,9 +66,12 @@ interface Column {
   name: string
   /** pg_type.typname: uuid, int4, text, timestamptz, an enum's own name… */
   typeName: string
+  /** format_type(): the type as SQL names it, for a cast. */
+  sqlType: string
   /** pg_type.typcategory: S string, N numeric, B boolean, D date/time, A array, E enum, U other. */
   category: string
-  typeOid: number
+  /** An enum's labels, in order; null for any other type. */
+  enumLabels: string[] | null
   maxLength: number | null
   notNull: boolean
   hasDefault: boolean
@@ -79,10 +83,14 @@ interface Column {
 async function loadColumns(projectId: string, schema: string, table: string): Promise<Column[] | null> {
   const db = await workspaceRawClient(projectId)
   const rows = await db.$queryRawUnsafe<Array<{
-    name: string; type_name: string; category: string; type_oid: number | bigint
+    name: string; type_name: string; sql_type: string; category: string; enum_labels: string[] | null
     max_length: number | null; not_null: boolean; has_default: boolean; database_filled: boolean
   }>>(
-    `SELECT a.attname AS name, t.typname AS type_name, t.typcategory AS category, a.atttypid::bigint AS type_oid,
+    `SELECT a.attname AS name, t.typname AS type_name, format_type(a.atttypid, a.atttypmod) AS sql_type,
+            t.typcategory AS category,
+            CASE WHEN t.typtype = 'e' THEN
+              (SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid)
+            END AS enum_labels,
             CASE WHEN t.typcategory = 'S' AND a.atttypmod > 4 THEN a.atttypmod - 4 END AS max_length,
             a.attnotnull AS not_null, a.atthasdef AS has_default,
             (a.attidentity <> '' OR a.attgenerated <> '') AS database_filled
@@ -99,8 +107,9 @@ async function loadColumns(projectId: string, schema: string, table: string): Pr
   return rows.map((r) => ({
     name: r.name,
     typeName: r.type_name,
+    sqlType: r.sql_type,
     category: r.category,
-    typeOid: Number(r.type_oid),
+    enumLabels: r.enum_labels,
     maxLength: r.max_length === null ? null : Number(r.max_length),
     notNull: r.not_null,
     hasDefault: r.has_default,
@@ -122,22 +131,13 @@ async function primaryKey(projectId: string, schema: string, table: string): Pro
   return rows.map((r) => r.name)
 }
 
-async function firstEnumLabel(projectId: string, typeOid: number): Promise<string | undefined> {
-  const db = await workspaceRawClient(projectId)
-  const rows = await db.$queryRawUnsafe<Array<{ label: string }>>(
-    `SELECT enumlabel AS label FROM pg_enum WHERE enumtypid = $1::bigint::oid ORDER BY enumsortorder LIMIT 1`,
-    typeOid,
-  )
-  return rows[0]?.label
-}
-
 /**
  * A value of the column's type. Text is unique to this run, so a UNIQUE column
  * does not refuse it because an earlier test left the same value.
  */
-async function sampleValue(projectId: string, col: Column, tag: string): Promise<unknown> {
+function sampleValue(col: Column, tag: string): unknown {
   const type = col.typeName
-  if (col.category === 'E') return firstEnumLabel(projectId, col.typeOid)
+  if (col.category === 'E') return col.enumLabels?.[0]
   if (col.category === 'B') return true
   if (col.category === 'N') return 1
   if (col.category === 'A') return []
@@ -158,6 +158,58 @@ async function sampleValue(projectId: string, col: Column, tag: string): Promise
       ? `https://example.com/${tag}`
       : `brain-verify-${col.name}-${tag}`
   return col.maxLength ? text.slice(0, col.maxLength) : text
+}
+
+/** A value PostgreSQL gave as text, as the JSON a request body carries for the column. */
+function bodyValue(col: Column, text: string): unknown {
+  if (col.category === 'N') {
+    const n = Number(text)
+    return Number.isFinite(n) ? n : text
+  }
+  if (col.category === 'B') return text === 'true'
+  if (col.typeName === 'json' || col.typeName === 'jsonb') {
+    try {
+      return JSON.parse(text)
+    } catch {
+      return text
+    }
+  }
+  // The test tries an empty array and an array of one element.
+  if (col.category === 'A') return text === '{}' ? [] : [text.slice(1, -1)]
+  return text
+}
+
+/**
+ * The value a required column gets. Under CHECK rules of its own it is one
+ * PostgreSQL says they accept (lib/ai/checked-values.ts). It used to be the
+ * first quoted text in the rule, which for a pattern is the pattern, and a
+ * rule with no quoted text, a range say, was not read at all, so the insert
+ * failed on the test's own value. Otherwise it is a value of the column's type.
+ */
+async function requiredValue(
+  projectId: string,
+  table: string,
+  col: Column,
+  checks: TableCheck[],
+  tag: string,
+): Promise<{ value: unknown } | { cannot: string }> {
+  const rules = ownChecks(col.name, checks)
+  if (rules.length === 0) return { value: sampleValue(col, tag) }
+  const chosen = await chooseCheckedValues(
+    projectId,
+    [{ name: col.name, type: col.sqlType, typname: col.typeName, category: col.category, enumLabels: col.enumLabels }],
+    checks,
+    tag,
+  )
+  const text = chosen.get(col.name)
+  if (text === null || text === undefined) {
+    return {
+      cannot:
+        `none of the values the test tries for "${table}"."${col.name}" is allowed by its CHECK ` +
+        rules.map((r) => `"${r.name}"`).join(', '),
+    }
+  }
+  return { value: bodyValue(col, text) }
 }
 
 /**
@@ -206,7 +258,7 @@ type Built =
 async function buildRow(target: CreateTestTarget, columns: Column[], userId: string | null, tag: string): Promise<Built> {
   const { projectId, schema, tableName } = target
   const [checks, references, plan] = await Promise.all([
-    loadCheckConstraintValues(projectId, schema, tableName),
+    loadTableChecks(projectId, schema, tableName),
     loadFkColumnMappings(projectId, schema, tableName),
     planOf(projectId, schema, tableName),
   ])
@@ -245,7 +297,9 @@ async function buildRow(target: CreateTestTarget, columns: Column[], userId: str
       continue
     }
     if (!required) continue
-    row[col.name] = checks[col.name] ?? (await sampleValue(projectId, col, tag))
+    const value = await requiredValue(projectId, tableName, col, checks, tag)
+    if ('cannot' in value) return { cannot: value.cannot, parents }
+    row[col.name] = value.value
   }
   return { row, parents }
 }
@@ -265,7 +319,7 @@ async function insertParent(
   const columns = await loadColumns(projectId, schema, parentTable)
   if (!columns) return { cannot: `the table it references, "${parentTable}", could not be read` }
   const [checks, references, plan] = await Promise.all([
-    loadCheckConstraintValues(projectId, schema, parentTable),
+    loadTableChecks(projectId, schema, parentTable),
     loadFkColumnMappings(projectId, schema, parentTable),
     planOf(projectId, schema, parentTable),
   ])
@@ -280,7 +334,9 @@ async function insertParent(
     } else if (required && reference) {
       return { cannot: `its parent "${parentTable}" needs a row in "${reference.foreignTable}" first, and the test builds one level only` }
     } else if (required) {
-      row[col.name] = checks[col.name] ?? (await sampleValue(projectId, col, tag))
+      const value = await requiredValue(projectId, parentTable, col, checks, tag)
+      if ('cannot' in value) return { cannot: `no row could be built for its parent "${parentTable}": ${value.cannot}` }
+      row[col.name] = value.value
     }
   }
   try {

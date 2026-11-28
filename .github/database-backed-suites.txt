@@ -2516,6 +2516,12 @@ tests/integration/row-event-check-writes-nothing.spec.ts
 # them (an audit row, a profile). Real provisioned project, users table,
 # capture triggers, customer triggers and verifier.
 tests/integration/verifier-database-checks-write-nothing.spec.ts
+# A test row carries values PostgreSQL says the column's CHECK rules accept: a
+# store whose rating must be 1 to 5 is not failed by Backenly's own row, a
+# table the test cannot build a row for is passed over and named, tables are
+# tried in name order, and a table no row at all can be written to still
+# fails. Real provisioned project, users table and verifier.
+tests/integration/verifier-meets-check-rules.spec.ts
 # Every error an app can get carries a top-level code and message, and /api/v2
 # answers in PostgREST's shape: the errors Next writes itself (the body-size
 # limit in middleware.ts, the v2 route's own refusals, a stored file's public
