@@ -35,6 +35,17 @@ export interface MutationOptions {
   emitRefresh?:    boolean    // emit schema.changed for UI sync (default: true)
   auditAction?:    string     // override AuditLog action string (defaults to KIND_ACTION)
   title?:          string     // what the change history calls it (defaults to the action, in words)
+  /**
+   * A change a signed-in person asks for in the console. It waits its turn for
+   * the project's lock like any other, and is not paced: the hourly budget and
+   * the two-minute cooldown are there to space out the changes Backenly makes
+   * on its own (builds, automatic fixes), and a person changing a bucket's
+   * settings was refused for two minutes because a publish and an approval
+   * had just run (production QA, 2026-11-21 and 2026-11-27). An approved fix
+   * already skips them for the same reason (lib/core/auto-fix-engine.ts,
+   * executeApprovedFix).
+   */
+  byPerson?:       boolean
 }
 
 /** 'delete_bucket' → 'Delete bucket'. */
@@ -153,7 +164,7 @@ export async function runMutation<T>(
     }
 
     return data
-  })
+  }, { skipCooldown: opts.byPerson === true })
 
   // ── Interpret lock result ─────────────────────────────────────────────────
   if (lockResult.error) {
