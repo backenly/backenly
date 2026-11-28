@@ -525,10 +525,12 @@ echo "logs"
 for mode in session transaction; do
   logs="$(docker logs "pooler-$mode-$TAG" 2>&1)"
   grep -q "pooler: $mode pooling on port" <<< "$logs" && ok "$mode: the start line names the mode" || fail "$mode: no start line"
-  grep -q "pooler: serving 2 project database(s)" <<< "$logs" && ok "$mode: the start listed the two project databases" ||
+  # Three with an active login when the poolers start: the customer's, the
+  # other project's, and the one whose login is limited to 2 connections.
+  grep -q "pooler: serving 3 project database(s)" <<< "$logs" && ok "$mode: the start listed the three project databases" ||
     fail "$mode: the project database list was not logged at start"
   found=0
-  for value in "$AUTH_PW" "$LOGIN_PW" "$(sed -n 2p "$WORK/pooler.key")" "$(sed -n 2p "$WORK/pooler.pem")"; do
+  for value in "$AUTH_PW" "$LOGIN_PW" "$LIMITED_PW" "$(sed -n 2p "$WORK/pooler.key")" "$(sed -n 2p "$WORK/pooler.pem")"; do
     if grep -qF -- "$value" <<< "$logs"; then found=1; fi
   done
   [ "$found" = 0 ] && ok "$mode: no secret in the logs" || fail "$mode: a secret value appears in the logs"
