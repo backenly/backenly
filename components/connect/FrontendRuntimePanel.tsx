@@ -7,6 +7,8 @@
  *   [https://your-app.vercel.app                                   ] [Add]
  *   https://movienight.app       Added Nov 9                                 ⋯
  *   Browsers on other sites are blocked. Servers and mobile apps are not affected.
+ *   (With only development addresses listed: Any website can still call the
+ *   API … Add your app's real address to block browsers on other sites.)
  *
  *   Browser requests                                            Last 24 hours
  *   ● movienight.app       214 requests   Last 3 min ago
@@ -34,6 +36,7 @@ import { formatTime } from '@/components/console/format'
 import { sharedRead } from '@/lib/client/shared-read'
 import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import type { ConnectionHealth } from '@/lib/hooks/useConnectionHealth'
+import { allowsAnyOrigin } from '@/lib/security/development-origin'
 
 /** An origin bound to this backend on purpose (versioned, audit-logged). */
 interface ConnectedApp {
@@ -142,6 +145,11 @@ function AllowedOrigins({ projectId }: { projectId: string }) {
   }
 
   const active = apps.filter((a) => a.isActive)
+  // The rule the API itself applies (middleware.ts): development origins never
+  // make the list exclusive, so with only those on it every site is admitted.
+  // The page said "Browsers on other sites are blocked" for any list at all,
+  // while a call from another site was answered (production QA, 2026-11-27).
+  const anySiteMayCall = allowsAnyOrigin(active.map((a) => a.origin))
   const canAdd = role.canWrite
   const canRemove = role.canAdminister
 
@@ -219,7 +227,9 @@ function AllowedOrigins({ projectId }: { projectId: string }) {
       </Panel>
       {active.length > 0 && (
         <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
-          Browsers on other sites are blocked. Servers and mobile apps are not affected.
+          {anySiteMayCall
+            ? 'Any website can still call the API: only development addresses are listed, and those never limit it. Add your app’s real address to block browsers on other sites.'
+            : 'Browsers on other sites are blocked. Servers and mobile apps are not affected.'}
         </p>
       )}
 
