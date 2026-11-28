@@ -21,6 +21,7 @@ import os from 'os'
 import path from 'path'
 
 import { CLOUD_REGIONS } from '@/lib/regions'
+import { poolerPortShares } from '@/lib/data-plane/pooler-shares'
 
 const ROOT = process.cwd()
 const read = (file: string) => fs.readFileSync(path.join(ROOT, file), 'utf8')
@@ -309,17 +310,65 @@ describe('the pooler entrypoint lists', () => {
     ])
   })
 
-  it("each database's pool sized to its logins' connection limit when the list gives one", () => {
-    const result = databases(`p_${hex('c')}|2\np_${hex('d')}|\np_${hex('e')}|20\n`)
-    expect(result.stderr).toBe('')
-    expect(result.status).toBe(0)
+  // Production QA, 2026-11-27: each pooler sized a database's pool to its
+  // logins' whole connection limit, so two closed sessions on port 5432 left
+  // the limit spent and port 6543 refused the same login for a minute. Each
+  // now takes a share, and the two shares are never more than the limit.
+  describe("each database's pool sized to this pooler's share of its logins' connection limit", () => {
     const line = (c: string, size: string) =>
       `p_${hex(c)} = host=db.example.internal port=5432 dbname=p_${hex(c)}${size} ` +
       `auth_query='SELECT usename, passwd FROM backenly_pooler.lookup($1, ''p_${hex(c)}'')'`
-    expect(entries(result.stdout)).toEqual(['[databases]', line('c', ' pool_size=2'), line('d', ''), line('e', ' pool_size=20')])
+    const listed = `p_${hex('a')}|1\np_${hex('c')}|2\np_${hex('d')}|\np_${hex('e')}|5\np_${hex('f')}|20\n`
+
+    it('half of it for sessions', () => {
+      const result = databases(listed, valid({ POOLER_MODE: 'session' }))
+      expect(result.stderr).toBe('')
+      expect(result.status).toBe(0)
+      expect(entries(result.stdout)).toEqual([
+        '[databases]',
+        line('a', ' pool_size=1'),
+        line('c', ' pool_size=1'),
+        line('d', ''),
+        line('e', ' pool_size=2'),
+        line('f', ' pool_size=10'),
+      ])
+    })
+
+    it('the rest of it for transactions', () => {
+      const result = databases(listed, valid({ POOLER_MODE: 'transaction' }))
+      expect(result.stderr).toBe('')
+      expect(result.status).toBe(0)
+      expect(entries(result.stdout)).toEqual([
+        '[databases]',
+        line('a', ' pool_size=1'),
+        line('c', ' pool_size=1'),
+        line('d', ''),
+        line('e', ' pool_size=3'),
+        line('f', ' pool_size=10'),
+      ])
+    })
+
+    it('by the rule Connect tells a person, for every limit a plan can give', () => {
+      const poolSizes = (mode: string, limits: number[]) => {
+        const input = limits.map((limit, i) => `p_${i.toString(16).padStart(32, '0')}|${limit}`).join('\n') + '\n'
+        const result = databases(input, valid({ POOLER_MODE: mode }))
+        expect(result.status).toBe(0)
+        return entries(result.stdout).slice(1).map((l) => Number(/ pool_size=(\d+) /.exec(l)?.[1]))
+      }
+      const limits = Array.from({ length: 40 }, (_, i) => i + 1)
+      const session = poolSizes('session', limits)
+      const transaction = poolSizes('transaction', limits)
+      limits.forEach((limit, i) => {
+        expect({ limit, ...poolerPortShares(limit) }).toEqual({ limit, session: session[i], transaction: transaction[i] })
+        // Together they are the limit, never more: a limit of 1 cannot be shared.
+        expect(session[i] + transaction[i]).toBe(limit === 1 ? 2 : limit)
+        expect(session[i]).toBeGreaterThanOrEqual(1)
+        expect(transaction[i]).toBeGreaterThanOrEqual(session[i])
+      })
+    })
   })
 
-  it.each([['0'], ['-1'], ['02'], ['1001'], ['5 '], ['x']])('refuses the whole list for a pool size of %j', (size) => {
+  it.each([['0'], ['-1'], ['02'], ['1001'], ['5 '], ['x']])('refuses the whole list for a connection limit of %j', (size) => {
     const result = databases(`p_${hex('a')}|1\np_${hex('b')}|${size}\n`)
     expect(result.status).not.toBe(0)
     expect(result.stdout).not.toContain('[databases]')

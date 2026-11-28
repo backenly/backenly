@@ -28,6 +28,7 @@ jest.mock('@cloud/control-plane', () => ({ CLOUD_CONTROL_PLANE: true }))
 import { DirectDatabasePanel } from '@/components/connect/DirectDatabasePanel'
 import { forgetProjectReads } from '@/lib/api/projects'
 import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
+import { poolerPortShares } from '@/lib/data-plane/pooler-shares'
 
 const OWNER = { success: true, data: { id: 'p1', name: 'shop', region: null, role: 'OWNER', canWrite: true, canAdminister: true } }
 const HOST = 'ap-south-1.db.backenly.com'
@@ -66,13 +67,14 @@ function login(mode: 'READ_ONLY' | 'READ_WRITE', password: string | null, extra:
   }
 }
 
-const POOLED = (credentials: unknown[]) => ({
+const POOLED = (credentials: unknown[], limit = 2) => ({
   schema: 'workspace_p1',
   available: true,
   tenancy: 'dedicated',
   pooler: { host: HOST, sessionPort: 5432, transactionPort: 6543, guidance: GUIDANCE },
   credentials,
-  connectionLimit: 2,
+  connectionLimit: limit,
+  connectionShares: poolerPortShares(limit),
   pendingDriftEvents: 0,
 })
 
@@ -117,9 +119,28 @@ it('shows a session and a transaction string per login, through the pooler, mask
   expect(screen.getByRole('button', { name: 'Copy the session connection string' })).toBeTruthy()
   expect(screen.getByRole('button', { name: 'Copy the transaction connection string' })).toBeTruthy()
   for (const line of GUIDANCE) expect(text).toContain(line)
-  expect(text).toContain('over TLS, with up to 2 connections at once. Every change to a login is recorded')
+  // What the number covers: each port has its own share of it. It used to say
+  // "up to 2 connections at once" and no more, while two sessions closed on
+  // port 5432 locked the same login out of port 6543 for a minute
+  // (production QA, 2026-11-27).
+  expect(text).toContain(
+    'over TLS, with up to 2 connections at once: 1 on port 5432 and 1 on port 6543, so using one port never takes from the other. ' +
+      'Every change to a login is recorded',
+  )
   // Nothing of the retired regional endpoint is left.
   expect(text).not.toMatch(/verify-ca|hostaddr|rds-ca-cloud-regions|Allowed addresses|Allow my address/)
+})
+
+it("says each port's share of a larger plan's connections", async () => {
+  current = POOLED([login('READ_ONLY', RO_PASSWORD)], 5)
+  await renderPanel()
+  expect(pageText()).toContain('with up to 5 connections at once: 2 on port 5432 and 3 on port 6543, so using one port never takes from the other.')
+})
+
+it('promises nothing about the ports for a limit that cannot be shared', async () => {
+  current = POOLED([login('READ_ONLY', RO_PASSWORD)], 1)
+  await renderPanel()
+  expect(pageText()).toContain('over TLS, with up to 1 connection at once. Every change to a login is recorded')
 })
 
 it('says nothing about other projects reading the catalogs: the database is the project’s own', async () => {

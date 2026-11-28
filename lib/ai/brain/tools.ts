@@ -3765,7 +3765,17 @@ export async function dispatchTool(
                   'ask the person to rotate it in Connect → Postgres, which gives it a password that does.',
               ]
             : []),
-          ...(typeof status.connectionLimit === 'number' ? [`Each login may hold ${status.connectionLimit} connections at once on this project's plan.`] : []),
+          ...(typeof status.connectionLimit === 'number'
+            ? [
+                `Each login may hold ${status.connectionLimit} connections at once on this project's plan.` +
+                  // What the number covers through the pooler: each port has its own share of it.
+                  (status.connectionShares &&
+                  status.pooler &&
+                  status.connectionShares.session + status.connectionShares.transaction === status.connectionLimit
+                    ? ` ${status.connectionShares.session} of them on port ${status.pooler.sessionPort} (sessions) and ${status.connectionShares.transaction} on port ${status.pooler.transactionPort} (transactions): using one port never takes from the other, and a second session on port ${status.pooler.sessionPort} beyond its share waits for one to close.`
+                    : ''),
+              ]
+            : []),
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
             : c.schemaChanges === 'allowed'

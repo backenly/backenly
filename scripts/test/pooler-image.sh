@@ -32,6 +32,9 @@
 #   - the two processes really pool differently, and a named prepared
 #     statement survives moving to another server connection in transaction
 #     mode;
+#   - a login the server lets hold 2 connections is never locked out of one
+#     port by what it did on the other, and the server never holds more than
+#     its 2;
 #   - extra_float_digits in options is ignored, search_path in options is
 #     applied, and any other setting in options is refused;
 #   - nothing the containers log contains a secret;
@@ -104,9 +107,11 @@ ABSENT_PW="$(secret)"
 INACTIVE_PW="$(secret)"
 OTHER_PW="$(secret)"
 NEW_PW="$(secret)"
+LIMITED_PW="$(secret)"
 PROJECT_DB="p_$(openssl rand -hex 16)"
 OTHER_DB="p_$(openssl rand -hex 16)"
 NEW_DB="p_$(openssl rand -hex 16)"
+LIMITED_DB="p_$(openssl rand -hex 16)"
 # Stands in for a region's own shared database, which any login may CONNECT to.
 SHARED_DB=backenly_regional
 REFRESH_SECONDS=2
@@ -183,13 +188,13 @@ db() {
 # Verifiers from lib/data-plane/scram.ts, one per line, in this order.
 mapfile -t V < <(
   PW_APP="$APP_PW" PW_AUTH="$AUTH_PW" PW_LOGIN="$LOGIN_PW" PW_ABSENT="$ABSENT_PW" PW_INACTIVE="$INACTIVE_PW" \
-  PW_OTHER="$OTHER_PW" PW_NEW="$NEW_PW" \
+  PW_OTHER="$OTHER_PW" PW_NEW="$NEW_PW" PW_LIMITED="$LIMITED_PW" \
     node_modules/.bin/tsx -e "
       const { scramSha256Verifier } = require('./lib/data-plane/scram');
-      for (const k of ['APP', 'AUTH', 'LOGIN', 'ABSENT', 'INACTIVE', 'OTHER', 'NEW']) console.log(scramSha256Verifier(process.env['PW_' + k]));
+      for (const k of ['APP', 'AUTH', 'LOGIN', 'ABSENT', 'INACTIVE', 'OTHER', 'NEW', 'LIMITED']) console.log(scramSha256Verifier(process.env['PW_' + k]));
     "
 )
-[ "${#V[@]}" -eq 7 ] || { echo "scram.ts did not produce seven verifiers"; exit 1; }
+[ "${#V[@]}" -eq 8 ] || { echo "scram.ts did not produce eight verifiers"; exit 1; }
 
 # An administrator like the RDS master, which is not a superuser.
 db postgres "$SUPER_PW" postgres -c "CREATE ROLE pooler_admin LOGIN CREATEROLE CREATEDB PASSWORD '$ADMIN_PW'"
@@ -201,20 +206,25 @@ CREATE ROLE bkn_ci_absent LOGIN PASSWORD '${V[3]}';
 CREATE ROLE bkn_ci_inactive LOGIN PASSWORD '${V[4]}';
 CREATE ROLE bkn_ci_other LOGIN PASSWORD '${V[5]}';
 CREATE ROLE bkn_ci_new LOGIN PASSWORD '${V[6]}';
+-- The Free plan's login: the server lets it hold 2 connections at once.
+CREATE ROLE bkn_ci_limited LOGIN CONNECTION LIMIT 2 PASSWORD '${V[7]}';
 CREATE DATABASE backenly_pooler;
 -- Created with PostgreSQL's default grants, as a region's shared database
 -- still is: CONNECT for PUBLIC.
 CREATE DATABASE $SHARED_DB;
 CREATE DATABASE $PROJECT_DB;
 CREATE DATABASE $OTHER_DB;
+CREATE DATABASE $LIMITED_DB;
 SQL
 db pooler_admin "$ADMIN_PW" "$PROJECT_DB" <<SQL
 REVOKE ALL ON DATABASE $PROJECT_DB FROM PUBLIC;
 REVOKE ALL ON DATABASE $OTHER_DB FROM PUBLIC;
+REVOKE ALL ON DATABASE $LIMITED_DB FROM PUBLIC;
 -- backenly_app may connect too, so the pooler refusing it is the pooler's doing.
 GRANT CONNECT ON DATABASE $PROJECT_DB TO bkn_ci_login, bkn_ci_absent, bkn_ci_inactive, backenly_app;
 GRANT CREATE ON DATABASE $PROJECT_DB TO bkn_ci_login;
 GRANT CONNECT ON DATABASE $OTHER_DB TO bkn_ci_other;
+GRANT CONNECT ON DATABASE $LIMITED_DB TO bkn_ci_limited;
 SQL
 db bkn_ci_login "$LOGIN_PW" "$PROJECT_DB" -c "CREATE SCHEMA ci_schema"
 db pooler_admin "$ADMIN_PW" backenly_pooler -f tools/managed-db/regional/sql/pooler.sql
@@ -222,7 +232,8 @@ db backenly_app "$APP_PW" backenly_pooler <<SQL
 INSERT INTO backenly_pooler.logins (rolname, verifier, database, active) VALUES
   ('bkn_ci_login', '${V[2]}', '$PROJECT_DB', true),
   ('bkn_ci_inactive', '${V[4]}', '$PROJECT_DB', false),
-  ('bkn_ci_other', '${V[5]}', '$OTHER_DB', true);
+  ('bkn_ci_other', '${V[5]}', '$OTHER_DB', true),
+  ('bkn_ci_limited', '${V[7]}', '$LIMITED_DB', true);
 SQL
 
 # The control: straight to the server, each of these logs in. Whatever the
@@ -462,6 +473,52 @@ out="$(modes "$TRANSACTION_PORT")"
 [ "$out" = '{"samePid":true,"prepared":true,"moved":true}' ] &&
   ok "transaction pooling: server connections are shared between transactions, and prepared statements follow" ||
   fail "transaction pooling: $out"
+
+# ── A login's connections, shared by the two ports ──────────────────────────
+# bkn_ci_limited may hold 2 connections at once on the server, the Free plan's
+# limit, and each pooler takes one of them (services/pooler/entrypoint.sh,
+# pool_share). Each used to take both: two sessions on port 5432 left two idle
+# server connections in that pool once they closed, and the same login was
+# refused on port 6543 until they timed out a minute later (production QA,
+# 2026-11-27).
+echo "a login's connection limit, shared by the two ports"
+# limited PORT SQL: bkn_ci_limited through the pooler.
+limited() { via "$1" bkn_ci_limited "$LIMITED_PW" "$LIMITED_DB" verify-full "$2"; }
+for mode in session transaction; do
+  out="$(docker exec "pooler-$mode-$TAG" grep -c "^$LIMITED_DB = .* pool_size=1 " "/run/pooler/$mode/databases.ini" 2>&1)" || true
+  [ "$out" = 1 ] && ok "$mode pooling sizes the login's pool to its share of the limit, 1 of 2" ||
+    fail "$mode pooling does not give the login's database a pool of 1: $out"
+done
+# Two sessions on port 5432 at the same moment. The pool holds one server
+# connection, so the second runs once the first has ended.
+limited "$SESSION_PORT" 'SELECT pg_sleep(1)' >/dev/null &
+first=$!
+limited "$SESSION_PORT" 'SELECT pg_sleep(1)' >/dev/null &
+second=$!
+if wait "$first" && wait "$second"; then
+  ok "two sessions asked for at once on port $SESSION_PORT both ran"
+else
+  fail "two sessions asked for at once on port $SESSION_PORT did not both run"
+fi
+out="$(limited "$TRANSACTION_PORT" 'SELECT 1')" || true
+[ "$out" = 1 ] && ok "port $TRANSACTION_PORT admits the login straight after its sessions on port $SESSION_PORT closed" ||
+  fail "port $TRANSACTION_PORT refused the login after its sessions on port $SESSION_PORT closed: $out"
+# A session held open on port 5432, as a migration holds one, while the
+# application's port goes on answering.
+limited "$SESSION_PORT" 'SELECT pg_sleep(4)' >/dev/null &
+held=$!
+sleep 1
+out="$(limited "$TRANSACTION_PORT" 'SELECT 1')" || true
+[ "$out" = 1 ] && ok "port $TRANSACTION_PORT answers while a session is held on port $SESSION_PORT" ||
+  fail "port $TRANSACTION_PORT refused the login while a session was held on port $SESSION_PORT: $out"
+held_by_server="$(db pooler_admin "$ADMIN_PW" postgres -c "SELECT count(*) FROM pg_stat_activity WHERE usename = 'bkn_ci_limited'")"
+[ "$held_by_server" -ge 1 ] && [ "$held_by_server" -le 2 ] &&
+  ok "the server holds $held_by_server of the login's 2 connections with both ports in use" ||
+  fail "the server holds $held_by_server connections for a login it lets hold 2"
+wait "$held" || fail "the session held on port $SESSION_PORT did not finish"
+out="$(limited "$SESSION_PORT" 'SELECT 1')" || true
+[ "$out" = 1 ] && ok "port $SESSION_PORT admits the login straight after port $TRANSACTION_PORT was used" ||
+  fail "port $SESSION_PORT refused the login after port $TRANSACTION_PORT was used: $out"
 
 # ── Logs ────────────────────────────────────────────────────────────────────
 echo "logs"
