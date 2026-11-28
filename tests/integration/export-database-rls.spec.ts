@@ -35,6 +35,8 @@ import { Client } from 'pg'
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { GET as exportGET } from '@/app/api/projects/[id]/export/database/route'
+import { activeExports } from '@/lib/services/database-export'
+import { EXPORT_COMPLETE_LINE } from '@/lib/services/export-completion'
 
 const DB_URL = process.env.TEST_DATABASE_URL
 
@@ -97,7 +99,15 @@ async function callExport(mode = 'full') {
   const req = new NextRequest(`http://localhost:3000/api/projects/${projectId}/export/database?mode=${mode}`)
   const res = await exportGET(req)
   const text = await res.text()
-  return { status: res.status, contentType: res.headers.get('content-type') ?? '', text }
+  // The route lets the project be exported again a moment after its answer
+  // has been read: the next request waits for that.
+  for (let i = 0; i < 500 && activeExports() > 0; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+  return {
+    status: res.status,
+    contentType: res.headers.get('content-type') ?? '',
+    contentLength: res.headers.get('content-length'),
+    text,
+  }
 }
 
 beforeAll(async () => {
@@ -154,6 +164,10 @@ describe('with the backup credential configured', () => {
     expect(res.text).toContain('golden-widget') // the COPY data actually made it
     // pg_dump prints this only when it finished; a truncated dump cannot carry it.
     expect(res.text).toContain('PostgreSQL database dump complete')
+    // And the route's own last line, written only after pg_dump exited 0, with
+    // the length of everything it sent.
+    expect(res.text.trimEnd().endsWith(EXPORT_COMPLETE_LINE)).toBe(true)
+    expect(res.contentLength).toBe(String(Buffer.byteLength(res.text)))
   }, 120_000)
 
   it('schema-only still works', async () => {

@@ -56,6 +56,7 @@ import { EDGE, FOCUS, R_CONTROL, WELL } from '@/components/console/tokens'
 import { formatTime } from '@/components/console/format'
 import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import { findRegion, HOME_REGION } from '@/lib/regions'
+import { EXPORT_COMPLETE_TAIL_BYTES, endsWithCompleteExport } from '@/lib/services/export-completion'
 
 type Mode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -121,6 +122,16 @@ type BackupMode = 'full' | 'schema' | 'data'
 function savedName(disposition: string | null): string | null {
   const m = /filename="?([^";]+)"?/i.exec(disposition ?? '')
   return m ? m[1] : null
+}
+
+/** The last bytes of a downloaded file, as text. */
+function tailOf(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('The downloaded file could not be read.'))
+    reader.readAsText(blob.slice(Math.max(0, blob.size - EXPORT_COMPLETE_TAIL_BYTES)))
+  })
 }
 
 /** Hand the browser a file to save, the way a download link does. */
@@ -490,6 +501,11 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
    * `download` saved whatever came back, so a failed export arrived as a file
    * named database.json holding the error, and the page said nothing
    * (production QA re-test, 2026-11-16, N5).
+   *
+   * A large backup starts arriving while pg_dump is still running, and the
+   * server cuts the connection if pg_dump then fails. The body is therefore
+   * read to its end here, and saved only if it ends with the line the server
+   * writes after pg_dump has finished (lib/services/export-completion.ts).
    */
   async function backup(mode: BackupMode) {
     setExporting(mode)
@@ -510,7 +526,15 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
         )
       }
       const name = savedName(res.headers.get('Content-Disposition')) ?? `backup-${mode}.sql`
-      saveFile(await res.blob(), name)
+      const stoppedShort = 'The backup stopped before it was complete. Nothing was saved. Try again.'
+      let file: Blob
+      try {
+        file = await res.blob()
+      } catch {
+        throw new Error(stoppedShort)
+      }
+      if (!endsWithCompleteExport(await tailOf(file))) throw new Error(stoppedShort)
+      saveFile(file, name)
       setBackupNote({ text: `Downloaded ${name}.`, refused: false })
     } catch (err) {
       setBackupNote({ text: err instanceof Error ? err.message : 'The backup did not finish. Nothing was downloaded. Try again.', refused: true })

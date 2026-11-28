@@ -186,8 +186,15 @@ export function getBackupFilename(): string {
  */
 export type BackupTarget = CloudRegionId | { region: CloudRegionId; database: string | null }
 
-/** The target of a project's snapshots: its own database, or its region's. */
-function backupTargetOf(placement: ProjectDatabase): BackupTarget {
+/**
+ * The target of a project's dumps: its own database, or its region's. Every
+ * dump of a project is taken from here, the nightly snapshot and the export an
+ * admin downloads alike (app/api/projects/[id]/export/database/route.ts). The
+ * export once resolved its own target, the region's database, and when every
+ * project was given a database of its own it found no schema to dump and failed
+ * for all of them (production QA, 2026-11-27).
+ */
+export function backupTargetOf(placement: ProjectDatabase): BackupTarget {
   return placement.tenancy === 'dedicated' && placement.database
     ? { region: placement.region, database: placement.database }
     : placement.region
